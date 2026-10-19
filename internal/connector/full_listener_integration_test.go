@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -523,18 +524,20 @@ func startFullListenerProxy(
 		Name: "test",
 		Addr: "127.0.0.1:0",
 		OnCONNECT: connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
-			Negotiator:      connectNeg,
-			BuildCfg:        buildCfg,
-			Scope:           opts.scope,
-			RateLimiter:     opts.rateLimiter,
-			PassthroughList: opts.passthroughList,
-			OnStack:         onStack,
+			Negotiator:       connectNeg,
+			BuildCfg:         buildCfg,
+			Scope:            opts.scope,
+			RateLimiter:      opts.rateLimiter,
+			PassthroughList:  opts.passthroughList,
+			OnStack:          onStack,
+			InnerPeekTimeout: opts.innerPeekTimeout,
 		}),
 		OnSOCKS5: connector.NewSOCKS5Handler(connector.SOCKS5HandlerConfig{
-			Negotiator:      socks5Neg,
-			BuildCfg:        buildCfg,
-			PassthroughList: opts.passthroughList,
-			OnStack:         onStack,
+			Negotiator:       socks5Neg,
+			BuildCfg:         buildCfg,
+			PassthroughList:  opts.passthroughList,
+			OnStack:          onStack,
+			InnerPeekTimeout: opts.innerPeekTimeout,
 		}),
 	}
 
@@ -588,6 +591,10 @@ type fullListenerOpts struct {
 	// USK-1162: optional request-head bound installed on BuildConfig via
 	// SetRequestHeaderTimeout (the request_timeout_ms runtime path).
 	requestHeaderTimeout time.Duration
+
+	// USK-1207: optional inner-peek deadline forwarded to both the
+	// CONNECT and SOCKS5 handlers. Zero keeps DefaultInnerPeekTimeout.
+	innerPeekTimeout time.Duration
 }
 
 // waitSessionDone waits for the WaitGroup with a timeout.
@@ -1770,13 +1777,24 @@ func TestFullListener_CONNECT_BytechunkFallback(t *testing.T) {
 // that completes CONNECT 200 then sends nothing at all is released after
 // the inner-peek deadline (no goroutine leak; no panic). The proxy must
 // not block forever on a silent client.
+//
+// The inner-peek deadline is shortened to 200ms; the client's own read
+// deadline (3s) sits below DefaultInnerPeekTimeout (5s), so a harness or
+// handler that dropped the override fails instead of passing slowly.
 func TestFullListener_CONNECT_PeekTimeoutSilentClient(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	const (
+		innerPeekTimeout = 200 * time.Millisecond
+		clientWait       = 3 * time.Second
+	)
+
 	// We do not need a real upstream — the dispatch should never reach the
 	// dial step on a silent client because the peek times out first.
-	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{})
+	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{
+		innerPeekTimeout: innerPeekTimeout,
+	})
 
 	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
 	if err != nil {
@@ -1802,15 +1820,25 @@ func TestFullListener_CONNECT_PeekTimeoutSilentClient(t *testing.T) {
 		t.Fatalf("unexpected CONNECT response: %q", string(buf[:n]))
 	}
 
-	// Now silently wait. The proxy will peek the inner stream with a
-	// bounded deadline (DefaultInnerPeekTimeout = 5s) and close the conn
-	// when it expires. The client should observe the proxy-side close.
-	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-	_, readErr := conn.Read(buf)
+	// Now silently wait. The proxy will peek the inner stream with the
+	// bounded innerPeekTimeout and close the conn when it expires. The
+	// client should observe the proxy-side close.
+	start := time.Now()
+	conn.SetReadDeadline(start.Add(clientWait))
+	n, readErr := conn.Read(buf)
+	elapsed := time.Since(start)
 	// EOF or connection-closed-by-peer is the expected outcome. A timeout
 	// from our deadline would mean the proxy held the conn open past the
 	// inner-peek deadline — that's the bug.
 	if readErr == nil {
-		t.Errorf("expected EOF after inner-peek timeout; got nil error")
+		t.Fatalf("expected EOF after inner-peek timeout; got %d bytes %q", n, buf[:n])
+	}
+	var ne net.Error
+	if errors.As(readErr, &ne) && ne.Timeout() {
+		t.Fatalf("proxy held the silent client open for %v (client read deadline hit; innerPeekTimeout=%v not honoured?): %v",
+			elapsed, innerPeekTimeout, readErr)
+	}
+	if elapsed >= clientWait {
+		t.Errorf("proxy released the silent client after %v, want < %v", elapsed, clientWait)
 	}
 }

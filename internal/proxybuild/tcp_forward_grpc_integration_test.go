@@ -16,11 +16,11 @@ import (
 	"fmt"
 	"io"
 	"net"
-	gohttp "net/http"
 	"sync"
 	"testing"
 	"time"
 
+	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -388,9 +388,14 @@ func TestProxybuild_TCPForward_GRPC_BidiStreaming(t *testing.T) {
 
 // TestProxybuild_TCPForward_GRPC_FilterRejectsNonGRPC asserts the
 // Protocol="grpc" content-type filter rejects a stream whose
-// content-type is not application/grpc[+suffix]. The reject path records
-// a state="error" Stream tagged with
-// forward_protocol_mismatch=non_grpc_under_grpc_filter.
+// content-type is not application/grpc[+suffix]. The reject is observed
+// on the wire as RST_STREAM(REFUSED_STREAM) and records exactly one
+// Stream tagged forward_protocol_mismatch=non_grpc_under_grpc_filter.
+//
+// A frame-level client is used deliberately: x/net/http2's Transport
+// retries REFUSED_STREAM with backoff (~30s until the client timeout),
+// so a stdlib client neither sees the error code nor fails fast when the
+// proxy hangs.
 func TestProxybuild_TCPForward_GRPC_FilterRejectsNonGRPC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -404,45 +409,30 @@ func TestProxybuild_TCPForward_GRPC_FilterRejectsNonGRPC(t *testing.T) {
 	mgr, fwdAddr, store := startH2ForwardListener(t, ctx, upAddr, "grpc")
 	defer mgr.StopAll(context.Background())
 
-	// Send a plain HTTP/2 (h2c) GET request — content-type will be empty
-	// (or text/plain after stdlib defaults), which the filter rejects.
-	var dialed []net.Conn
-	var mu sync.Mutex
-	cli := h2cForwardClient(fwdAddr, &dialed, &mu)
-	req, _ := gohttp.NewRequestWithContext(ctx, "GET", "http://"+fwdAddr+"/not-grpc", nil)
-	resp, err := cli.Do(req)
-	if err == nil && resp != nil {
-		// The proxy emitted RST_STREAM(REFUSED_STREAM); the stdlib h2
-		// client surfaces that as an error on the response body read.
-		_, rErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		// Either Do or body-read MUST surface an error — successful
-		// response means the filter did not fire.
-		if rErr == nil {
-			t.Errorf("expected RST_STREAM error on non-gRPC stream, got status=%d body read OK", resp.StatusCode)
-		}
+	// A plain h2c GET with no content-type, which the filter rejects.
+	cli := dialRawH2Direct(t, fwdAddr, nil)
+	const streamID = 1
+	cli.sendGETs(t, fwdAddr, streamID)
+	r := cli.collect(t, 5*time.Second, streamID)[streamID]
+	if !r.rst || r.rstCode != http2.ErrCodeRefusedStream || len(r.statuses) != 0 {
+		t.Fatalf("stream %d: rst=%v code=%v statuses=%v ended=%v; want RST_STREAM(REFUSED_STREAM) and no response",
+			streamID, r.rst, r.rstCode, r.statuses, r.ended)
 	}
-	// Drain conn handles so the test does not race the listener teardown.
-	cli.CloseIdleConnections()
-	mu.Lock()
-	dialSnap := append([]net.Conn{}, dialed...)
-	mu.Unlock()
-	closeDialedConns(dialSnap)
 
 	// Wait for the reject Stream to be recorded.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if hasForwardProtocolMismatch(store) {
+		if countForwardProtocolMismatch(store) > 0 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if !hasForwardProtocolMismatch(store) {
+	if got := countForwardProtocolMismatch(store); got != 1 {
 		var dump []string
 		for _, s := range store.Streams() {
 			dump = append(dump, fmt.Sprintf("%s[%s tags=%v]", s.ID, s.State, s.Tags))
 		}
-		t.Errorf("expected a state=error Stream tagged forward_protocol_mismatch, got %v", dump)
+		t.Errorf("got %d Streams tagged forward_protocol_mismatch, want exactly 1; streams=%v", got, dump)
 	}
 }
 
@@ -456,23 +446,23 @@ func hasGRPCStream(store *flowStoreCapture) bool {
 	return false
 }
 
-// hasForwardProtocolMismatch reports whether any recorded Stream is
+// countForwardProtocolMismatch reports how many recorded Streams are
 // tagged with the gRPC-filter reject marker. The tag is appended via
 // UpdateStream.AppendTags, so we also scan StreamUpdates as a fallback
 // (the in-test flowStoreCapture does not merge AppendTags into Stream.Tags).
-func hasForwardProtocolMismatch(store *flowStoreCapture) bool {
+func countForwardProtocolMismatch(store *flowStoreCapture) int {
+	n := 0
 	for _, st := range store.Streams() {
 		if v, ok := st.Tags["forward_protocol_mismatch"]; ok && v == "non_grpc_under_grpc_filter" {
-			return true
+			n++
+			continue
 		}
 		for _, upd := range store.StreamUpdates(st.ID) {
-			if upd.AppendTags == nil {
-				continue
-			}
 			if v := upd.AppendTags["forward_protocol_mismatch"]; v == "non_grpc_under_grpc_filter" {
-				return true
+				n++
+				break
 			}
 		}
 	}
-	return false
+	return n
 }

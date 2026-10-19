@@ -322,7 +322,7 @@ func TestProxybuild_TCPForward_TLS_HTTP2_AlpnMismatch_Rejected(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "application protocol") &&
 		!strings.Contains(strings.ToLower(err.Error()), "no_application_protocol") {
-		t.Logf("handshake error: %v (test still validates the error-stream branch)", err)
+		t.Errorf("handshake error = %v, want no_application_protocol", err)
 	}
 
 	// Wait for the error Stream to land.
