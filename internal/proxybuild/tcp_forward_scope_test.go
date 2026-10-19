@@ -179,3 +179,79 @@ func freePortKey(t *testing.T) string {
 	_, p, _ := net.SplitHostPort(l.Addr().String())
 	return p
 }
+
+// TestTCPForwardScopeCheck_NonNumericPortFailsClosed (USK-1161 review
+// S-1): net.Dial resolves a service name as the port ("postgresql" →
+// 5432), so a target whose port is not a decimal 1..65535 must not be
+// checked as port 0 — that would slip past a port-scoped deny while the
+// dialer still reaches the denied port. With rules present the gate
+// fails closed; a rule-less scope still admits.
+func TestTCPForwardScopeCheck_NonNumericPortFailsClosed(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules(nil, []connector.TargetRule{{Hostname: "db.internal", Ports: []int{5432}}})
+	for _, target := range []string{
+		"db.internal:postgresql",
+		"db.internal:https",
+		"db.internal:+5432",
+		"db.internal:0",
+		"db.internal:65536",
+		"db.internal:",
+		"db.internal",
+	} {
+		allowed, reason := tcpForwardScopeCheck(scope, target, false)
+		if allowed {
+			t.Errorf("tcpForwardScopeCheck(%q) admitted under a port-scoped deny, want fail-closed", target)
+			continue
+		}
+		if reason == "" {
+			t.Errorf("tcpForwardScopeCheck(%q) denied without a reason", target)
+		}
+	}
+	if ok, reason := tcpForwardScopeCheck(scope, "db.internal:05433", false); !ok {
+		t.Errorf("decimal port 05433 (=5433) denied by a port-5432 rule: %s", reason)
+	}
+	if ok, _ := tcpForwardScopeCheck(connector.NewTargetScope(), "db.internal:postgresql", false); !ok {
+		t.Error("rule-less scope blocked a service-name target")
+	}
+}
+
+// TestStartTCPForwards_NonNumericTargetPortRejected (USK-1161 review
+// S-1): a forward whose target port is not a decimal 1..65535 is refused
+// at start — under a port-scoped deny and with no scope at all — and
+// binds nothing, so the dialer never resolves a service-name port.
+func TestStartTCPForwards_NonNumericTargetPortRejected(t *testing.T) {
+	scoped := connector.NewTargetScope()
+	scoped.SetPolicyRules(nil, []connector.TargetRule{{Hostname: "127.0.0.1", Ports: []int{5432}}})
+	for _, tc := range []struct {
+		name  string
+		scope *connector.TargetScope
+	}{
+		{"port-scoped deny", scoped},
+		{"no scope", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			mgr := newScopedTestManager(t, tc.scope)
+			if err := mgr.Start(ctx, "127.0.0.1:0"); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			defer mgr.StopAll(context.Background())
+
+			const target = "127.0.0.1:postgresql"
+			port := freePortKey(t)
+			err := mgr.StartTCPForwards(ctx, TCPForwardParams{Forwards: map[string]*config.ForwardConfig{
+				port: {Target: target, Protocol: "raw"},
+			}})
+			if err == nil {
+				t.Fatalf("StartTCPForwards(target %q) = nil, want an error", target)
+			}
+			if msg := err.Error(); !strings.Contains(msg, target) || !strings.Contains(msg, port) {
+				t.Errorf("error %q does not name the target %q and the port %s", msg, target, port)
+			}
+			if addrs := mgr.TCPForwardAddrs(); len(addrs) != 0 {
+				t.Errorf("TCPForwardAddrs = %v after rejected start, want none", addrs)
+			}
+		})
+	}
+}
