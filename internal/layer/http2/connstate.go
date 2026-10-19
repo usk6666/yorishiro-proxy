@@ -494,7 +494,16 @@ func (c *Conn) HandleWindowUpdate(f *frame.Frame) error {
 	if f.Header.StreamID == 0 {
 		return c.IncrementSendWindow(inc)
 	}
-	return c.streams.IncrementSendWindow(f.Header.StreamID, inc)
+	if err := c.streams.IncrementSendWindow(f.Header.StreamID, inc); err != nil {
+		// RFC 9113 §5.1 ("closed") / §6.9: WINDOW_UPDATE can arrive for a
+		// short period after a stream closed; it is ignored. Closed streams
+		// have no entry (USK-1144), which is what made the increment fail.
+		if c.streams.IsClosed(f.Header.StreamID) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // HandleRSTStream processes a received RST_STREAM frame.
@@ -515,7 +524,12 @@ func (c *Conn) HandleRSTStream(f *frame.Frame) (uint32, error) {
 	}
 
 	// RST_STREAM on an idle (unknown) stream is a connection error per RFC 9113 Section 6.4.
+	// A closed stream has no entry either (USK-1144); RST_STREAM on it is
+	// permitted (RFC 9113 §5.1 "closed") and needs no transition.
 	stream := c.streams.Get(f.Header.StreamID)
+	if stream == nil && c.streams.IsClosed(f.Header.StreamID) {
+		return errCode, nil
+	}
 	if stream == nil {
 		return 0, &ConnError{
 			Code:   ErrCodeProtocol,
@@ -523,10 +537,13 @@ func (c *Conn) HandleRSTStream(f *frame.Frame) (uint32, error) {
 		}
 	}
 
-	if transErr := c.streams.Transition(f.Header.StreamID, EventRecvRST); transErr != nil {
+	// TransitionExisting, not Transition: the writer goroutine may retire
+	// the stream between the Get above and here, and an absent stream must
+	// not be re-created as idle.
+	if closed, transErr := c.streams.TransitionExisting(f.Header.StreamID, EventRecvRST); transErr != nil {
 		// Per RFC 9113, RST_STREAM on a closed stream should be ignored
 		// to handle race conditions.
-		if stream.State == StateClosed {
+		if closed {
 			return errCode, nil
 		}
 		return 0, transErr

@@ -71,6 +71,13 @@ type channel struct {
 	// error via markTerminated without being shadowed by an io.EOF stamp.
 	recvClosed atomic.Bool
 
+	// closedLocal is set by closeStream (Close / CloseRefused) after the
+	// channel is terminated. Together with the stream being closed on the
+	// wire it lets the channel leave l.channels (USK-1176): whichever of
+	// closeStream (releaseClosedChannel) and the reader's stream cleanup
+	// (cleanupRetired) observes the other's side second removes it.
+	closedLocal atomic.Bool
+
 	mu       sync.Mutex
 	sequence int
 	// headersHas is set, under mu and before the frame is handed to the
@@ -695,6 +702,10 @@ func (c *channel) closeStream(refused bool) {
 		// stuck mid-send holding recvMu.
 		c.markTerminated(io.EOF)
 		c.layer.closeChannelRecv(c)
+		// Terminated, so failStream / broadcastShutdown no longer need to
+		// reach it: drop it from l.channels once the stream is closed.
+		c.closedLocal.Store(true)
+		c.layer.releaseClosedChannel(c)
 	})
 }
 

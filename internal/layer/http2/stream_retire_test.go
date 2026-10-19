@@ -497,3 +497,90 @@ func TestLayer_ClientRole_LateHeadersAfterLocalResetKeepsHPACKInSync(t *testing.
 		t.Errorf("stream %d response headers = %v, want x-usk1144: dynamic-table-entry (HPACK desync after late HEADERS)", sid2, evt.Headers)
 	}
 }
+
+// TestLayer_ServerRole_RefusedStreamKeepsHPACKInSync pins that the header
+// block of a stream refused for exceeding MAX_CONCURRENT_STREAMS is still
+// HPACK-decoded (RFC 9113 §4.3), and that a later frame on the refused id is
+// handled as a frame on a closed stream (the refusal closes it, §5.1).
+func TestLayer_ServerRole_RefusedStreamKeepsHPACKInSync(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t, WithMaxConcurrentStreams(1))
+	defer cleanup()
+	peer.consumePeerSettings(t)
+	peer.sendInitialSettings(t)
+
+	reqFields := append(append([]hpack.HeaderField(nil), usk1144RequestFields...),
+		hpack.HeaderField{Name: "x-usk1144", Value: "dynamic-table-entry"})
+
+	// Stream 1 stays open (no END_STREAM) so stream 3 exceeds the limit.
+	if err := peer.wr.WriteHeaders(1, false, true, peer.encoder.Encode(reqFields)); err != nil {
+		t.Fatalf("write HEADERS stream 1: %v", err)
+	}
+	ch1 := acceptChannel(t, l)
+	if _, err := nextWithin(ch1, 2*time.Second); err != nil {
+		t.Fatalf("stream 1 Next: %v", err)
+	}
+
+	// The refused block adds a second dynamic-table entry the next block
+	// references.
+	refused := append(append([]hpack.HeaderField(nil), reqFields...),
+		hpack.HeaderField{Name: "x-usk1144-refused", Value: "second-entry"})
+	if err := peer.wr.WriteHeaders(3, true, true, peer.encoder.Encode(refused)); err != nil {
+		t.Fatalf("write HEADERS stream 3: %v", err)
+	}
+	_ = peer.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	rst := drainUntil(t, peer, frame.TypeRSTStream)
+	_ = peer.conn.SetReadDeadline(time.Time{})
+	if code, _ := rst.RSTStreamErrorCode(); rst.Header.StreamID != 3 || code != ErrCodeRefusedStream {
+		t.Fatalf("got RST_STREAM(%s) on stream %d, want REFUSED_STREAM on 3", ErrCodeString(code), rst.Header.StreamID)
+	}
+	// A late frame on the refused (closed) stream is ignored.
+	if err := peer.wr.WriteRSTStream(3, ErrCodeCancel); err != nil {
+		t.Fatalf("write RST_STREAM stream 3: %v", err)
+	}
+
+	// Finish stream 1 so stream 5 fits under the limit.
+	if err := peer.wr.WriteData(1, true, nil); err != nil {
+		t.Fatalf("write END_STREAM stream 1: %v", err)
+	}
+	_, _ = nextWithin(ch1, 2*time.Second)
+	sendErr := make(chan error, 1)
+	go func() {
+		sendErr <- ch1.Send(context.Background(), &envelope.Envelope{
+			Direction: envelope.Receive,
+			Message:   &H2HeadersEvent{Status: 200, EndStream: true},
+		})
+	}()
+	_ = peer.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	drainUntil(t, peer, frame.TypeHeaders)
+	_ = peer.conn.SetReadDeadline(time.Time{})
+	if err := <-sendErr; err != nil {
+		t.Fatalf("stream 1 response: %v", err)
+	}
+	_ = ch1.Close()
+	if !waitFor(time.Second, func() bool { return l.conn.Streams().ActiveCount() == 0 }) {
+		t.Fatalf("stream 1 not retired: ActiveCount=%d", l.conn.Streams().ActiveCount())
+	}
+
+	if err := peer.wr.WriteHeaders(5, true, true, peer.encoder.Encode(refused)); err != nil {
+		t.Fatalf("write HEADERS stream 5: %v", err)
+	}
+	ch5 := acceptChannel(t, l)
+	defer ch5.Close()
+	env, err := nextWithin(ch5, 2*time.Second)
+	if err != nil {
+		t.Fatalf("stream 5 Next: %v (connection dropped after refused stream?)", err)
+	}
+	evt, ok := env.Message.(*H2HeadersEvent)
+	if !ok {
+		t.Fatalf("Message = %T, want *H2HeadersEvent", env.Message)
+	}
+	found := false
+	for _, kv := range evt.Headers {
+		if kv.Name == "x-usk1144-refused" && kv.Value == "second-entry" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("stream 5 headers = %v, want x-usk1144-refused: second-entry (HPACK desync after refused stream)", evt.Headers)
+	}
+}

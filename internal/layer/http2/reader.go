@@ -27,6 +27,10 @@ func (l *Layer) readerLoop() {
 			return
 		}
 
+		// Clean up streams the writer closed since the last frame, so a
+		// frame on one of them is handled as a frame on a closed stream.
+		l.drainRetired()
+
 		// Connection-level frame dispatch (stream ID 0).
 		if f.Header.StreamID == 0 {
 			if err := l.handleConnFrame(f); err != nil {
@@ -216,12 +220,22 @@ func (l *Layer) handleStreamHeaders(f *frame.Frame) error {
 	endHeaders := f.Header.Flags.Has(frame.FlagEndHeaders)
 	endStream := f.Header.Flags.Has(frame.FlagEndStream)
 
-	// S-2 guard: refuse new peer-initiated streams beyond our advertised
-	// MAX_CONCURRENT_STREAMS so a malicious peer can't force unbounded
-	// allocation by opening 1, 3, 5, ... ad infinitum.
-	if l.isNewPeerStream(f.Header.StreamID) && l.peerStreamLimitExceeded() {
-		l.enqueueWrite(writeRequest{rst: &writeRST{streamID: f.Header.StreamID, code: ErrCodeRefusedStream}})
-		return nil
+	if l.isNewPeerStream(f.Header.StreamID) {
+		if l.conn.Streams().IsClosed(f.Header.StreamID) {
+			return l.handleHeadersOnClosedStream(f.Header.StreamID, fragment, endHeaders)
+		}
+		// S-2 guard: refuse new peer-initiated streams beyond our
+		// advertised MAX_CONCURRENT_STREAMS so a malicious peer can't
+		// force unbounded allocation by opening 1, 3, 5, ... ad infinitum.
+		// The refused stream is closed (RFC 9113 §5.1) but gets no entry:
+		// MarkSeen alone makes later frames on it closed-stream frames.
+		// Its header block is still decoded so the HPACK dynamic table
+		// stays in sync (RFC 9113 §4.3).
+		if l.peerStreamLimitExceeded() {
+			l.conn.Streams().MarkSeen(f.Header.StreamID)
+			l.enqueueWrite(writeRequest{rst: &writeRST{streamID: f.Header.StreamID, code: ErrCodeRefusedStream}})
+			return l.discardHeaderFragment(f.Header.StreamID, fragment, endHeaders)
+		}
 	}
 
 	asm, ch, isNew := l.assemblerFor(f.Header.StreamID, true)
@@ -234,7 +248,7 @@ func (l *Layer) handleStreamHeaders(f *frame.Frame) error {
 			l.emitChannel(ch)
 		}
 	}
-	l.updatePendingHeaderStream(f.Header.StreamID, endHeaders)
+	l.updatePendingHeaderStream(asm, endHeaders)
 
 	direction := l.headerDirection(asm)
 	env, blockEndStream, err := asm.handleHeadersFrame(fragment, endHeaders, endStream, l.decoder, direction)
@@ -257,17 +271,43 @@ func (l *Layer) finishHeaderFrame(streamID uint32, ch *channel, asm *eventAssemb
 		l.deliverEnvelope(ch, env, asm)
 	}
 	if blockEndStream {
-		_ = l.conn.Streams().Transition(streamID, EventRecvEndStream)
+		l.retireOnRecv(streamID, EventRecvEndStream)
 	}
 }
 
+// handleHeadersOnClosedStream handles a HEADERS frame on a stream that has
+// closed and been retired (USK-1144).
+//
+// A peer-initiated id: the peer is reusing a stream id, which RFC 9113
+// §5.1.1 makes a connection error PROTOCOL_ERROR — it must never open a new
+// stream.
+//
+// A locally initiated id: the stream closed because this endpoint reset it
+// (or the peer is misbehaving after END_STREAM); the peer may already have
+// queued its response, which RFC 9113 §5.1 says to ignore. The header block
+// is still decoded so the HPACK dynamic table stays in sync (§4.3).
+func (l *Layer) handleHeadersOnClosedStream(streamID uint32, fragment []byte, endHeaders bool) error {
+	if !l.isLocallyInitiated(streamID) {
+		return &ConnError{
+			Code:   ErrCodeProtocol,
+			Reason: fmt.Sprintf("HEADERS on closed stream %d", streamID),
+		}
+	}
+	return l.discardHeaderFragment(streamID, fragment, endHeaders)
+}
+
 // updatePendingHeaderStream tracks which stream is mid-CONTINUATION so a
-// subsequent CONTINUATION frame can be routed correctly.
-func (l *Layer) updatePendingHeaderStream(streamID uint32, endHeaders bool) {
+// subsequent CONTINUATION frame can be routed correctly. pendingAsm keeps
+// the assembler collecting the block reachable even if the stream is retired
+// (USK-1144) before the block completes, so every fragment still reaches
+// the HPACK decoder.
+func (l *Layer) updatePendingHeaderStream(asm *eventAssembler, endHeaders bool) {
 	if !endHeaders {
-		l.pendingHeaderStream = streamID
+		l.pendingHeaderStream = asm.streamID
+		l.pendingAsm = asm
 	} else {
 		l.pendingHeaderStream = 0
+		l.pendingAsm = nil
 	}
 }
 
@@ -299,7 +339,18 @@ func (l *Layer) handleStreamContinuation(f *frame.Frame) error {
 	}
 	endHeaders := f.Header.Flags.Has(frame.FlagEndHeaders)
 
+	// A block being decoded only for HPACK sync (refused or closed stream).
+	if l.discard != nil && l.discard.streamID == f.Header.StreamID {
+		return l.discardHeaderFragment(f.Header.StreamID, fragment, endHeaders)
+	}
+
 	asm, ch, _ := l.assemblerFor(f.Header.StreamID, false)
+	if asm == nil && l.pendingAsm != nil && l.pendingAsm.streamID == f.Header.StreamID {
+		// The stream was retired mid-block; finish decoding the block. Its
+		// Channel is terminated (only a reset can close a stream whose
+		// peer is still sending headers), so the event is dropped.
+		asm, ch = l.pendingAsm, l.pendingAsm.channel
+	}
 	if asm == nil {
 		return nil
 	}
@@ -320,6 +371,7 @@ func (l *Layer) handleStreamContinuation(f *frame.Frame) error {
 	}
 	if endHeaders {
 		l.pendingHeaderStream = 0
+		l.pendingAsm = nil
 	}
 	l.finishHeaderFrame(f.Header.StreamID, ch, asm, env, blockEndStream)
 	return nil
@@ -339,12 +391,22 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 			return err
 		}
 		if err := l.conn.Streams().ConsumeRecvWindow(f.Header.StreamID, int32(f.Header.Length)); err != nil {
+			// DATA on a closed stream (USK-1144): typically frames the
+			// peer sent before it saw our RST_STREAM, which RFC 9113 §5.1
+			// says to ignore. It still counted against the connection
+			// window (§6.9), so give that back.
+			if l.conn.Streams().IsClosed(f.Header.StreamID) {
+				l.connWindowUpdate(f.Header.Length)
+				return nil
+			}
 			return err
 		}
 	}
 
 	asm, ch, _ := l.assemblerFor(f.Header.StreamID, false)
 	if asm == nil {
+		// The stream closed between the window accounting and here.
+		l.connWindowUpdate(f.Header.Length)
 		return nil
 	}
 
@@ -364,9 +426,6 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 	if env != nil {
 		l.deliverEnvelope(ch, env, asm)
 	}
-	if endStream {
-		_ = l.conn.Streams().Transition(f.Header.StreamID, EventRecvEndStream)
-	}
 	// Close the Channel's recv side if the assembler has reached terminal
 	// state. deliverEnvelope already closes recv via its own isDone check on
 	// the terminal path; this is a safe idempotent backstop because
@@ -375,14 +434,36 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 		ch.markRecvEnded()
 		l.closeChannelRecv(ch)
 	}
+	if endStream {
+		l.retireOnRecv(f.Header.StreamID, EventRecvEndStream)
+	}
 	return nil
 }
 
+// connWindowUpdate enqueues a connection-level WINDOW_UPDATE for n bytes of
+// DATA that will not be delivered to any stream. No-op for n == 0.
+func (l *Layer) connWindowUpdate(n uint32) {
+	if n == 0 {
+		return
+	}
+	l.enqueueWrite(writeRequest{windowUpdate: &writeWindowUpdate{streamID: 0, increment: n}})
+}
+
 func (l *Layer) handleStreamRST(f *frame.Frame) error {
+	streamID := f.Header.StreamID
+	known := l.conn.Streams().Get(streamID) != nil
 	code, err := l.conn.HandleRSTStream(f)
 	if err != nil {
 		return err
 	}
+	if !known {
+		// RST_STREAM on a stream that already closed (USK-1144): permitted
+		// and ignored (RFC 9113 §5.1 "closed"). HandleRSTStream has already
+		// rejected one on an idle stream.
+		return nil
+	}
+	// The stream is closed now; retire it after the Channel is notified.
+	defer l.retireAfterRecvRST(streamID)
 	// RFC 9113 §5.4.2: RST_STREAM(NO_ERROR) signals the peer no longer
 	// needs the stream — graceful cleanup, not a failure. Go's net/http2
 	// server emits it after a handler returns without draining the request
@@ -752,8 +833,9 @@ func (l *Layer) envelopeContextWithTime() envelope.EnvelopeContext {
 	return c
 }
 
-// isNewPeerStream reports whether streamID corresponds to a peer-initiated
-// stream that we have not yet seen on this connection.
+// isNewPeerStream reports whether streamID has no assembler: a stream not
+// yet seen on this connection, or one that has closed and been retired
+// (USK-1144; the caller tells the two apart with StreamMap.IsClosed).
 func (l *Layer) isNewPeerStream(streamID uint32) bool {
 	if streamID == 0 {
 		return false

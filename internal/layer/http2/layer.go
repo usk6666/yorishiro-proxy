@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -267,6 +268,25 @@ type Layer struct {
 	closeChannelOutOnce sync.Once
 
 	pendingHeaderStream uint32
+	// pendingAsm is the assembler collecting the header block of
+	// pendingHeaderStream (nil when no block is open or the block is being
+	// discarded). Reader goroutine only.
+	pendingAsm *eventAssembler
+
+	// discard is the reader goroutine's state for a header block it decodes
+	// only to keep the HPACK dynamic table in sync and then drops (a
+	// refused stream, or a stream this endpoint already closed). Reader
+	// goroutine only. See discardHeaderFragment.
+	discard *headerDiscard
+
+	// retired holds ids of streams the writer goroutine closed (sent
+	// END_STREAM or RST_STREAM) whose reader-owned state (l.assemblers) and
+	// l.channels entry the reader still has to clean up (USK-1144).
+	// Guarded by retireMu, a leaf lock; retirePending mirrors
+	// len(retired) > 0 so the reader's per-frame check is one atomic load.
+	retireMu      sync.Mutex
+	retired       []uint32
+	retirePending atomic.Bool
 
 	writerQueue chan writeRequest
 	writerDone  chan struct{}

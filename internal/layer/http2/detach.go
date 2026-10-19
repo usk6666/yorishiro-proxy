@@ -276,7 +276,7 @@ func (c *channel) forwardDetachEnvelope(pw *io.PipeWriter, env *envelope.Envelop
 // closeDetached terminates the per-stream framing. Idempotent: subsequent
 // calls are no-ops. Closes the pipe writer (which surfaces io.EOF to the
 // consumer reader) and runs the standard channel close path (which emits
-// RST_STREAM(NO_ERROR) when neither half has been END_STREAM'd locally).
+// RST_STREAM(CANCEL) unless both halves have ended).
 func (c *channel) closeDetached() error {
 	c.detachCloseOnce.Do(func() {
 		// Close the pipe writer first so any in-flight Write from the
@@ -284,9 +284,10 @@ func (c *channel) closeDetached() error {
 		if c.detachWriter != nil {
 			_ = c.detachWriter.Close()
 		}
-		// Run the standard channel close path so the layer maps clean up,
-		// state-machine transitions fire, and (when needed) RST_STREAM
-		// goes on the wire. Idempotent via channel.closeSendOnce.
+		// Run the standard channel close path so RST_STREAM goes on the
+		// wire when needed and the channel leaves the layer maps once the
+		// stream has closed (USK-1144). Idempotent via
+		// channel.closeSendOnce.
 		_ = c.Close()
 	})
 	return nil
@@ -389,9 +390,8 @@ func (w *detachWriter) Close() error {
 	w.channel.mu.Lock()
 	w.channel.sentEndStream = true
 	w.channel.mu.Unlock()
-	// Best-effort state-machine transition; ignore error (the connection
-	// may already be torn down by the time the local half-close lands).
-	_ = w.layer.conn.Streams().Transition(w.streamID, EventSendEndStream)
+	// The writer goroutine applied the send-side END_STREAM transition when
+	// it wrote the frame (USK-1144), so there is no transition here.
 	return nil
 }
 
