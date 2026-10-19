@@ -1217,11 +1217,17 @@ func TestSend_PassthroughStartRaw(t *testing.T) {
 		dir  envelope.Direction
 		ct   string
 		raw  []byte
+		// cleanEnd sends an End without the malformed-body anomaly, so the
+		// "passthrough" branch of shouldEmbedTrailer alone must keep the
+		// Receive side from appending a re-encoded trailer frame.
+		cleanEnd bool
 	}{
-		{"request binary", RoleClient, envelope.Send, "application/grpc-web+proto", binaryBody},
-		{"request text", RoleClient, envelope.Send, "application/grpc-web-text+proto", textBody},
-		{"response binary", RoleServer, envelope.Receive, "application/grpc-web+proto", binaryBody},
-		{"response text", RoleServer, envelope.Receive, "application/grpc-web-text+proto", textBody},
+		{"request binary", RoleClient, envelope.Send, "application/grpc-web+proto", binaryBody, false},
+		{"request text", RoleClient, envelope.Send, "application/grpc-web-text+proto", textBody, false},
+		{"response binary", RoleServer, envelope.Receive, "application/grpc-web+proto", binaryBody, false},
+		{"response text", RoleServer, envelope.Receive, "application/grpc-web-text+proto", textBody, false},
+		{"response binary clean end", RoleServer, envelope.Receive, "application/grpc-web+proto", binaryBody, true},
+		{"response text clean end", RoleServer, envelope.Receive, "application/grpc-web-text+proto", textBody, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1236,9 +1242,13 @@ func TestSend_PassthroughStartRaw(t *testing.T) {
 					Anomalies: []envelope.Anomaly{{Type: envelope.AnomalyMalformedGRPCWebLPM}},
 				},
 			}
-			end := &envelope.Envelope{StreamID: "s-pt", Direction: tt.dir, Message: &envelope.GRPCEndMessage{
+			endMsg := &envelope.GRPCEndMessage{
 				Anomalies: []envelope.Anomaly{{Type: envelope.AnomalyMalformedGRPCWebLPM}},
-			}}
+			}
+			if tt.cleanEnd {
+				endMsg = &envelope.GRPCEndMessage{}
+			}
+			end := &envelope.Envelope{StreamID: "s-pt", Direction: tt.dir, Message: endMsg}
 			hm := sendAll(t, ch, mock, start, end)
 			if !bytes.Equal(hm.Body, tt.raw) {
 				t.Errorf("Body = %q, want verbatim %q", hm.Body, tt.raw)

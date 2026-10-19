@@ -4,11 +4,13 @@ package grpcweb_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/layer/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 )
@@ -21,11 +23,18 @@ import (
 // through the proxy and returns whatever the client read until close.
 func sendRawGRPCWebHTTP1Request(t *testing.T, proxyAddr, target, contentType string, body []byte) []byte {
 	t.Helper()
+	return sendRawGRPCWebHTTP1RequestWithHeaders(t, proxyAddr, target, contentType, "", body)
+}
+
+// sendRawGRPCWebHTTP1RequestWithHeaders is sendRawGRPCWebHTTP1Request with
+// extra header lines (each terminated by CRLF) inserted before Content-Length.
+func sendRawGRPCWebHTTP1RequestWithHeaders(t *testing.T, proxyAddr, target, contentType, extra string, body []byte) []byte {
+	t.Helper()
 	tlsConn := connectThroughProxy(t, proxyAddr, target, nil)
 	defer tlsConn.Close()
 	req := fmt.Sprintf(
-		"POST /pkg.Echo/Say HTTP/1.1\r\nHost: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-		target, contentType, len(body))
+		"POST /pkg.Echo/Say HTTP/1.1\r\nHost: %s\r\nContent-Type: %s\r\n%sContent-Length: %d\r\nConnection: close\r\n\r\n",
+		target, contentType, extra, len(body))
 	if _, err := tlsConn.Write(append([]byte(req), body...)); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
@@ -76,42 +85,58 @@ func TestGRPCWeb_MalformedRequestWithStartTransformForwardedVerbatim(t *testing.
 	}
 }
 
-// TestGRPCWeb_MalformedRequestBlockedBySafety — S-1: a valid LPM frame
+// TestGRPCWeb_MalformedRequestBlockedBySafety — S-1 / S-4: a valid LPM frame
 // carrying a destructive SQL payload followed by one stray byte fails LPM
 // parsing, so no GRPCDataMessage is emitted. The Input SafetyFilter must
-// still evaluate the passthrough body and keep it from reaching upstream.
+// still evaluate the passthrough body — including a gzip-compressed frame
+// under grpc-encoding: gzip — and keep it from reaching upstream.
 func TestGRPCWeb_MalformedRequestBlockedBySafety(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	sql := []byte("DROP TABLE users")
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	_, _ = zw.Write(sql)
+	_ = zw.Close()
 
-	payload := []byte("DROP TABLE users")
-	body := append([]byte{0x00, 0x00, 0x00, 0x00, byte(len(payload))}, payload...)
-	body = append(body, 0x00)
-
-	upstreamLn, captured := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
-		return buildGRPCWebResponseHTTP([]byte("ack"), 0, "OK", false)
-	})
-	defer upstreamLn.Close()
-	target := upstreamLn.Addr().String()
-
-	safety := grpcrules.NewSafetyEngine()
-	if err := safety.LoadPreset(common.PresetDestructiveSQL); err != nil {
-		t.Fatalf("load preset: %v", err)
+	tests := []struct {
+		name  string
+		extra string
+		frame []byte
+	}{
+		{"plain frame", "", grpcweb.EncodeFrame(false, false, sql)},
+		{"gzip frame", "grpc-encoding: gzip\r\n", grpcweb.EncodeFrame(false, true, gz.Bytes())},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			body := append(append([]byte(nil), tt.frame...), 0x00) // stray byte
 
-	proxyAddr, _, _, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{safetyEngine: safety})
-	_ = sendRawGRPCWebHTTP1Request(t, proxyAddr, target, "application/grpc-web+proto", body)
+			upstreamLn, captured := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+				return buildGRPCWebResponseHTTP([]byte("ack"), 0, "OK", false)
+			})
+			defer upstreamLn.Close()
+			target := upstreamLn.Addr().String()
 
-	select {
-	case <-sessionDone:
-	case <-time.After(15 * time.Second):
-		t.Fatal("timeout waiting for session to complete")
-	}
+			safety := grpcrules.NewSafetyEngine()
+			if err := safety.LoadPreset(common.PresetDestructiveSQL); err != nil {
+				t.Fatalf("load preset: %v", err)
+			}
 
-	upstreamLn.Close()
-	for i, r := range captured() {
-		if bytes.Contains(r, payload) {
-			t.Errorf("upstream request %d carries the blocked payload: %q", i, r)
-		}
+			proxyAddr, _, _, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{safetyEngine: safety})
+			_ = sendRawGRPCWebHTTP1RequestWithHeaders(t, proxyAddr, target, "application/grpc-web+proto", tt.extra, body)
+
+			select {
+			case <-sessionDone:
+			case <-time.After(15 * time.Second):
+				t.Fatal("timeout waiting for session to complete")
+			}
+
+			upstreamLn.Close()
+			for i, r := range captured() {
+				if bytes.Contains(r, tt.frame) {
+					t.Errorf("upstream request %d carries the blocked frame: %q", i, r)
+				}
+			}
+		})
 	}
 }
