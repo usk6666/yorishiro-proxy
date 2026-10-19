@@ -75,7 +75,8 @@ func tcpForwardScheme(upstreamTLS bool) string {
 // target that tcpForwardTargetHostPort rejects fails closed: net.Dial
 // resolves a service-name port ("postgresql" → 5432), so checking it as
 // port 0 would slip past a port-scoped deny (USK-1161 review S-1).
-func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamTLS bool) (allowed bool, reason string) {
+func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamTLS bool, protocol string) (allowed bool, reason string) {
+	_ = protocol
 	if scope == nil || !scope.HasRules() {
 		return true, ""
 	}
@@ -92,6 +93,14 @@ func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamT
 // rejected, so the port the scope checks is the port the dialer connects to.
 func tcpForwardTargetHostPort(target string) (string, int, error) {
 	return connector.SplitTargetHostPort(target)
+}
+
+// tcpForwardProtocol returns the forward's declared protocol ("" = auto).
+func tcpForwardProtocol(fc *config.ForwardConfig) string {
+	if fc == nil {
+		return ""
+	}
+	return fc.Protocol
 }
 
 // tcpForwardUpstreamTLS reports the forward's upstream_tls axis.
@@ -121,7 +130,7 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		"via", tcpForwardScopeVia,
 	)
 
-	if allowed, reason := tcpForwardScopeCheck(scope, entry.target, upstreamTLS); !allowed {
+	if allowed, reason := tcpForwardScopeCheck(scope, entry.target, upstreamTLS, tcpForwardProtocol(entry.fc)); !allowed {
 		logger.Info("tcp forward target blocked by scope", "reason", reason)
 		rejectTCPForwardConn(entry, conn, logger)
 		return ctx, func() {}, false
@@ -138,7 +147,7 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		Via:      tcpForwardScopeVia,
 		Target:   entry.target,
 		Admit: func() (bool, string) {
-			return tcpForwardScopeCheck(scope, entry.target, upstreamTLS)
+			return tcpForwardScopeCheck(scope, entry.target, upstreamTLS, tcpForwardProtocol(entry.fc))
 		},
 	})
 	if err != nil {

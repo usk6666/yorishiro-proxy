@@ -160,6 +160,12 @@ func (s *TargetScope) CheckTarget(scheme, hostname string, port int, path string
 	return true, ""
 }
 
+// CheckHost is the path-unknown form of CheckTarget (USK-1130). Not yet implemented.
+func (s *TargetScope) CheckHost(scheme, hostname string, port int) (allowed, pathPending bool, reason string) {
+	allowed, reason = s.CheckTarget(scheme, hostname, port, "")
+	return allowed, false, reason
+}
+
 // CheckURL is a convenience method that extracts scheme, hostname, port, and
 // path from a parsed URL and delegates to CheckTarget.
 func (s *TargetScope) CheckURL(u *url.URL) (allowed bool, reason string) {

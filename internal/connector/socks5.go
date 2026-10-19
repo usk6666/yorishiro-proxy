@@ -180,6 +180,11 @@ type SOCKS5Negotiator struct {
 	// sent. Nil disables the check.
 	Scope *TargetScope
 
+	// OpaqueRoute reports whether a tunnel to target takes a route on
+	// which no HTTP request path is ever observed (USK-1130). Not yet
+	// implemented.
+	OpaqueRoute func(target string) bool
+
 	// RateLimiter is consulted before the SOCKS5 reply is sent. Nil
 	// disables rate limiting.
 	RateLimiter *RateLimiter

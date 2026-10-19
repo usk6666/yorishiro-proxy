@@ -330,6 +330,12 @@ func connectScopeCheck(scope *TargetScope, target string) (allowed bool, reason 
 	return allowed, reason, nil
 }
 
+// TunnelRouteOpaque reports whether a CONNECT / SOCKS5 tunnel to target
+// never yields an HTTP request path (USK-1130). Not yet implemented.
+func TunnelRouteOpaque(pl *PassthroughList, buildCfg *BuildConfig, target string) bool {
+	return false
+}
+
 // connectPassthrough handles the TLS passthrough relay. Returns true when
 // the relay engaged (caller returns).
 func connectPassthrough(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekConn, target string, logger *slog.Logger) bool {
