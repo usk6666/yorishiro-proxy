@@ -25,6 +25,7 @@ package main_test
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -758,21 +759,18 @@ func TestBinarySmoke_TopLevelRouting(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
-			cmd := exec.Command(binary, tt.args...)
+			// Neither path does any I/O; the bound turns a regression that
+			// boots a server into a visible failure (killed: exit code -1)
+			// rather than a hang.
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, binary, tt.args...)
 			cmd.Env = binaryChildEnv(home)
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout = &stdout
 			cmd.Stderr = &stderr
 
-			// Neither path does any I/O; the bound turns a regression that
-			// boots a server into a visible failure rather than a hang.
-			timer := time.AfterFunc(15*time.Second, func() {
-				if cmd.Process != nil {
-					_ = cmd.Process.Kill()
-				}
-			})
 			err := cmd.Run()
-			timer.Stop()
 
 			exitCode := 0
 			if err != nil {

@@ -369,8 +369,6 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 		targetScopePolicy, targetScopePolicySource, reload, openBrowser, stdioMCP, versionStr, opts, logger)
 }
 
-// applyMCPTransportFlags clears the HTTP MCP address when -no-http-mcp is
-// set, then refuses a configuration with no MCP transport enabled.
 // parseFlagsOnly parses args into fs and refuses any positional argument.
 // The flag package stops at the first non-flag token and leaves the rest
 // unparsed, so `-insecure true -db proj` would otherwise boot with -db
@@ -387,6 +385,8 @@ func parseFlagsOnly(fs *flag.FlagSet, args []string) error {
 	return nil
 }
 
+// applyMCPTransportFlags clears the HTTP MCP address when -no-http-mcp is
+// set, then refuses a configuration with no MCP transport enabled.
 func applyMCPTransportFlags(cfg *config.Config, stdioMCP, noHTTPMCP bool) error {
 	if noHTTPMCP {
 		cfg.MCPHTTPAddr = ""
