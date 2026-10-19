@@ -174,12 +174,11 @@ func TestStaleUpstreamError_UnwrapChain(t *testing.T) {
 	}
 
 	// Error() includes stage + underlying — useful for slog correlation.
-	if got := staleErr.Error(); got != "http1 upstream stale (header): write: broken pipe" {
-		t.Logf("Error() = %q (informational; OS-specific underlying text)", got)
-		// Don't fail on text shape; just confirm it mentions stage.
-		if !errorContains(got, "header") {
-			t.Errorf("Error() = %q, want substring 'header'", got)
-		}
+	// The underlying text is OS-specific, so build the expectation from it
+	// rather than hard-coding "broken pipe".
+	want := "http1 upstream stale (header): " + underlying.Error()
+	if got := staleErr.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
 
@@ -193,17 +192,6 @@ func TestStaleUpstreamError_NonStaleErrorPassThrough(t *testing.T) {
 	if got != original {
 		t.Errorf("wrapStaleErr non-stale: got %v (%T), want original %v (%T)", got, got, original, original)
 	}
-}
-
-// errorContains is a tiny substring helper to keep the test independent
-// of strings imports.
-func errorContains(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // TestStaleUpstreamError_PluginStateNotDoubleFired locks the design

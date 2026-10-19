@@ -550,26 +550,53 @@ func TestEncoder_SensitiveField(t *testing.T) {
 func TestEncoder_HuffmanEncoding(t *testing.T) {
 	encHuff := NewEncoder(4096, true)
 	encPlain := NewEncoder(4096, false)
-	dec := NewDecoder(4096)
 
+	const value = "this is a longer value for Huffman efficiency"
 	headers := []HeaderField{
-		{Name: "x-example", Value: "this is a longer value for Huffman efficiency"},
+		{Name: "x-example", Value: value},
 	}
 	dataHuff := encHuff.Encode(headers)
 	dataPlain := encPlain.Encode(headers)
 
-	// Huffman should generally be shorter.
+	// Lowercase ASCII text is strictly shorter under the RFC 7541
+	// Appendix B code, and the encoder only picks Huffman when it is.
 	if len(dataHuff) >= len(dataPlain) {
-		t.Logf("huffman=%d, plain=%d (Huffman not shorter for this input)", len(dataHuff), len(dataPlain))
+		t.Errorf("huffman=%d bytes, plain=%d bytes: Huffman encoding must be shorter for this input", len(dataHuff), len(dataPlain))
 	}
 
-	// Both should decode correctly.
-	decoded, err := dec.Decode(dataHuff)
-	if err != nil {
-		t.Fatalf("Decode(huffman) error = %v", err)
+	// Wire layout (RFC 7541 §6.2.1, new name): 0x40, name string, value
+	// string. Each string literal's first octet carries the H bit (0x80).
+	stringHBits := func(t *testing.T, data []byte) (nameH, valueH bool) {
+		t.Helper()
+		if len(data) < 2 || data[0] != 0x40 {
+			t.Fatalf("unexpected representation prefix: % x", data)
+		}
+		nameLen := int(data[1] & 0x7f)
+		valueOff := 2 + nameLen
+		if valueOff >= len(data) {
+			t.Fatalf("encoded block too short for name length %d: % x", nameLen, data)
+		}
+		return data[1]&0x80 != 0, data[valueOff]&0x80 != 0
 	}
-	if len(decoded) != 1 || decoded[0].Name != "x-example" {
-		t.Errorf("huffman round-trip failed: %+v", decoded)
+	if nameH, valueH := stringHBits(t, dataHuff); !nameH || !valueH {
+		t.Errorf("huffman encoder: H bit name=%v value=%v, want both set", nameH, valueH)
+	}
+	if nameH, valueH := stringHBits(t, dataPlain); nameH || valueH {
+		t.Errorf("plain encoder: H bit name=%v value=%v, want both clear", nameH, valueH)
+	}
+
+	// Both should decode to the original field.
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{{"huffman", dataHuff}, {"plain", dataPlain}} {
+		decoded, err := NewDecoder(4096).Decode(tc.data)
+		if err != nil {
+			t.Fatalf("Decode(%s) error = %v", tc.name, err)
+		}
+		if len(decoded) != 1 || decoded[0].Name != "x-example" || decoded[0].Value != value {
+			t.Errorf("%s round-trip failed: %+v", tc.name, decoded)
+		}
 	}
 }
 

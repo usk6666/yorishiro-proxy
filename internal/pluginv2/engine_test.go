@@ -246,17 +246,26 @@ register_hook("http", "on_request", noop)
 }
 
 func TestEngine_StepLimitTrips(t *testing.T) {
-	// Top-level infinite loop should be aborted by SetMaxExecutionSteps.
+	// A long loop executed at load time should be aborted by
+	// SetMaxExecutionSteps. Starlark rejects a top-level `for` at resolve
+	// time ("for loop not within a function"), so the loop lives in a def
+	// that is called at top level — otherwise the load fails before a
+	// single step executes and the test proves nothing about the budget.
 	path := writeScript(t, `
-n = 0
-for _ in range(10000000):
-    n = n + 1
+def run():
+    n = 0
+    for _ in range(100000):
+        n = n + 1
+run()
 `)
 	eng := NewEngine(nil)
 	cfg := PluginConfig{Path: path, OnError: string(OnErrorAbort), MaxSteps: 1_000}
 	err := eng.LoadPlugins(context.Background(), []PluginConfig{cfg})
 	if err == nil {
 		t.Fatal("expected step-limit error, got nil")
+	}
+	if !strings.Contains(err.Error(), "too many steps") {
+		t.Errorf("err = %v, want a step-limit (\"too many steps\") error", err)
 	}
 }
 
@@ -265,32 +274,43 @@ func TestEngine_LoadPluginCancelsOnContext(t *testing.T) {
 	// cancels the context, instead of waiting for the per-thread step limit
 	// to trip. MaxSteps is set high enough that ctx-cancel is the only way
 	// to terminate the script in test time.
+	// The loop lives in a def called at top level: a bare top-level `for`
+	// is rejected at resolve time, before any step executes.
 	path := writeScript(t, `
-n = 0
-for _ in range(1000000000):
-    n = n + 1
+def run():
+    n = 0
+    for _ in range(1000000000):
+        n = n + 1
+run()
 `)
 	eng := NewEngine(nil)
-	cfg := PluginConfig{Path: path, OnError: string(OnErrorAbort), MaxSteps: 1_000_000_000}
+	cfg := PluginConfig{Path: path, OnError: string(OnErrorAbort), MaxSteps: 1_000_000_000_000}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel shortly after LoadPlugins begins. The Starlark runtime
+	// observes the cancel and returns from ExecFileOptions.
+	timer := time.AfterFunc(20*time.Millisecond, cancel)
+	defer timer.Stop()
+
+	errCh := make(chan error, 1)
 	go func() {
-		// Cancel shortly after LoadPlugins begins. The Starlark runtime
-		// observes the cancel and returns from ExecFileOptions.
-		time.Sleep(20 * time.Millisecond)
-		cancel()
+		errCh <- eng.LoadPlugins(ctx, []PluginConfig{cfg})
 	}()
 
-	start := time.Now()
-	err := eng.LoadPlugins(ctx, []PluginConfig{cfg})
-	elapsed := time.Since(start)
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(5 * time.Second):
+		// The loop above would take minutes to finish; not returning
+		// promptly means ctx.Done() is not bridged to thread.Cancel.
+		t.Fatal("LoadPlugins did not honor ctx.Done() within 5s")
+	}
 	if err == nil {
 		t.Fatal("expected ctx-cancel error, got nil")
 	}
-	// Must abort in well under a second; the loop above would take many
-	// seconds to hit the step limit.
-	if elapsed > 2*time.Second {
-		t.Errorf("LoadPlugins did not honor ctx.Done() in time: %v", elapsed)
+	if !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Errorf("err = %v, want it to carry %q", err, context.Canceled.Error())
 	}
 }
 
@@ -324,9 +344,10 @@ register_hook("http", "on_request", h)
 // only after ExecFileOptions returns nil.
 func TestEngine_LoadFailureLeavesRegistryEmpty(t *testing.T) {
 	cases := []struct {
-		name string
-		body string
-		cfg  PluginConfig
+		name    string
+		body    string
+		cfg     PluginConfig
+		wantErr string
 	}{
 		{
 			name: "fail_after_register",
@@ -336,6 +357,7 @@ def h(env):
 register_hook("http", "on_request", h)
 fail("intentional load failure")
 `,
+			wantErr: "intentional load failure",
 		},
 		{
 			name: "step_budget_after_register",
@@ -343,11 +365,14 @@ fail("intentional load failure")
 def h(env):
     return None
 register_hook("http", "on_request", h)
-n = 0
-for _ in range(10000000):
-    n = n + 1
+def run():
+    n = 0
+    for _ in range(100000):
+        n = n + 1
+run()
 `,
-			cfg: PluginConfig{MaxSteps: 1_000},
+			cfg:     PluginConfig{MaxSteps: 1_000},
+			wantErr: "too many steps",
 		},
 	}
 	for _, tc := range cases {
@@ -357,8 +382,12 @@ for _ in range(10000000):
 			cfg.Path = path
 			cfg.OnError = string(OnErrorAbort)
 			eng := NewEngine(nil)
-			if err := eng.LoadPlugins(context.Background(), []PluginConfig{cfg}); err == nil {
+			err := eng.LoadPlugins(context.Background(), []PluginConfig{cfg})
+			if err == nil {
 				t.Fatal("expected load error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want it to contain %q", err, tc.wantErr)
 			}
 			if got := eng.Registry().Count(); got != 0 {
 				t.Errorf("Registry leaked %d hooks from failed load", got)

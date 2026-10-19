@@ -314,34 +314,6 @@ func TestInitCA_AutoPersist_SaveFailureFallback(t *testing.T) {
 	}
 }
 
-// registerTestFlags registers all CLI flags on fs in the same way as runWithFlags.
-// It returns pointers to the config file and target policy file path variables
-// for use with ApplyEnvFallback.
-func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) (*string, *string) {
-	var configFile string
-	var targetPolicyFile string
-	var openBrowser bool
-	var stdioMCP bool
-	var noHTTPMCP bool
-	fs.StringVar(&configFile, "config", "", "")
-	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "")
-	fs.StringVar(&cfg.CACertPath, "ca-cert", cfg.CACertPath, "")
-	fs.StringVar(&cfg.CAKeyPath, "ca-key", cfg.CAKeyPath, "")
-	fs.BoolVar(&cfg.CAEphemeral, "ca-ephemeral", cfg.CAEphemeral, "")
-	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure", cfg.InsecureSkipVerify, "")
-	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "")
-	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "")
-	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "")
-	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", "127.0.0.1:0", "")
-	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "")
-	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "")
-	fs.StringVar(&targetPolicyFile, "target-policy-file", "", "")
-	fs.BoolVar(&openBrowser, "open-browser", false, "")
-	fs.BoolVar(&stdioMCP, "stdio-mcp", false, "")
-	fs.BoolVar(&noHTTPMCP, "no-http-mcp", false, "")
-	return &configFile, &targetPolicyFile
-}
-
 func TestApplyEnvFallback_Priority(t *testing.T) {
 	// Table-driven tests for env var fallback with priority:
 	// CLI flag > env var > default value.
@@ -454,7 +426,7 @@ func TestApplyEnvFallback_Priority(t *testing.T) {
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			cfg := config.Default()
-			registerTestFlags(fs, cfg)
+			registerFlags(fs, cfg)
 
 			if err := fs.Parse(tt.flagArgs); err != nil {
 				t.Fatalf("flag.Parse: %v", err)
@@ -495,7 +467,7 @@ func TestApplyEnvFallback_BoolFlags(t *testing.T) {
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			cfg := config.Default()
-			registerTestFlags(fs, cfg)
+			registerFlags(fs, cfg)
 
 			if err := fs.Parse(nil); err != nil {
 				t.Fatalf("flag.Parse: %v", err)
@@ -523,9 +495,13 @@ func TestDeprecatedFlagsNotRegistered(t *testing.T) {
 		"cleanup-interval",
 	}
 
+	// registerFlags is the exact registration mcpserver.Run performs.
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	_, _ = registerTestFlags(fs, cfg)
+	registerFlags(fs, cfg)
+	if fs.Lookup("db") == nil {
+		t.Fatal("registerFlags did not register -db; the flag set under test is not the production one")
+	}
 
 	for _, name := range deprecatedFlags {
 		if f := fs.Lookup(name); f != nil {
@@ -534,16 +510,34 @@ func TestDeprecatedFlagsNotRegistered(t *testing.T) {
 	}
 }
 
+// TestEnvVarMap_AllFlagsHaveMapping pins that EnvVarMap and the flags
+// mcpserver.Run actually registers are the same set: every registered flag
+// has a YP_ env var, and every EnvVarMap entry names a registered flag.
 func TestEnvVarMap_AllFlagsHaveMapping(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	_, _ = registerTestFlags(fs, cfg)
+	registerFlags(fs, cfg)
 
+	registered := 0
 	fs.VisitAll(func(f *flag.Flag) {
-		if _, ok := EnvVarMap[f.Name]; !ok {
+		registered++
+		env, ok := EnvVarMap[f.Name]
+		if !ok {
 			t.Errorf("flag %q has no entry in EnvVarMap", f.Name)
+			return
+		}
+		if !strings.HasPrefix(env, "YP_") {
+			t.Errorf("EnvVarMap[%q] = %q, want a YP_ prefixed name", f.Name, env)
 		}
 	})
+	if registered == 0 {
+		t.Fatal("registerFlags registered no flags")
+	}
+	for name := range EnvVarMap {
+		if fs.Lookup(name) == nil {
+			t.Errorf("EnvVarMap has %q but no such flag is registered", name)
+		}
+	}
 }
 
 // getStringConfigField returns the string value of a named config field.
@@ -595,7 +589,7 @@ func TestConfigFlag_EnvVarFallback(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	cfgFile, _ := registerTestFlags(fs, cfg)
+	flags := registerFlags(fs, cfg)
 
 	if err := fs.Parse(nil); err != nil {
 		t.Fatalf("flag.Parse: %v", err)
@@ -603,8 +597,8 @@ func TestConfigFlag_EnvVarFallback(t *testing.T) {
 
 	ApplyEnvFallback(fs)
 
-	if *cfgFile != cfgPath {
-		t.Errorf("configFile = %q, want %q", *cfgFile, cfgPath)
+	if flags.configFile != cfgPath {
+		t.Errorf("configFile = %q, want %q", flags.configFile, cfgPath)
 	}
 }
 
@@ -623,7 +617,7 @@ func TestConfigFlag_CLIOverridesEnvVar(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	cfgFile, _ := registerTestFlags(fs, cfg)
+	flags := registerFlags(fs, cfg)
 
 	if err := fs.Parse([]string{"-config", flagPath}); err != nil {
 		t.Fatalf("flag.Parse: %v", err)
@@ -632,8 +626,8 @@ func TestConfigFlag_CLIOverridesEnvVar(t *testing.T) {
 	ApplyEnvFallback(fs)
 
 	// CLI flag should take precedence over YP_CONFIG env var.
-	if *cfgFile != flagPath {
-		t.Errorf("configFile = %q, want %q (CLI should override env)", *cfgFile, flagPath)
+	if flags.configFile != flagPath {
+		t.Errorf("configFile = %q, want %q (CLI should override env)", flags.configFile, flagPath)
 	}
 }
 
@@ -656,7 +650,7 @@ func TestTargetPolicyFileFlag_EnvVarFallback(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	_, policyFile := registerTestFlags(fs, cfg)
+	flags := registerFlags(fs, cfg)
 
 	if err := fs.Parse(nil); err != nil {
 		t.Fatalf("flag.Parse: %v", err)
@@ -664,8 +658,8 @@ func TestTargetPolicyFileFlag_EnvVarFallback(t *testing.T) {
 
 	ApplyEnvFallback(fs)
 
-	if *policyFile != policyPath {
-		t.Errorf("targetPolicyFile = %q, want %q", *policyFile, policyPath)
+	if flags.targetPolicyFile != policyPath {
+		t.Errorf("targetPolicyFile = %q, want %q", flags.targetPolicyFile, policyPath)
 	}
 }
 
@@ -684,7 +678,7 @@ func TestTargetPolicyFileFlag_CLIOverridesEnvVar(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cfg := config.Default()
-	_, policyFile := registerTestFlags(fs, cfg)
+	flags := registerFlags(fs, cfg)
 
 	if err := fs.Parse([]string{"-target-policy-file", flagPath}); err != nil {
 		t.Fatalf("flag.Parse: %v", err)
@@ -693,8 +687,8 @@ func TestTargetPolicyFileFlag_CLIOverridesEnvVar(t *testing.T) {
 	ApplyEnvFallback(fs)
 
 	// CLI flag should take precedence over YP_TARGET_POLICY_FILE env var.
-	if *policyFile != flagPath {
-		t.Errorf("targetPolicyFile = %q, want %q (CLI should override env)", *policyFile, flagPath)
+	if flags.targetPolicyFile != flagPath {
+		t.Errorf("targetPolicyFile = %q, want %q (CLI should override env)", flags.targetPolicyFile, flagPath)
 	}
 }
 
