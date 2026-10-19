@@ -1505,6 +1505,33 @@ func (d opaqueSendDecision) canZeroCopy(rawBytes []byte) bool {
 	return !d.headersChanged && !d.bodyChanged && !d.rewriteTEToCL && !d.lineChanged && len(rawBytes) > 0
 }
 
+// lineOnly reports whether the start line is the only part of the head
+// that must change: no header patch and no framing rewrite. The header
+// section can then be re-emitted verbatim after the rebuilt start line
+// (USK-1148 review F-1).
+func (d opaqueSendDecision) lineOnly() bool {
+	return d.lineChanged && !d.headersChanged && !d.bodyChanged && !d.rewriteTEToCL
+}
+
+// headerSectionAfterStartLine returns the bytes of a captured head that
+// follow the start line: every header line and the terminating blank line
+// exactly as the wire carried them, including the forms parser.RawHeaders
+// cannot reproduce (obs-fold continuations, orphan continuation lines,
+// colon-less lines, bare-LF terminators). The parser reads the start line
+// with bufio.Reader.ReadSlice('\n'), so its terminator is the first LF in
+// raw. ok is false when raw was truncated at the capture cap or holds no
+// LF (a partial start line); the caller must then re-serialize.
+func headerSectionAfterStartLine(raw []byte, truncated bool) ([]byte, bool) {
+	if truncated {
+		return nil, false
+	}
+	i := bytes.IndexByte(raw, '\n')
+	if i < 0 {
+		return nil, false
+	}
+	return raw[i+1:], true
+}
+
 // opaqueRequestHead renders the header section (request line + headers +
 // CRLF) an opaque request is sent with, and the body decision. It is the
 // single source of truth for both channel.sendRequestOpaque and
@@ -1512,7 +1539,9 @@ func (d opaqueSendDecision) canZeroCopy(rawBytes []byte) bool {
 // (RFC-001 §9.3 item 2).
 //
 // When nothing forces a re-serialization the head is rawReq.RawBytes
-// itself (d.zeroCopy); callers must not mutate it. Otherwise the head is
+// itself (d.zeroCopy); callers must not mutate it. When only the request
+// line changed (d.lineOnly) the head is the rebuilt line followed by the
+// wire header section verbatim. Otherwise the head is
 // freshly serialized from a clone of the wire headers patched toward
 // msg.Headers (OWS preserved on untouched headers), with the request line
 // from opaque.requestLine. opaque is never mutated, so a StaleUpstream
@@ -1526,6 +1555,14 @@ func opaqueRequestHead(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte, 
 	if d.canZeroCopy(rawReq.RawBytes) {
 		d.zeroCopy = true
 		return rawReq.RawBytes, d
+	}
+	if d.lineOnly() {
+		if tail, ok := headerSectionAfterStartLine(rawReq.RawBytes, rawReq.Truncated); ok {
+			var buf bytes.Buffer
+			_ = serializeRequestLine(&buf, method, target, rawReq.Proto)
+			buf.Write(tail)
+			return buf.Bytes(), d
+		}
 	}
 	head := parser.RawRequest{
 		Method:     method,
@@ -1546,6 +1583,14 @@ func opaqueResponseHead(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte,
 	if d.canZeroCopy(rawResp.RawBytes) {
 		d.zeroCopy = true
 		return rawResp.RawBytes, d
+	}
+	if d.lineOnly() {
+		if tail, ok := headerSectionAfterStartLine(rawResp.RawBytes, rawResp.Truncated); ok {
+			var buf bytes.Buffer
+			_ = serializeStatusLine(&buf, rawResp.Proto, status, msg.Status)
+			buf.Write(tail)
+			return buf.Bytes(), d
+		}
 	}
 	head := parser.RawResponse{
 		Proto:      rawResp.Proto,
