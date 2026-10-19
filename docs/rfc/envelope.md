@@ -1014,6 +1014,8 @@ The bufio.Reader held by the HTTP/1.x layer is passed to the WebSocket layer as-
 
 Step 5 (cancel-and-restart) is the ugly part. An alternative is to make `RunSession` loop-observable — but cancel-and-restart is simpler and correct. Revisit if perf matters.
 
+The new RunSession in step 6 reads **both** directions immediately (USK-1171). Its upstream Channel was already built during the swap, so it is handed to RunSession pre-established instead of being dialled lazily on the first client envelope. Lazy dialling is an HTTP routing need, not a WebSocket one. Without this, a server-speaks-first protocol (greeting, push) would stall until the client sent a frame. When the client direction ends without the client having sent a Close frame, the session tears the upstream down. A ws Channel's `Next` ignores ctx cancellation, so this teardown is the only way to stop the upstream read from parking the session while the upstream is idle. A client-initiated closing handshake is left alone so the server's Close reply still reaches the client (RFC 6455 §7.1.1). RFC 8441 WebSocket over HTTP/2 (`runWSOverH2Relay`) was already eager.
+
 ### 4.4 HTTP/2 Multiplexing + gRPC Detection
 
 ```
