@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/yorishiro-proxy_banner.png" alt="Yorishiro Proxy" width="600">
+  <img src="docs/images/yorishiro-proxy-logo.svg" alt="Yorishiro Proxy" width="600">
 </p>
 
 <p align="center">
