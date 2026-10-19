@@ -25,8 +25,8 @@ const clientHelloPeekSize = 4096
 
 // errClientHelloIncomplete is returned by parseClientHelloSNI when the peek
 // buffer does not yet contain a complete ClientHello extension list. The
-// caller (PeekClientHelloSNI) should retry the peek with a larger window or
-// abandon SNI extraction.
+// caller (peekClientHelloSNIAndALPN) abandons SNI / ALPN extraction — a
+// ClientHello fragmented across records is not reassembled.
 var errClientHelloIncomplete = errors.New("connector: client hello incomplete")
 
 // errNotClientHello is returned when the first byte of the peek buffer is

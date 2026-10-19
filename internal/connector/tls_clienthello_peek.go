@@ -48,10 +48,10 @@ import (
 // would torpedo the subsequent MITM handshake (tlslayer.Server reads
 // from the same *PeekConn).
 //
-// USK-997: sibling of peekClientHelloSNI. The two helpers share the
-// peek window + deadline pattern but differ in what they extract;
-// keeping them as separate entry points keeps the passthrough hot path
-// (which never needs ALPN) on the smaller, one-purpose function.
+// USK-1170: the observed TLS passthrough relay shares this helper (it
+// copies only SNI and JA3/JA4 and drops ALPN). It previously had its own
+// one-shot Peek(clientHelloPeekSize), which waited out the deadline on
+// every connection because a ClientHello is far smaller than the cap.
 //
 // USK-1015: the peek also computes the client's JA3/JA4 fingerprints from
 // the same buffered ClientHello (no extra read, no consumption). The
@@ -95,6 +95,13 @@ func peekClientHelloSNIAndALPN(clientConn net.Conn) ClientHelloPeek {
 	if len(headerBuf) < recordHeaderLen {
 		// Truncated header — treat as "no ClientHello"; same as the
 		// errClientHelloIncomplete fall-through below.
+		return ClientHelloPeek{}
+	}
+	if headerBuf[0] != tlsContentTypeHandshake {
+		// Not a TLS Handshake record — the parser would reject it anyway
+		// (errNotClientHello). Bail before peeking the declared body so a
+		// non-TLS first record with a small fake length does not wait out
+		// the deadline for bytes that never arrive (USK-1170).
 		return ClientHelloPeek{}
 	}
 	// TLS record length is bytes [3:5] (big-endian uint16).
