@@ -123,12 +123,26 @@ type RecordStep struct {
 	// envelopes on the same StreamID are short-circuited. SaveFlow
 	// continues to fire for every wire_level envelope so wire-record
 	// persistence (MITM Principle 3) is preserved — only the duplicate
-	// SaveStream call is suppressed.
+	// SaveStream call is suppressed. When a wire-level overlay wins, the
+	// Stream row is created without a Scheme (overlays carry no
+	// Message); schemeBackfillPending lets the later semantic envelope
+	// fill it in (USK-1197).
 	//
 	// sync.Map suits the keys-set-once pattern (LoadOrStore is the
 	// hot-path operation); same bounded-by-per-process-stream-count
 	// rationale as protocolRetagged above (no eviction).
 	streamCreated sync.Map
+
+	// schemeBackfillPending tracks streamIDs whose Stream row was created
+	// by a wire-level overlay envelope (Message=nil, e.g. the aggregator
+	// h2-frame or grpcweb-base64 record) and therefore persisted an empty
+	// Scheme (USK-1197). The first semantic Send/Seq0 envelope on such a
+	// stream that carries a scheme issues one UpdateStream{Scheme} and
+	// removes the entry (LoadAndDelete), so semantic-first streams never
+	// pay an extra write and each overlay-first stream pays at most one.
+	// Entries for streams that never see a semantic envelope remain, with
+	// the same bounded-by-stream-count rationale as streamCreated.
+	schemeBackfillPending sync.Map
 
 	// scope filters which envelopes are recorded. nil = capture all
 	// (current behaviour). When non-nil, ShouldRecord is consulted for
@@ -556,7 +570,9 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 
 	// Create Stream on first Send (Sequence==0). Whichever wire_level
 	// envelope arrives first wins (USK-908). Native gRPC emits semantic
-	// first; aggregator-path h2 emits wire-level h2-frame first.
+	// first; aggregator-path h2 emits wire-level h2-frame first, in
+	// which case the Stream is created without a Scheme and the later
+	// semantic envelope backfills it (USK-1197, backfillScheme).
 	// Subsequent first-Send envelopes on the same StreamID are
 	// short-circuited by streamCreated to avoid duplicate SaveStream
 	// calls (and the resulting UNIQUE constraint failures on
@@ -566,6 +582,7 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 		if _, loaded := s.streamCreated.LoadOrStore(env.StreamID, struct{}{}); !loaded {
 			s.createStream(ctx, env)
 		} else {
+			s.backfillScheme(ctx, env)
 			s.logger.DebugContext(ctx, "record: savestream skipped",
 				"phase", "recordstep-savestream-skip",
 				"streamID", env.StreamID,
@@ -848,6 +865,56 @@ func (s *RecordStep) maybeRetagProtocol(ctx context.Context, env *envelope.Envel
 	}
 }
 
+// semanticScheme derives Stream.Scheme from the envelope's Message. Only
+// request-side HTTPMessage and GRPCStartMessage carry a scheme; every
+// other Message (and the Message-less wire-level overlays) yields "".
+func semanticScheme(env *envelope.Envelope) string {
+	switch msg := env.Message.(type) {
+	case *envelope.HTTPMessage:
+		return msg.Scheme
+	case *envelope.GRPCStartMessage:
+		// USK-920: project the request-side :scheme onto Stream.Scheme so
+		// listener-captured gRPC streams record the handshake transport
+		// the same way HTTPMessage does. Response-side Start envelopes
+		// carry Scheme="" and are no-ops.
+		return msg.Scheme
+	}
+	return ""
+}
+
+// isWireLevelOverlay reports whether env is a diagnostic wire-level
+// overlay (h2-frame, h1-chunk, grpc-lpm-frame, grpcweb-base64) rather
+// than a canonical semantic envelope.
+func isWireLevelOverlay(env *envelope.Envelope) bool {
+	wl := env.Context.WireLevel
+	return wl != "" && wl != flow.WireLevelSemantic
+}
+
+// backfillScheme writes the semantic envelope's scheme onto a Stream that
+// a wire-level overlay created with an empty Scheme (USK-1197). Called
+// only for Send/Seq0 envelopes whose StreamID was already created. The
+// pending entry is consumed only when env actually carries a scheme, so
+// a further overlay arriving first does not disarm the backfill. It
+// writes the value createStream would have used had env arrived first,
+// so Stream.Scheme semantics are unchanged (client-declared :scheme for
+// h2, Layer-configured scheme for HTTP/1.x; see USK-1067).
+func (s *RecordStep) backfillScheme(ctx context.Context, env *envelope.Envelope) {
+	scheme := semanticScheme(env)
+	if scheme == "" {
+		return
+	}
+	if _, pending := s.schemeBackfillPending.LoadAndDelete(env.StreamID); !pending {
+		return
+	}
+	if err := s.store.UpdateStream(ctx, env.StreamID, flow.StreamUpdate{Scheme: scheme}); err != nil {
+		s.logger.Error("record step: stream scheme backfill failed",
+			"stream_id", env.StreamID,
+			"scheme", scheme,
+			"error", err,
+		)
+	}
+}
+
 // createStream creates a new Stream record from the Envelope.
 func (s *RecordStep) createStream(ctx context.Context, env *envelope.Envelope) {
 	st := &flow.Stream{
@@ -859,20 +926,11 @@ func (s *RecordStep) createStream(ctx context.Context, env *envelope.Envelope) {
 		Origin:    s.origin,
 	}
 
-	// Derive scheme from Message type when available.
-	switch msg := env.Message.(type) {
-	case *envelope.HTTPMessage:
-		if msg.Scheme != "" {
-			st.Scheme = msg.Scheme
-		}
-	case *envelope.GRPCStartMessage:
-		// USK-920: project the request-side :scheme onto Stream.Scheme so
-		// listener-captured gRPC streams record the handshake transport
-		// the same way HTTPMessage does. Response-side Start envelopes
-		// carry Scheme="" and are no-ops here.
-		if msg.Scheme != "" {
-			st.Scheme = msg.Scheme
-		}
+	st.Scheme = semanticScheme(env)
+	if st.Scheme == "" && isWireLevelOverlay(env) {
+		// USK-1197: an overlay (no Message) won createStream; arm the
+		// one-shot backfill for the semantic envelope that follows.
+		s.schemeBackfillPending.Store(env.StreamID, struct{}{})
 	}
 
 	// USK-841 milestone (g): SaveStream call decision. Reveals which Stream
