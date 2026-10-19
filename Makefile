@@ -64,8 +64,24 @@ test-pkg: ensure-ui
 # files marked `//go:build e2e && !e2e_smoke` are excluded from the smoke
 # tier (they run only under `make test-e2e`). Files in the smoke tier keep
 # the plain `//go:build e2e` constraint.
+#
+# It runs ONLY the tests declared in smoke files (USK-1209). Building with
+# `-tags 'e2e e2e_smoke'` also compiles every untagged test, so a bare
+# `go test ./...` here would re-run the whole fast tier, which CI already runs
+# in the `test` job. tools/smokeselect derives the selection from `go list`
+# and the Go parser -- nothing is hard-coded -- and prints an anchored -run
+# regexp on line 1 followed by the packages that declare smoke tests. It exits
+# non-zero on any go list error or an empty selection, and the recipe stops
+# there rather than falling through to an unfiltered or empty go test.
+# For the old "untagged + smoke" coverage, run `make test test-e2e-smoke`.
 test-e2e-smoke: ensure-ui
-	go test -race -v -timeout 10m -tags 'e2e e2e_smoke' ./...
+	@sel=$$(go run ./tools/smokeselect) || { echo "test-e2e-smoke: smoke test selection failed" >&2; exit 1; }; \
+	 run=$$(printf '%s\n' "$$sel" | sed -n 1p); \
+	 pkgs=$$(printf '%s\n' "$$sel" | sed 1d); \
+	 if [ -z "$$run" ] || [ -z "$$pkgs" ]; then echo "test-e2e-smoke: empty smoke test selection" >&2; exit 1; fi; \
+	 echo "==> smoke tier: $$(printf '%s\n' "$$run" | tr '|' '\n' | wc -l | tr -d ' ') top-level tests in $$(printf '%s\n' "$$pkgs" | wc -l | tr -d ' ') packages"; \
+	 echo "go test -race -v -timeout 10m -tags 'e2e e2e_smoke' -run '<selection>' "$$pkgs; \
+	 go test -race -v -timeout 10m -tags 'e2e e2e_smoke' -run "$$run" $$pkgs
 
 # test-e2e is the full tier: every test guarded by `//go:build e2e` (smoke
 # files included). Run nightly via the `nightly-e2e.yml` workflow; not part

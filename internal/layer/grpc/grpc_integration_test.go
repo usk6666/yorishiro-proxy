@@ -795,11 +795,38 @@ func readCONNECTTarget(c net.Conn) (string, error) {
 	return string(parts[1]), nil
 }
 
-// testWriter routes slog output to t.Log.
-type testWriter struct{ t *testing.T }
+// testWriter routes slog output to t.Log until the test ends.
+//
+// Layers built during the test capture the slog.Default() logger that points
+// here, and their goroutines can still log after the test returns (e.g. the
+// upstream's graceful-stop GOAWAY). t.Log after completion panics with "Log
+// in goroutine after ... has completed" once no parent test is still running
+// -- i.e. whenever this is the last test the package binary runs, as in the
+// smoke tier's -run selection (USK-1209). The t.Cleanup hook closes the
+// writer under the same mutex Write holds, so no Write can reach t.Log once
+// the test is done; later output is dropped.
+type testWriter struct {
+	t      *testing.T
+	mu     sync.Mutex
+	closed bool
+}
 
-func (w testWriter) Write(b []byte) (int, error) {
-	w.t.Log(string(bytes.TrimRight(b, "\n")))
+func newTestWriter(t *testing.T) *testWriter {
+	w := &testWriter{t: t}
+	t.Cleanup(func() {
+		w.mu.Lock()
+		w.closed = true
+		w.mu.Unlock()
+	})
+	return w
+}
+
+func (w *testWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.closed {
+		w.t.Log(string(bytes.TrimRight(b, "\n")))
+	}
 	return len(b), nil
 }
 
@@ -898,7 +925,7 @@ func waitForStreamState(t *testing.T, store *testStore, streamID, wantState stri
 
 func TestGRPC_UnaryRoundTrip(t *testing.T) {
 	prevLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(newTestWriter(t), &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer slog.SetDefault(prevLogger)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
