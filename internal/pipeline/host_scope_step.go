@@ -50,7 +50,7 @@ func NewHostScopeStep(scope *connector.TargetScope) *HostScopeStep {
 // confidentiality of the leg the client is actually speaking on.
 //
 // The scheme handed to CheckTarget is derived from Envelope.Context.TLS
-// (see hostScopeScheme).
+// (see transportScopeScheme).
 //
 // A Send envelope on a live connection that a policy change revoked but
 // whose cut is deferred for in-flight intercept holds (USK-1192,
@@ -90,7 +90,7 @@ func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Res
 	// because matchTargetRule is AND logic: a rule carrying a Schemes
 	// condition silently stops matching when the scheme is blank
 	// (USK-1081).
-	allowed, _ := s.scope.CheckTarget(hostScopeScheme(env), host, port, "")
+	allowed, _ := s.scope.CheckTarget(transportScopeScheme(env), host, port, "")
 	if !allowed {
 		return targetScopeBlock(env)
 	}
@@ -114,8 +114,10 @@ func targetScopeBlock(env *envelope.Envelope) Result {
 	return Result{Action: Drop, BlockedBy: BlockedByTargetScope}
 }
 
-// hostScopeScheme derives the TargetScope scheme token for a connection-
-// level check from the envelope's TLS state.
+// transportScopeScheme derives the TargetScope scheme token from the
+// envelope's TLS state. It is the single source of the scheme both scope
+// Steps hand CheckTarget: HostScopeStep (connection level) and
+// HTTPScopeStep (request level).
 //
 // TargetRule.Schemes describes transport confidentiality — plaintext
 // versus TLS — spelled with the "http" / "https" tokens, not the L7
@@ -128,13 +130,22 @@ func targetScopeBlock(env *envelope.Envelope) Result {
 // same question without inspecting Message — which is what lets
 // HostScopeStep stay protocol-agnostic.
 //
+// HTTPScopeStep uses it instead of HTTPMessage.Scheme (USK-1086). The
+// declared scheme is client-controlled — HTTP/2 records `:scheme`
+// verbatim, so an absent pseudo-header leaves it empty and a client may
+// declare "http" over TLS; an intercept modify_and_forward can set it to
+// anything — and because matchTargetRule is AND logic, a declared scheme
+// that disagrees with the transport silently steers a Schemes-bearing
+// rule. HTTPMessage.Scheme is still recorded and forwarded verbatim; only
+// the policy decision reads the transport.
+//
 // Because TLS is per-Layer and not per-stack (RFC-001 §3.1), the two legs
 // of a connection with independent TLS axes (a tcp_forward entry with
 // `tls` but no `upstream_tls`, say) carry different snapshots and would
-// derive different schemes. Process therefore calls this only on
-// Send-direction envelopes, so the connection is scoped once, on the
-// client-facing leg's wire reality.
-func hostScopeScheme(env *envelope.Envelope) string {
+// derive different schemes. Callers therefore use this only on
+// Send-direction envelopes, which come from the client-facing Layer, so
+// the scope decision reads the client-facing leg's wire reality.
+func transportScopeScheme(env *envelope.Envelope) string {
 	if env.Context.TLS != nil {
 		return "https"
 	}

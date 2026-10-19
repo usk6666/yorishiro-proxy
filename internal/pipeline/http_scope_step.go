@@ -14,6 +14,10 @@ import (
 // (scheme + authority + path). This complements HostScopeStep, which
 // operates at the connection level using TargetHost.
 //
+// The scheme is the transport confidentiality of the client's connection,
+// derived from Envelope.Context.TLS exactly as HostScopeStep derives it —
+// not HTTPMessage.Scheme (USK-1086, see transportScopeScheme).
+//
 // Only Send-direction HTTPMessage envelopes are checked. Receive and
 // non-HTTP messages always pass through.
 type HTTPScopeStep struct {
@@ -46,7 +50,13 @@ func (s *HTTPScopeStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMe
 		return Result{}
 	}
 
-	scheme := msg.Scheme
+	// The scheme is the client connection's transport, never msg.Scheme:
+	// the declared scheme is client-controlled and a blank or mismatched
+	// one silently stops Schemes-bearing rules from matching and breaks
+	// default-port inference (USK-1086, see transportScopeScheme).
+	// msg.Scheme itself is left untouched — it is recorded and forwarded
+	// as the wire declared it.
+	scheme := transportScopeScheme(env)
 	authority := msg.Authority
 	path := msg.Path
 
