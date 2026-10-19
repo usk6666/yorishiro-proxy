@@ -1295,6 +1295,29 @@ func TestSend_RequestTrailerForwarded(t *testing.T) {
 	}
 }
 
+// TestSend_ResponseMissingTrailerNotSynthesized — a Receive End carrying
+// AnomalyMissingGRPCWebTrailer stands for a trailer the upstream never sent;
+// the RoleServer Send must not fabricate one ("grpc-status: 0") on the
+// client wire.
+func TestSend_ResponseMissingTrailerNotSynthesized(t *testing.T) {
+	mock := newMockChannel("s-mt")
+	ch := Wrap(mock, RoleServer)
+	dataFrame := EncodeFrame(false, false, []byte("hello-no-trailer"))
+	hm := sendAll(t, ch, mock,
+		&envelope.Envelope{StreamID: "s-mt", Direction: envelope.Receive,
+			Message: &envelope.GRPCStartMessage{ContentType: "application/grpc-web+proto"}},
+		&envelope.Envelope{StreamID: "s-mt", Direction: envelope.Receive, Raw: dataFrame,
+			Message: &envelope.GRPCDataMessage{Payload: []byte("hello-no-trailer")}},
+		&envelope.Envelope{StreamID: "s-mt", Direction: envelope.Receive,
+			Message: &envelope.GRPCEndMessage{Anomalies: []envelope.Anomaly{{
+				Type: envelope.AnomalyMissingGRPCWebTrailer, Detail: "x",
+			}}}},
+	)
+	if !bytes.Equal(hm.Body, dataFrame) {
+		t.Errorf("Body = %q, want data frame only %q", hm.Body, dataFrame)
+	}
+}
+
 // TestSend_ContentLengthRewrittenOnLengthChange — the re-assembled body is
 // 9 bytes but the Start Metadata still carries the client's stale
 // Content-Length: 5. The value is rewritten in place (name casing and

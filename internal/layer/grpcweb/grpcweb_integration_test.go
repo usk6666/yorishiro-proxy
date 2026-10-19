@@ -1576,12 +1576,25 @@ func TestGRPCWeb_MissingTrailerProducesAnomaly(t *testing.T) {
 
 	proxyAddr, store, _, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{})
 
-	_ = sendGRPCWebHTTP1Request(t, proxyAddr, target, []byte("ping"), false)
+	clientResp := sendGRPCWebHTTP1Request(t, proxyAddr, target, []byte("ping"), false)
 
 	select {
 	case <-sessionDone:
 	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for session to complete")
+	}
+
+	// USK-1203: the client receives exactly what the upstream sent — the
+	// data frame and no trailer. The proxy must not fabricate a
+	// "grpc-status: 0" trailer the upstream never sent (that would turn a
+	// truncated response into an apparent success).
+	if len(clientResp) == 0 {
+		t.Errorf("client received no response bytes")
+	} else {
+		_, gotBody := splitHTTPMessage(t, clientResp)
+		if want := grpcweb.EncodeFrame(false, false, respPayload); !bytes.Equal(gotBody, want) {
+			t.Errorf("client response body = %q, want upstream's %q (no synthesized trailer)", gotBody, want)
+		}
 	}
 
 	// The session terminates cleanly — the missing trailer is recorded as an
