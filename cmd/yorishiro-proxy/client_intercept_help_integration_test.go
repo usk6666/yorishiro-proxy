@@ -288,6 +288,27 @@ func TestE2E_ClientInterceptHelp_ModifyAndForwardExamples(t *testing.T) {
 						t.Errorf("upstream missing header line %q: %q; got %q", name, value, got.headers)
 					}
 				}
+				// http.headers is a full replacement, not a merge: the
+				// upstream header list must be exactly the supplied list.
+				// Headers the Go client sent but the example omits
+				// (User-Agent, Accept-Encoding, ...) must not survive.
+				// Content-Length is proxy-managed and excluded.
+				want := make([][2]string, 0, len(hs))
+				for _, e := range hs {
+					kv, _ := e.(map[string]any)
+					name, _ := kv["name"].(string)
+					value, _ := kv["value"].(string)
+					want = append(want, [2]string{name, value})
+				}
+				gotNoCL := make([][2]string, 0, len(got.headers))
+				for _, gh := range got.headers {
+					if !strings.EqualFold(gh[0], "Content-Length") {
+						gotNoCL = append(gotNoCL, gh)
+					}
+				}
+				if fmt.Sprint(gotNoCL) != fmt.Sprint(want) {
+					t.Errorf("upstream header list = %q, want exactly the supplied list %q (full replacement, Content-Length excluded)", gotNoCL, want)
+				}
 			}
 			if checked == 0 {
 				t.Fatalf("example's http payload %v sets none of method/path/body/headers; extend the assertions", httpMod)
