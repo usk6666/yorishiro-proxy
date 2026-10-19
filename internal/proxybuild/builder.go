@@ -793,9 +793,29 @@ func isRawRelayStack(stack *connector.ConnectionStack) bool {
 // keeps the lazy dial of session.RunStackSession.
 func runSingleChannelSession(ctx context.Context, stack *connector.ConnectionStack, dial session.DialFunc, p *pipeline.Pipeline, opts session.SessionOptions) error {
 	if isRawRelayStack(stack) {
-		return session.RunPreDialedStackSession(ctx, stack, p, opts)
+		return runRawRelaySession(ctx, stack, p, opts)
 	}
 	return session.RunStackSession(ctx, stack, dial, p, opts)
+}
+
+// runRawRelaySession runs the pre-dialed session for a [bytechunk →
+// bytechunk] raw relay and then releases the client Layer's plugin scopes
+// once more (USK-1083 review S-2). The client Layer releases them on its
+// first Close, but when the ctx-cancel watcher makes that Close, a
+// PluginStep dispatch already in flight re-creates the (ConnID, client
+// StreamID) scope, and the deferred stack.Close no longer reaches the
+// Layers. Once RunPreDialedStackSession has returned no session goroutine
+// can dispatch again, so this release is the last one.
+//
+// The client Layer is captured before the session runs: stack.Close
+// clears the stack's Layer list, so ClientTopmost is nil afterwards.
+func runRawRelaySession(ctx context.Context, stack *connector.ConnectionStack, p *pipeline.Pipeline, opts session.SessionOptions) error {
+	clientRaw, _ := stack.ClientTopmost().(*bytechunk.Layer)
+	err := session.RunPreDialedStackSession(ctx, stack, p, opts)
+	if clientRaw != nil {
+		clientRaw.ReleaseState()
+	}
+	return err
 }
 
 // runHTTP1ExchangeLoop iterates the HTTP/1.x client Layer's Channels()
@@ -850,7 +870,7 @@ func runHTTP1ExchangeLoop(
 			wg.Add(1)
 			go func(ch layer.Channel) {
 				defer wg.Done()
-				runHTTP1Exchange(ctx, stack, ch, chain, p, sessOpts, target, grpcwebOpts, headRecorder, logger, deps.H1UpstreamMetrics)
+				runHTTP1Exchange(ctx, stack, clientH1, ch, chain, p, sessOpts, target, grpcwebOpts, headRecorder, logger, deps.H1UpstreamMetrics)
 			}(clientCh)
 		}
 	}
@@ -873,6 +893,7 @@ func runHTTP1ExchangeLoop(
 func runHTTP1Exchange(
 	ctx context.Context,
 	stack *connector.ConnectionStack,
+	clientH1 *http1.Layer,
 	clientCh layer.Channel,
 	chain *h1Chain,
 	p *pipeline.Pipeline,
@@ -914,16 +935,21 @@ func runHTTP1Exchange(
 		return
 	}
 
+	// dialFailed records that this exchange never reached an upstream, so
+	// the client will receive no response for it.
+	var dialFailed atomic.Bool
 	dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
 		// USK-998: probe the current upstream Layer for staleness (peer
 		// idle-FIN / RST during keep-alive) and transparently redial when
 		// stale. Returns the same Layer fast when alive.
 		upstreamH1, err := chain.EnsureFresh(dctx)
 		if err != nil {
+			dialFailed.Store(true)
 			return nil, fmt.Errorf("dial: %w", err)
 		}
 		upCh := upstreamH1.OpenExchange()
 		if upCh == nil {
+			dialFailed.Store(true)
 			return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
 		}
 		// USK-934: wrap the upstream channel with the same per-protocol
@@ -951,6 +977,15 @@ func runHTTP1Exchange(
 	}
 	if err := session.RunStackSessionExchange(ctx, stack, dispatchedCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Debug("proxybuild: http1 exchange ended with error", "target", target, "error", err)
+	}
+	if dialFailed.Load() {
+		// USK-1079 review F-1: no upstream (e.g. the redial replacing a
+		// retired raw-authoritative upstream failed), so this request gets
+		// no response. HTTP/1.x answers in request order, so the client
+		// connection cannot continue past a missing response: end it now
+		// rather than leave the client waiting until its own timeout. The
+		// close unblocks the exchange loop, which tears the stack down.
+		_ = clientH1.Close()
 	}
 }
 

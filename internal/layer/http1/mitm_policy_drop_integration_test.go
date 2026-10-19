@@ -74,7 +74,7 @@ func TestHTTPSMITM_InterceptDrop(t *testing.T) {
 	defer cancel()
 
 	upstreamReceived := make(chan struct{}, 1)
-	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+	upstreamLn, getUpstreamReqs := startUpstreamHTTPS(t, func(_ []byte) []byte {
 		upstreamReceived <- struct{}{}
 		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
 	})
@@ -133,19 +133,15 @@ func TestHTTPSMITM_InterceptDrop(t *testing.T) {
 
 	assertPolicyDropResponse(t, resp, "intercept_drop")
 
-	// Verify upstream never saw the request.
-	select {
-	case <-upstreamReceived:
-		t.Error("upstream handler was called — intercept drop did not prevent forward")
-	case <-time.After(500 * time.Millisecond):
-		// Good: upstream was never called.
-	}
-
 	select {
 	case <-sessionDone:
 	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for session to complete")
 	}
+
+	// Verify upstream never saw the request.
+	assertUpstreamNotReached(t, upstreamLn, getUpstreamReqs, upstreamReceived,
+		"intercept drop did not prevent forward")
 
 	// Note: the test harness uses a minimal pipeline (HostScope → HTTPScope
 	// → Safety → Transform → Intercept → Record). When Intercept emits a
@@ -174,7 +170,7 @@ func TestHTTPSMITM_HostScopeReject(t *testing.T) {
 	defer cancel()
 
 	upstreamReceived := make(chan struct{}, 1)
-	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+	upstreamLn, getUpstreamReqs := startUpstreamHTTPS(t, func(_ []byte) []byte {
 		upstreamReceived <- struct{}{}
 		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
 	})
@@ -212,16 +208,13 @@ func TestHTTPSMITM_HostScopeReject(t *testing.T) {
 	assertPolicyDropResponse(t, resp, "target_scope")
 
 	select {
-	case <-upstreamReceived:
-		t.Error("upstream handler was called — host_scope did not block forwarding")
-	case <-time.After(500 * time.Millisecond):
-	}
-
-	select {
 	case <-sessionDone:
 	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for session to complete")
 	}
+
+	assertUpstreamNotReached(t, upstreamLn, getUpstreamReqs, upstreamReceived,
+		"host_scope did not block forwarding")
 }
 
 // TestHTTPSMITM_HTTPScopeReject verifies that HTTPScopeStep emits a 403
@@ -231,7 +224,7 @@ func TestHTTPSMITM_HTTPScopeReject(t *testing.T) {
 	defer cancel()
 
 	upstreamReceived := make(chan struct{}, 1)
-	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+	upstreamLn, getUpstreamReqs := startUpstreamHTTPS(t, func(_ []byte) []byte {
 		upstreamReceived <- struct{}{}
 		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
 	})
@@ -266,14 +259,11 @@ func TestHTTPSMITM_HTTPScopeReject(t *testing.T) {
 	assertPolicyDropResponse(t, resp, "target_scope")
 
 	select {
-	case <-upstreamReceived:
-		t.Error("upstream handler was called — http_scope did not block forwarding")
-	case <-time.After(500 * time.Millisecond):
-	}
-
-	select {
 	case <-sessionDone:
 	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for session to complete")
 	}
+
+	assertUpstreamNotReached(t, upstreamLn, getUpstreamReqs, upstreamReceived,
+		"http_scope did not block forwarding")
 }

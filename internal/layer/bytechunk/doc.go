@@ -11,4 +11,9 @@
 //
 // The Layer owns the connection passed at construction time. Close() closes
 // the underlying connection.
+//
+// Live data-path callers pass WithEnvelopeContext so every envelope carries
+// the connection's ConnID, TargetHost and the TLS snapshot of the wire the
+// Layer reads, and WithStateReleaser so plugin scoped state is released on
+// Close (USK-1083).
 package bytechunk

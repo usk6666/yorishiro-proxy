@@ -1799,10 +1799,17 @@ func buildStackFromRoute(
 		return buildH2Stack(ctx, stack, clientConn, upstreamConn, target, connID, clientEnvCtx, upstreamEnvCtx, clientSnap, upstreamSnap, hostTLS, cfg)
 
 	case "bytechunk":
-		clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send)
+		// USK-1083: stamp the per-leg context like the http1 / h2 routes
+		// so HostScopeStep, RecordStep and capture_scope see the target.
+		clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send,
+			bytechunk.WithEnvelopeContext(clientEnvCtx),
+			bytechunk.WithStateReleaser(cfg.PluginV2Engine),
+		)
 		stack.PushClient(clientLayer)
 
-		upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive)
+		upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive,
+			bytechunk.WithEnvelopeContext(upstreamEnvCtx),
+		)
 		stack.PushUpstream(upstreamLayer)
 
 	default:
@@ -2128,12 +2135,26 @@ func buildRawPassthroughStack(
 
 	stack := NewConnectionStack(connID)
 
-	// Client: ByteChunk layer over the MITM'd TLS conn (reads client→server)
-	clientLayer := bytechunk.New(clientTLSConn, connID+"/client", envelope.Send)
+	// Client: ByteChunk layer over the MITM'd TLS conn (reads client→server).
+	// USK-1083: each leg carries its own TLS snapshot (RFC-001 §3.1).
+	clientLayer := bytechunk.New(clientTLSConn, connID+"/client", envelope.Send,
+		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+			ConnID:     connID,
+			TargetHost: target,
+			TLS:        clientSnap,
+		}),
+		bytechunk.WithStateReleaser(cfg.PluginV2Engine),
+	)
 	stack.PushClient(clientLayer)
 
 	// Upstream: ByteChunk layer over the upstream TLS conn (reads server→client)
-	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive)
+	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive,
+		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+			ConnID:     connID,
+			TargetHost: target,
+			TLS:        upstreamSnap,
+		}),
+	)
 	stack.PushUpstream(upstreamLayer)
 
 	return stack, clientSnap, upstreamSnap, nil

@@ -13,6 +13,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // InnerProtocolKind identifies the protocol observed on the inner byte stream
@@ -289,15 +290,32 @@ func BuildBytechunkStack(
 	if clientConn == nil || upstreamConn == nil {
 		return nil, fmt.Errorf("connector: BuildBytechunkStack: nil conn")
 	}
-	_ = cfg // reserved for future per-stack config; bytechunk has no knobs
-
 	connID := uuid.New().String()
 	stack := NewConnectionStack(connID)
 
-	stack.PushClient(bytechunk.New(clientConn, connID+"/client", envelope.Send))
-	stack.PushUpstream(bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive))
-	_ = target // target is informational; bytechunk does not stamp it
+	// USK-1083: both legs are plaintext, so TLS stays nil and
+	// HostScopeStep checks the tunnel's raw bytes as "http" — the same
+	// verdict BuildPlainHTTPStack gets for plaintext HTTP/1.x inside a
+	// CONNECT tunnel (RFC-001 §3.8).
+	envCtx := envelope.EnvelopeContext{ConnID: connID, TargetHost: target}
+	stack.PushClient(bytechunk.New(clientConn, connID+"/client", envelope.Send,
+		bytechunk.WithEnvelopeContext(envCtx),
+		bytechunk.WithStateReleaser(cfgPluginEngine(cfg)),
+	))
+	stack.PushUpstream(bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive,
+		bytechunk.WithEnvelopeContext(envCtx),
+	))
 	return stack, nil
+}
+
+// cfgPluginEngine returns cfg's pluginv2 Engine, tolerating a nil cfg.
+// The Engine's StateReleaser methods are nil-receiver safe, so the result
+// can be handed to a Layer's WithStateReleaser unconditionally.
+func cfgPluginEngine(cfg *BuildConfig) *pluginv2.Engine {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.PluginV2Engine
 }
 
 // dialPlainUpstream dials upstream plain TCP for inner-protocol branches that

@@ -451,7 +451,15 @@ func (m *Manager) handleTCPForwardConnWithOverride(
 	}
 
 	if protocol == "raw" {
-		m.handleTCPForwardConnRaw(connCtx, parentStack, connID, connLogger, clientConn, upstreamConn)
+		// USK-1083: the raw Layers stamp each leg's TLS snapshot — the
+		// client leg's when this forward port terminated TLS (tls=true),
+		// the upstream leg's when the dial did (upstream_tls) — so
+		// HostScopeStep derives the scheme from the client-facing leg.
+		var clientSnap *envelope.TLSSnapshot
+		if override != nil && override.tlsTerminated {
+			clientSnap = override.clientTLSSnapshot
+		}
+		m.handleTCPForwardConnRaw(connCtx, parentStack, connID, entry.target, connLogger, clientConn, upstreamConn, clientSnap, upstreamSnap)
 		return
 	}
 
@@ -468,17 +476,36 @@ func (m *Manager) handleTCPForwardConnWithOverride(
 // Factored out of handleTCPForwardConn so the L7 arm reads against an
 // equal-sibling structure — both call into the same session options
 // wiring and the same ctx-cancel watcher idiom.
+//
+// USK-1083: both Layers carry an EnvelopeContext (ConnID, TargetHost =
+// the forward target, per-leg TLS) so HostScopeStep gates the raw bytes,
+// RecordStep records conn_id / conn_info, and capture_scope sees the
+// target. clientTLS / upstreamTLS are nil for a plaintext leg.
 func (m *Manager) handleTCPForwardConnRaw(
 	connCtx context.Context,
 	parentStack *Stack,
-	connID string,
+	connID, target string,
 	connLogger *slog.Logger,
 	clientConn, upstreamConn net.Conn,
+	clientTLS, upstreamTLS *envelope.TLSSnapshot,
 ) {
 	stack := connector.NewConnectionStack(connID)
-	clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send)
+	clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send,
+		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+			ConnID:     connID,
+			TargetHost: target,
+			TLS:        clientTLS,
+		}),
+		bytechunk.WithStateReleaser(parentStack.PluginV2Engine),
+	)
 	stack.PushClient(clientLayer)
-	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive)
+	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive,
+		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+			ConnID:     connID,
+			TargetHost: target,
+			TLS:        upstreamTLS,
+		}),
+	)
 	stack.PushUpstream(upstreamLayer)
 
 	defer stack.Close()
@@ -507,7 +534,9 @@ func (m *Manager) handleTCPForwardConnRaw(
 	// read from the start, each running Pipeline.Run on every RawMessage
 	// envelope, and a server-speaks-first protocol's banner is relayed
 	// without waiting for the client (USK-1216).
-	if err := session.RunPreDialedStackSession(connCtx, stack, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+	// runRawRelaySession also releases the client Layer's plugin scopes
+	// after the session exits (USK-1083 review S-2).
+	if err := runRawRelaySession(connCtx, stack, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 		connLogger.Debug("tcp forward session ended with error", "error", err)
 	}
 }

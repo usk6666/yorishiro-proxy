@@ -95,11 +95,17 @@ func (h *sseProxyHarness) run() (clientBody []byte, store *testStore) {
 		eventDeadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(eventDeadline) {
 			_ = clientA.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-			n, _ := clientA.Read(buf)
+			n, rerr := clientA.Read(buf)
 			if n > 0 {
 				all = append(all, buf[:n]...)
 			}
 			if h.chunkedTE && bytes.HasSuffix(all, []byte("0\r\n\r\n")) {
+				break
+			}
+			// Non-chunked framing has no in-band terminator: the proxy
+			// ends the body by closing the client conn after upstream
+			// closes, so EOF (or any non-timeout error) is the end signal.
+			if rerr != nil && !isReadTimeout(rerr) {
 				break
 			}
 		}

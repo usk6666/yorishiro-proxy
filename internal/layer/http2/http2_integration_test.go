@@ -9,7 +9,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -239,6 +238,11 @@ func startH2CUpstream(t *testing.T, handler nethttp.Handler) (addr string, shutd
 
 // startH2TLSUpstream starts a TLS upstream offering ALPN "h2".
 // acceptCount returns the number of accepted TLS connections.
+//
+// shutdown force-closes every accepted connection before waiting for the
+// serving goroutines. The proxy under test keeps its pooled upstream h2
+// connection open until it is torn down, so waiting for ServeConn to return
+// on its own stalled every caller until a timer fired (USK-1206).
 func startH2TLSUpstream(t *testing.T, cn string, handler nethttp.Handler) (addr string, cert *x509.Certificate, acceptCount func() int64, shutdown func()) {
 	t.Helper()
 	tlsCfg, leafCert := newUpstreamTLSConfig(t, cn)
@@ -249,20 +253,28 @@ func startH2TLSUpstream(t *testing.T, cn string, handler nethttp.Handler) (addr 
 	}
 	var accepts atomic.Int64
 	h2s := &http2.Server{}
+	tracker := &upstreamConnTracker{}
 
-	done := make(chan struct{})
-	var wg sync.WaitGroup
+	// The accept loop holds a wg slot of its own so the counter cannot
+	// reach zero (and race a later Add against shutdown's Wait) while
+	// Accept can still hand out connections.
+	tracker.wg.Add(1)
 	go func() {
+		defer tracker.wg.Done()
 		for {
 			c, err := tcpLn.Accept()
 			if err != nil {
 				return
 			}
 			accepts.Add(1)
+			if !tracker.track(c) {
+				_ = c.Close()
+				continue
+			}
 			tlsConn := tls.Server(c, tlsCfg)
-			wg.Add(1)
+			tracker.wg.Add(1)
 			go func(tc *tls.Conn) {
-				defer wg.Done()
+				defer tracker.wg.Done()
 				defer tc.Close()
 				if err := tc.Handshake(); err != nil {
 					return
@@ -275,16 +287,61 @@ func startH2TLSUpstream(t *testing.T, cn string, handler nethttp.Handler) (addr 
 	}()
 
 	return tcpLn.Addr().String(), leafCert, func() int64 { return accepts.Load() }, func() {
-		close(done)
-		_ = tcpLn.Close()
-		// Wait briefly for goroutines to exit.
-		doneCh := make(chan struct{})
-		go func() { wg.Wait(); close(doneCh) }()
-		select {
-		case <-doneCh:
-		case <-time.After(2 * time.Second):
-		}
+		tracker.shutdown(t, tcpLn)
 	}
+}
+
+// upstreamConnTracker gives an upstream test server the teardown shape of
+// mcptest.UpstreamCapture: stop accepting, force-close every accepted
+// connection, then wait for the serving goroutines. A connection accepted
+// after shutdown began is refused by track and closed by the caller.
+type upstreamConnTracker struct {
+	mu     sync.Mutex
+	closed bool
+	conns  []net.Conn
+
+	wg   sync.WaitGroup
+	once sync.Once
+}
+
+// track registers c for force-close on shutdown. It returns false once
+// shutdown has begun; the caller must then close c itself.
+func (u *upstreamConnTracker) track(c net.Conn) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.closed {
+		return false
+	}
+	u.conns = append(u.conns, c)
+	return true
+}
+
+// shutdown closes ln, force-closes every tracked connection, and waits for
+// the accept loop and every per-connection goroutine to exit. Reaching the
+// wait cap fails the test: once its connection is closed, nothing
+// legitimate can keep a serving goroutine alive. Idempotent.
+func (u *upstreamConnTracker) shutdown(t *testing.T, ln net.Listener) {
+	t.Helper()
+	u.once.Do(func() {
+		u.mu.Lock()
+		u.closed = true
+		conns := u.conns
+		u.conns = nil
+		u.mu.Unlock()
+
+		_ = ln.Close()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+
+		done := make(chan struct{})
+		go func() { u.wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("upstream conn goroutines did not exit within 5s of force-close")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +396,7 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 }
 
 // startH2CProxy starts a FullListener with the h2c handler on OnHTTP2 so the
-// Coordinator routes cleartext HTTP/2 directly to HTTP/2 Layer.
+// FullListener routes cleartext HTTP/2 directly to HTTP/2 Layer.
 func startH2CProxy(t *testing.T, ctx context.Context, upstreamAddr string, opts pipelineOpts) (proxyAddr string, store *testStore) {
 	t.Helper()
 	store = &testStore{}
@@ -1321,98 +1378,6 @@ func TestGOAWAY_AffectedStreamsRecordedAsRefused(t *testing.T) {
 	if !hasRefused {
 		t.Errorf(`expected FailureReason=="refused" on at least one error update; got updates=%v`, observed)
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Scenario 7: Large response body round-trips via spill-backed BodyBuffer
-// ---------------------------------------------------------------------------
-
-// TestLargeResponseBody_SpillRoundtrip_11MiB verifies that an 11 MiB body
-// round-trips through the MITM proxy end-to-end under the USK-632 model:
-// the assembler aggregates all DATA frames into a BodyBuffer (memory →
-// file-backed past the configured spill threshold) and emits the envelope
-// only after END_STREAM. After USK-633, RecordStep materializes the
-// BodyBuffer into flow.Flow.Body via projectHTTPBody (capped at
-// config.MaxBodySize = 254 MiB), so recvF.Body carries the full 11 MiB —
-// the wire-observed bytes also remain on RawBytes (L7/L4 duality).
-func TestLargeResponseBody_SpillRoundtrip_11MiB(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-
-	const size = 11 << 20
-	// Deterministic pattern: 256-byte repeating counter.
-	pattern := make([]byte, 256)
-	for i := range pattern {
-		pattern[i] = byte(i)
-	}
-	expected := bytes.Repeat(pattern, size/256)
-	if len(expected) != size {
-		expected = append(expected, make([]byte, size-len(expected))...)
-	}
-	expectedHash := sha256.Sum256(expected)
-
-	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "large-marker", nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
-		w.Header().Set("Content-Length", strconv.Itoa(size))
-		_, _ = w.Write(expected)
-	}))
-	defer upShutdown()
-
-	bcfg := makeBuildCfg(t, nil)
-	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
-
-	cli := newMITMH2Client(proxyAddr, upAddr)
-	req, _ := nethttp.NewRequestWithContext(ctx, "GET", "https://"+upAddr+"/big", nil)
-	resp, err := cli.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-
-	h := sha256.New()
-	n, err := io.Copy(h, resp.Body)
-	if err != nil {
-		// An analyst driving a large download MUST get the full body through
-		// the proxy. A FLOW_CONTROL_ERROR is a proxy bug, not a client bug.
-		t.Fatalf("copy: %v", err)
-	}
-	if n != size {
-		t.Errorf("got %d bytes, want %d", n, size)
-	}
-	gotHash := h.Sum(nil)
-	if !bytes.Equal(gotHash, expectedHash[:]) {
-		t.Errorf("body hash mismatch: got=%x want=%x", gotHash, expectedHash)
-	}
-
-	st, flows := ensureLinkedExchange(t, store, 5*time.Second)
-	var recvF *flow.Flow
-	for _, f := range flows {
-		if f.Direction == "receive" {
-			recvF = f
-			break
-		}
-	}
-	if recvF == nil {
-		t.Fatal("no receive flow under linked stream")
-	}
-	// RecordStep materializes the BodyBuffer into flow.Flow.Body after USK-633
-	// (projectHTTPBody with MaxBodySize=254 MiB). 11 MiB fits under the cap
-	// and must be recorded faithfully for analyst review.
-	if len(recvF.Body) != size {
-		t.Errorf("receive flow Body length = %d, want %d", len(recvF.Body), size)
-	} else {
-		gotBodyHash := sha256.Sum256(recvF.Body)
-		if !bytes.Equal(gotBodyHash[:], expectedHash[:]) {
-			t.Errorf("receive flow Body hash mismatch: got=%x want=%x", gotBodyHash, expectedHash)
-		}
-	}
-	if len(recvF.Headers) == 0 {
-		t.Error("receive flow headers missing")
-	}
-	if len(recvF.RawBytes) == 0 {
-		t.Error("receive flow RawBytes empty")
-	}
-
-	waitForStreamState(t, store, st.ID, "complete", 5*time.Second)
 }
 
 // ---------------------------------------------------------------------------

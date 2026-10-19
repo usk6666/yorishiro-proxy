@@ -332,17 +332,3 @@ func isGRPCContentType(ct string) bool {
 	}
 	return strings.HasPrefix(mt, "application/grpc+")
 }
-
-// EnvelopeIsH2Event reports whether env.Message is one of the HTTP/2 event
-// types. Useful in callers that want to sanity-check a Channel they have
-// NOT yet wrapped with the aggregator.
-func EnvelopeIsH2Event(env *envelope.Envelope) bool {
-	if env == nil || env.Message == nil {
-		return false
-	}
-	switch env.Message.(type) {
-	case *http2.H2HeadersEvent, *http2.H2DataEvent, *http2.H2TrailersEvent:
-		return true
-	}
-	return false
-}

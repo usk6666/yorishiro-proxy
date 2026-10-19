@@ -124,7 +124,7 @@ func startFuzzRawTCPServer(t *testing.T) (string, func() [][]byte) {
 				buf := make([]byte, 8192)
 				var got []byte
 				for {
-					_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+					_ = c.SetReadDeadline(rawUpstreamReadDeadline(len(got) > 0))
 					n, err := c.Read(buf)
 					if n > 0 {
 						got = append(got, buf[:n]...)
@@ -183,7 +183,7 @@ func startFuzzRawTLSServer(t *testing.T) (string, func() [][]byte) {
 				buf := make([]byte, 8192)
 				var got []byte
 				for {
-					_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+					_ = c.SetReadDeadline(rawUpstreamReadDeadline(len(got) > 0))
 					n, err := c.Read(buf)
 					if n > 0 {
 						got = append(got, buf[:n]...)

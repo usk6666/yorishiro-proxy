@@ -81,46 +81,12 @@ func TestE2E_LiveConnReconcile_SOCKS5PassthroughCutOnReload(t *testing.T) {
 	}
 }
 
-// echoUpstream is a TCP echo server counting the bytes it received.
-func echoUpstream(t *testing.T) (string, *atomic.Int64) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen echo: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	var received atomic.Int64
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				buf := make([]byte, 4096)
-				for {
-					n, err := c.Read(buf)
-					if n > 0 {
-						received.Add(int64(n))
-						if _, werr := c.Write(buf[:n]); werr != nil {
-							return
-						}
-					}
-					if err != nil {
-						return
-					}
-				}
-			}(c)
-		}
-	}()
-	return ln.Addr().String(), &received
-}
-
 // TestE2E_LiveConnReconcile_BytechunkCutOnReload is T3 / acceptance
 // criterion 2 (bytechunk): a CONNECT tunnel carrying bytes that are
-// neither TLS nor HTTP — whose envelopes carry no TargetHost, so
-// HostScopeStep never re-checks them — is closed by the reload.
+// neither TLS nor HTTP is closed by the reload. The live-connection
+// registry cuts it; since USK-1083 its envelopes also carry TargetHost,
+// so HostScopeStep would block a later chunk as well. echoUpstream lives
+// in raw_target_scope_smoke_integration_test.go.
 func TestE2E_LiveConnReconcile_BytechunkCutOnReload(t *testing.T) {
 	target, received := echoUpstream(t)
 	h, policyPath := bootReloadHarness(t)

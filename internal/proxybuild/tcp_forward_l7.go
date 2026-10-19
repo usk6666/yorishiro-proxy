@@ -139,6 +139,17 @@ func runTCPForwardHTTP1ExchangeLoop(
 			go func(ch layer.Channel) {
 				defer wg.Done()
 				runForwardHTTP1Exchange(ctx, stack, ch, upstreamH1, p, sessOpts, target, logger, filter, baseGRPCWebOpts, headRecorder)
+				if upstreamH1.Retired() {
+					// USK-1079 review F-2: the single upstream conn was
+					// retired after a raw-authoritative exchange and TCP
+					// forward has no redial chain, so no later request on
+					// this client conn can be answered. End the client
+					// conn now — after this exchange's response was
+					// written — so the client sees a prompt close instead
+					// of waiting until its own timeout. The close unblocks
+					// this loop; the caller tears the stack down.
+					_ = clientH1.Close()
+				}
 			}(clientCh)
 		}
 	}
