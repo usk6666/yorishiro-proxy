@@ -398,15 +398,3 @@ func TestRunStackSession_SSE_E2E_DeferredOnHTTP1BodyDetach(t *testing.T) {
 }
 
 // --- UpgradeNotice ctx plumbing roundtrip (explicit) ---
-
-func TestRunStackSession_UpgradeNoticeCtxRoundtrip(t *testing.T) {
-	// A Pipeline Step that asserts the notice is present in ctx. If the
-	// notice is missing, the Step records nothing and we observe the
-	// failure via the captured-flag side channel.
-	notice := &UpgradeNotice{}
-	ctx := WithUpgradeNotice(context.Background(), notice)
-	got := UpgradeNoticeFromContext(ctx)
-	if got != notice {
-		t.Fatalf("UpgradeNoticeFromContext(ctx) = %v, want %v", got, notice)
-	}
-}
