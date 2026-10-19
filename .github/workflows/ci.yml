@@ -132,7 +132,7 @@ jobs:
   # It runs ONLY the tests declared in plain `//go:build e2e` files (USK-1209).
   # `-tags 'e2e e2e_smoke'` also compiles every untagged test, so the old
   # `go test ./...` line re-ran the entire fast tier that the `test` job above
-  # already runs -- ~9,000 tests twice per PR. The Makefile recipe selects the
+  # already runs -- ~4,600 top-level tests twice per PR. The Makefile recipe selects the
   # smoke packages and test names with tools/smokeselect and fails loudly if
   # that selection errors or comes back empty. Through the Makefile for the
   # same USK-1058 reason as `test`.

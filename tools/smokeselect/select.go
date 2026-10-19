@@ -56,11 +56,16 @@ func (p Package) testFiles() []string {
 // build configuration.
 type Lister func(ctx context.Context, dir string, tags, patterns []string) ([]Package, error)
 
-// GoList is the production Lister: it runs `go list -e -json` in dir. With
-// -e, per-package problems are reported in Package.Error rather than as a
-// non-zero exit; Select decides which of those are fatal.
+// GoList is the production Lister: it runs `go list -e -race -json` in dir.
+// With -e, per-package problems are reported in Package.Error rather than as
+// a non-zero exit; Select decides which of those are fatal.
+//
+// -race is passed on every call (tagged and default alike) because the smoke
+// recipe runs `go test -race`, which adds the `race` build tag: without it a
+// `//go:build e2e && race` file would be invisible here yet built by the
+// recipe, silently shrinking the merge gate.
 func GoList(ctx context.Context, dir string, tags, patterns []string) ([]Package, error) {
-	args := []string{"list", "-e", "-json=ImportPath,Dir,TestGoFiles,XTestGoFiles,Error"}
+	args := []string{"list", "-e", "-race", "-json=ImportPath,Dir,TestGoFiles,XTestGoFiles,Error"}
 	if len(tags) > 0 {
 		args = append(args, "-tags", strings.Join(tags, ","))
 	}
