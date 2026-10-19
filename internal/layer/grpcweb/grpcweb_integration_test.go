@@ -651,7 +651,34 @@ func sendGRPCWebHTTP1Request(t *testing.T, proxyAddr, target string, payload []b
 // and posts a single gRPC-Web request. Returns the response body bytes.
 func sendGRPCWebHTTP2Request(t *testing.T, proxyAddr, target string, payload []byte, base64Wire bool) (status int, ct string, body []byte) {
 	t.Helper()
-	tr := &http2.Transport{
+	frame := grpcweb.EncodeFrame(false, false, payload)
+	reqBody := frame
+	requestCT := "application/grpc-web+proto"
+	if base64Wire {
+		reqBody = grpcweb.EncodeBase64Body(frame)
+		requestCT = "application/grpc-web-text+proto"
+	}
+	cli := &nethttp.Client{Transport: h2TransportViaProxy(proxyAddr, target), Timeout: 30 * time.Second}
+	urlStr := "https://" + target + "/pkg.Echo/Say"
+	req, err := nethttp.NewRequest("POST", urlStr, bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", requestCT)
+	resp, err := cli.Do(req)
+	if err != nil {
+		t.Fatalf("h2 client Do: %v", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header.Get("Content-Type"), rb
+}
+
+// h2TransportViaProxy returns an x/net/http2 Transport whose every dial
+// CONNECTs to target through proxyAddr and then performs a TLS handshake
+// with ALPN h2 over the tunnel.
+func h2TransportViaProxy(proxyAddr, target string) *http2.Transport {
+	return &http2.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true, //nolint:gosec // test
 			NextProtos:         []string{"h2"},
@@ -689,27 +716,6 @@ func sendGRPCWebHTTP2Request(t *testing.T, proxyAddr, target string, payload []b
 			return tlsConn, nil
 		},
 	}
-	frame := grpcweb.EncodeFrame(false, false, payload)
-	reqBody := frame
-	requestCT := "application/grpc-web+proto"
-	if base64Wire {
-		reqBody = grpcweb.EncodeBase64Body(frame)
-		requestCT = "application/grpc-web-text+proto"
-	}
-	cli := &nethttp.Client{Transport: tr, Timeout: 30 * time.Second}
-	urlStr := "https://" + target + "/pkg.Echo/Say"
-	req, err := nethttp.NewRequest("POST", urlStr, bytes.NewReader(reqBody))
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	req.Header.Set("Content-Type", requestCT)
-	resp, err := cli.Do(req)
-	if err != nil {
-		t.Fatalf("h2 client Do: %v", err)
-	}
-	defer resp.Body.Close()
-	rb, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, resp.Header.Get("Content-Type"), rb
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,7 +1035,7 @@ func TestGRPCWeb_VariantRecordingOnTransform(t *testing.T) {
 	defer cancel()
 
 	respPayload := []byte("server-ack")
-	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+	upstreamLn, captured := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
 		return buildGRPCWebResponseHTTP(respPayload, 0, "OK", false)
 	})
 	defer upstreamLn.Close()
@@ -1096,6 +1102,14 @@ func TestGRPCWeb_VariantRecordingOnTransform(t *testing.T) {
 			t.Errorf("modified flow Body does not contain replacement: %q", modFlow.Body)
 		}
 	}
+
+	// USK-1203: the transform grew the payload (18 → 20 bytes), so the
+	// client's Content-Length no longer matches what the proxy sends. The
+	// upstream must see a Content-Length equal to the bytes actually sent
+	// and an intact LPM frame — a stale value truncates the frame and leaves
+	// its tail on the connection (request desync).
+	upstreamLn.Close()
+	assertUpstreamBody(t, captured(), grpcweb.EncodeFrame(false, false, []byte("the-REDACTED-payload")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,12 +1125,12 @@ func runMalformedAnomalyTest(t *testing.T, body []byte, contentType, anomalyMeta
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
-		// Upstream may receive a connection (the proxy dials lazily on
-		// the first upstream.Send carrying the Anomaly Start) but never a
-		// real request body — sendStartLocked just buffers metadata, no
-		// flush sentinel ever follows because the channel latched EOF.
-		return buildGRPCWebResponseHTTP([]byte("never"), 0, "OK", false)
+	// USK-1203: the malformed body must be forwarded to the upstream
+	// verbatim (MITM principles 1 & 5 — record the anomaly AND relay what
+	// the wire carried), and the upstream's reply must reach the client.
+	upstreamResp := buildGRPCWebResponseHTTP([]byte("ack-malformed"), 0, "OK", false)
+	upstreamLn, captured := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+		return upstreamResp
 	})
 	defer upstreamLn.Close()
 	target := upstreamLn.Addr().String()
@@ -1131,23 +1145,22 @@ func runMalformedAnomalyTest(t *testing.T, body []byte, contentType, anomalyMeta
 	if _, err := tlsConn.Write(append([]byte(req), body...)); err != nil {
 		t.Fatalf("write malformed request: %v", err)
 	}
-	// Drain any response bytes — the proxy closes the connection cleanly
-	// after the session finalizes (no error response is sent because the
-	// session terminated via EOF, not StreamError).
-	_ = tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	tmp := make([]byte, 1024)
-	for {
-		_, err := tlsConn.Read(tmp)
-		if err != nil {
-			break
-		}
-	}
+	clientResp := readUntilClose(tlsConn, 5*time.Second)
 
 	select {
 	case <-sessionDone:
 	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for session to complete")
 	}
+
+	// The client must receive the upstream's response (status line and
+	// body bytes), not an empty read terminated by EOF.
+	assertClientGotUpstreamResponse(t, clientResp, upstreamResp)
+
+	// The upstream must have received the malformed body byte-for-byte with
+	// the client's original Content-Length.
+	upstreamLn.Close()
+	assertUpstreamBody(t, captured(), body)
 
 	// The session sees clean termination because emitAnomalyStart latches
 	// io.EOF — no *layer.StreamError reaches OnComplete.
@@ -1227,6 +1240,91 @@ func truncate(b []byte) []byte {
 		return b
 	}
 	return b[:maxLen]
+}
+
+// readUntilClose reads from conn until EOF, an error, or the read deadline
+// (timeout from now) fires, and returns every byte read.
+func readUntilClose(conn net.Conn, timeout time.Duration) []byte {
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	var buf bytes.Buffer
+	tmp := make([]byte, 4096)
+	for {
+		n, err := conn.Read(tmp)
+		if n > 0 {
+			buf.Write(tmp[:n])
+		}
+		if err != nil {
+			return buf.Bytes()
+		}
+	}
+}
+
+// splitHTTPMessage splits raw HTTP/1.x message bytes into the header block
+// (without the terminating blank line) and the body.
+func splitHTTPMessage(t *testing.T, raw []byte) (headers string, body []byte) {
+	t.Helper()
+	idx := bytes.Index(raw, []byte("\r\n\r\n"))
+	if idx < 0 {
+		t.Fatalf("no header terminator in HTTP message: %q", truncate(raw))
+	}
+	return string(raw[:idx]), raw[idx+4:]
+}
+
+// headerValues returns every value of the header field name
+// (case-insensitive) in an HTTP/1.x header block, in wire order. The first
+// line (request / status line) is skipped.
+func headerValues(headers, name string) []string {
+	var out []string
+	lines := strings.Split(headers, "\r\n")
+	for _, line := range lines[1:] {
+		n, v, ok := strings.Cut(line, ":")
+		if ok && strings.EqualFold(strings.TrimSpace(n), name) {
+			out = append(out, strings.TrimSpace(v))
+		}
+	}
+	return out
+}
+
+// assertClientGotUpstreamResponse asserts the client received the upstream
+// response's status line and body. The proxy re-assembles the response, so
+// headers are not compared byte-for-byte; the body must be identical.
+func assertClientGotUpstreamResponse(t *testing.T, clientResp, upstreamResp []byte) {
+	t.Helper()
+	if len(clientResp) == 0 {
+		t.Errorf("client received no response bytes (the proxy did not relay the upstream response)")
+		return
+	}
+	if !bytes.HasPrefix(clientResp, []byte("HTTP/1.1 200")) {
+		t.Errorf("client response status line = %q, want HTTP/1.1 200", truncate(clientResp))
+	}
+	_, wantBody := splitHTTPMessage(t, upstreamResp)
+	_, gotBody := splitHTTPMessage(t, clientResp)
+	if !bytes.Equal(gotBody, wantBody) {
+		t.Errorf("client response body mismatch:\n got %d bytes: %q\nwant %d bytes: %q",
+			len(gotBody), truncate(gotBody), len(wantBody), truncate(wantBody))
+	}
+}
+
+// assertUpstreamBody asserts the upstream captured exactly one request whose
+// body byte-equals wantBody, framed by a single Content-Length equal to
+// len(wantBody) and no Transfer-Encoding.
+func assertUpstreamBody(t *testing.T, reqs [][]byte, wantBody []byte) {
+	t.Helper()
+	if len(reqs) != 1 {
+		t.Fatalf("upstream captured %d requests, want 1 (the proxy did not forward the request)", len(reqs))
+	}
+	hdrs, gotBody := splitHTTPMessage(t, reqs[0])
+	if !bytes.Equal(gotBody, wantBody) {
+		t.Errorf("upstream request body mismatch:\n got %d bytes: %q\nwant %d bytes: %q",
+			len(gotBody), truncate(gotBody), len(wantBody), truncate(wantBody))
+	}
+	wantCL := strconv.Itoa(len(wantBody))
+	if got := headerValues(hdrs, "Content-Length"); len(got) != 1 || got[0] != wantCL {
+		t.Errorf("upstream Content-Length = %q, want [%q]", got, wantCL)
+	}
+	if te := headerValues(hdrs, "Transfer-Encoding"); len(te) != 0 {
+		t.Errorf("upstream Transfer-Encoding = %q, want absent", te)
+	}
 }
 
 // TestGRPCWeb_MalformedBase64ProducesAnomaly — a request with content-type
@@ -1478,12 +1576,25 @@ func TestGRPCWeb_MissingTrailerProducesAnomaly(t *testing.T) {
 
 	proxyAddr, store, _, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{})
 
-	_ = sendGRPCWebHTTP1Request(t, proxyAddr, target, []byte("ping"), false)
+	clientResp := sendGRPCWebHTTP1Request(t, proxyAddr, target, []byte("ping"), false)
 
 	select {
 	case <-sessionDone:
 	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for session to complete")
+	}
+
+	// USK-1203: the client receives exactly what the upstream sent — the
+	// data frame and no trailer. The proxy must not fabricate a
+	// "grpc-status: 0" trailer the upstream never sent (that would turn a
+	// truncated response into an apparent success).
+	if len(clientResp) == 0 {
+		t.Errorf("client received no response bytes")
+	} else {
+		_, gotBody := splitHTTPMessage(t, clientResp)
+		if want := grpcweb.EncodeFrame(false, false, respPayload); !bytes.Equal(gotBody, want) {
+			t.Errorf("client response body = %q, want upstream's %q (no synthesized trailer)", gotBody, want)
+		}
 	}
 
 	// The session terminates cleanly — the missing trailer is recorded as an
@@ -1553,12 +1664,13 @@ func TestGRPCWeb_UnexpectedRequestTrailerProducesAnomaly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
-		// Upstream replies with a normal grpc-web response so the proxy's
-		// Receive-side path is well-formed (no second anomaly to confuse
-		// the assertion). The request the upstream actually sees has the
-		// trailer stripped (defensive at sendEndLocked when dir==Send).
-		return buildGRPCWebResponseHTTP([]byte("ack"), 0, "OK", false)
+	// Upstream replies with a normal grpc-web response so the proxy's
+	// Receive-side path is well-formed (no second anomaly to confuse the
+	// assertion). USK-1203: the request the upstream sees must carry the
+	// observed trailer frame verbatim — the proxy does not strip it.
+	upstreamResp := buildGRPCWebResponseHTTP([]byte("ack"), 0, "OK", false)
+	upstreamLn, captured := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+		return upstreamResp
 	})
 	defer upstreamLn.Close()
 	target := upstreamLn.Addr().String()
@@ -1579,20 +1691,20 @@ func TestGRPCWeb_UnexpectedRequestTrailerProducesAnomaly(t *testing.T) {
 	if _, err := tlsConn.Write(append([]byte(req), body...)); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
-	_ = tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	tmp := make([]byte, 1024)
-	for {
-		_, err := tlsConn.Read(tmp)
-		if err != nil {
-			break
-		}
-	}
+	clientResp := readUntilClose(tlsConn, 5*time.Second)
 
 	select {
 	case <-sessionDone:
 	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for session to complete")
 	}
+
+	// USK-1203: the client receives the upstream's reply, and the upstream
+	// received the full request body (data frame + trailer frame, 30 bytes)
+	// under the client's Content-Length — not 9 of 30 declared bytes.
+	assertClientGotUpstreamResponse(t, clientResp, upstreamResp)
+	upstreamLn.Close()
+	assertUpstreamBody(t, captured(), body)
 
 	streams := store.getStreams()
 	if len(streams) != 1 {

@@ -164,9 +164,13 @@ func (e *TransformEngine) TransformStart(ctx context.Context, env *envelope.Enve
 			modified = true
 		}
 	}
-	if modified {
+	if modified && !envelope.IsGRPCWebPassthroughStart(env) {
 		// Metadata mutations invalidate the wire-encoded HEADERS frame
-		// snapshot; clear Raw so the downstream Layer re-encodes.
+		// snapshot; clear Raw so the downstream Layer re-encodes. A
+		// gRPC-Web malformed-body Start is the exception: its Raw is the
+		// observed body (not a header snapshot) that the upstream-side
+		// Layer forwards verbatim, and metadata lives on the HTTP headers
+		// it rebuilds anyway (USK-1203).
 		env.Raw = nil
 	}
 	return modified

@@ -105,6 +105,10 @@ func (e *SafetyEngine) RuleCount() int {
 // CheckInput runs the loaded rules against env.Message and returns the
 // first matching violation. Returns nil when no rule matches.
 //
+// For a gRPC-Web malformed-body Start (envelope.IsGRPCWebPassthroughStart)
+// the payload / body targets are additionally matched against the
+// passthrough body on env.Raw — see passthroughBodyForms (USK-1203).
+//
 // CheckInput is symmetric with rules/http.CheckInput: ctx is threaded
 // for parity (gRPC payloads don't currently spill to disk so the ctx
 // is unused, but the signature matches the HTTP variant for caller
@@ -118,8 +122,12 @@ func (e *SafetyEngine) CheckInput(ctx context.Context, env *envelope.Envelope, m
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	bodyForms := passthroughBodyForms(env, msg)
 	for i := range e.rules {
 		if v := e.checkRule(&e.rules[i], msg); v != nil {
+			return v
+		}
+		if v := checkPassthroughBody(&e.rules[i], bodyForms); v != nil {
 			return v
 		}
 	}
@@ -135,9 +143,12 @@ func (e *SafetyEngine) CheckInputAll(ctx context.Context, env *envelope.Envelope
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	bodyForms := passthroughBodyForms(env, msg)
 	var violations []*Violation
 	for i := range e.rules {
 		if v := e.checkRule(&e.rules[i], msg); v != nil {
+			violations = append(violations, v)
+		} else if v := checkPassthroughBody(&e.rules[i], bodyForms); v != nil {
 			violations = append(violations, v)
 		}
 	}
