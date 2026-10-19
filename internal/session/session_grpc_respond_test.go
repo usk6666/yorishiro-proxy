@@ -149,3 +149,100 @@ func TestRunSession_GRPCEndRespond_SendFailureSurfaces(t *testing.T) {
 		t.Errorf("RunSession err = %v, want wrapping %v", err, sendErr)
 	}
 }
+
+// TestRunSession_GRPCEndRespond_UpstreamRelayAfterEndIsClean pins the
+// USK-1202 review finding F-1: upstreamToClient may already hold an upstream
+// envelope when the proxy delivers its gRPC End terminator. Its client.Send
+// then fails (the real grpc Channel refuses anything after End with
+// errSendAfterEnd). That failure is a consequence of the proxy ending the
+// RPC on purpose, so it must not turn the session result into an error.
+//
+// The interleaving is forced without sleeps on the hot path: the client's
+// Send of the End latches "end sent", releases the upstream envelope, and
+// then waits until the relay's Send was attempted and either the errgroup
+// ctx was cancelled (pre-fix: the relay failure won errOnce) or a short
+// grace period passed.
+func TestRunSession_GRPCEndRespond_UpstreamRelayAfterEndIsClean(t *testing.T) {
+	errAfterEnd := errors.New("grpc: send after End on this direction")
+
+	var endMu sync.Mutex
+	endSent := false
+	relayAttempted := make(chan struct{})
+	var relayOnce sync.Once
+
+	upstreamGate := make(chan struct{}, 1)
+	upstreamCh := &mockChannel{
+		streamID: "up",
+		nextEnvelopes: []*envelope.Envelope{{
+			StreamID:  "up",
+			Direction: envelope.Receive,
+			Protocol:  envelope.ProtocolGRPC,
+			Message:   &envelope.GRPCStartMessage{Service: "svc", Method: "M"},
+		}},
+		nextGate: upstreamGate,
+	}
+
+	clientCh := &mockChannel{
+		streamID: "grpc-stream",
+		nextEnvelopes: []*envelope.Envelope{
+			grpcSendEnv(0, &envelope.GRPCStartMessage{Service: "svc", Method: "M"}),
+			grpcSendEnv(1, &envelope.GRPCDataMessage{Payload: []byte("blocked")}),
+		},
+	}
+	clientCh.sendHook = func(ctx context.Context, env *envelope.Envelope) error {
+		if _, ok := env.Message.(*envelope.GRPCEndMessage); ok {
+			endMu.Lock()
+			endSent = true
+			endMu.Unlock()
+			upstreamGate <- struct{}{}
+			<-relayAttempted
+			select {
+			case <-ctx.Done():
+			case <-time.After(500 * time.Millisecond):
+			}
+			return nil
+		}
+		endMu.Lock()
+		ended := endSent
+		endMu.Unlock()
+		if ended {
+			relayOnce.Do(func() { close(relayAttempted) })
+			return errAfterEnd
+		}
+		return nil
+	}
+
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
+	}
+	p := pipeline.New(grpcEndRespondStep{blockSeq: 1, blockedBy: "safety_filter"})
+
+	var mu sync.Mutex
+	var completeErr error
+	completed := false
+	opts := SessionOptions{
+		OnComplete: func(_ context.Context, _ string, err error) {
+			mu.Lock()
+			completed = true
+			completeErr = err
+			mu.Unlock()
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := RunSession(ctx, clientCh, dial, p, opts)
+	if err != nil {
+		t.Errorf("RunSession err = %v, want nil (relay failure after the proxy's End terminator)", err)
+	}
+	mu.Lock()
+	if !completed || completeErr != nil {
+		t.Errorf("OnComplete called=%v err=%v, want called with nil", completed, completeErr)
+	}
+	mu.Unlock()
+	select {
+	case <-relayAttempted:
+	default:
+		t.Fatalf("upstream relay Send after End was never attempted; interleaving not exercised")
+	}
+}
