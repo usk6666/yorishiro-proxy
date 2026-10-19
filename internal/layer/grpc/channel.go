@@ -190,6 +190,12 @@ type lpmFrame struct {
 
 // wireBytes returns the LPM exactly as observed (verbatim prefix +
 // payload) in a fresh slice.
+//
+// Note: this keeps the flag byte verbatim, whereas the normal, case-3 and
+// decode-failure record paths use dataEnv.Raw, which currently normalizes
+// the flag byte to 0/1. So on the cap-trip path (tooLargeWireEnvelopesLocked)
+// the preceding complete LPMs' rows can differ from what the other paths
+// would record for the same bytes. Tracked by USK-1256.
 func (f lpmFrame) wireBytes() []byte {
 	out := make([]byte, 0, lpmPrefixLen+len(f.Payload))
 	out = append(out, f.Prefix[:]...)
@@ -722,7 +728,7 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 			// USK-1254: the LPMs completed before the failing one in this
 			// event were observed on the wire; record them before the
 			// (unchanged) RST + StreamError. The failing LPM itself gets
-			// no anomaly row here (deferred, D3).
+			// no anomaly row here (deferred; see the USK-1254 design note).
 			c.fireLPMFrameRecords(lpmWireEnvs)
 			c.rstInner(derr)
 			return derr
@@ -808,6 +814,8 @@ func (c *grpcChannel) tooLargeWireEnvelopesLocked(ev *envelope.Envelope, dir *di
 	}
 	envs := make([]*envelope.Envelope, 0, len(frames)+1)
 	for _, f := range frames {
+		// wireBytes keeps the flag byte verbatim, unlike the dataEnv.Raw
+		// used on the other record paths (USK-1256; see wireBytes).
 		envs = append(envs, c.buildLPMWireEnvelopeLocked(ev, f.wireBytes()))
 	}
 	envs = append(envs, c.buildPartialLPMEnvelopeLocked(ev, dir, e.raw, e.compressed, e.declared, evt.EndStream, envelope.Anomaly{

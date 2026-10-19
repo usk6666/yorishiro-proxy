@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -424,4 +425,50 @@ func TestChannel_LPMPartialAnomaly_NilCallback(t *testing.T) {
 
 	_, err := nextUntilErr(t, ch, 4)
 	requireStreamError(t, err, layer.ErrorProtocol, "grpc: stream ended mid-LPM")
+}
+
+// T6: a complete LPM precedes one whose payload fails gzip decode
+// (buildDataEnvelopeLocked error path) in the same DATA event. The complete
+// LPM was observed on the wire and must be recorded before the (unchanged)
+// RST + StreamError; the failing LPM itself gets no row here.
+func TestChannel_LPMPartialAnomaly_DecodeFailureRecordsPrecedingLPM(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-decode-fail")
+	stub.pushHeaders(envelope.Send, []byte("HPACK"), requestStartHeaders("/svc.S/M",
+		envelope.KeyValue{Name: "grpc-encoding", Value: "gzip"},
+	))
+	complete := makeLPM(false, []byte("good"))
+	bad := makeLPM(true, []byte("not-gzip"))
+	stub.pushData(envelope.Send, concat(complete, bad), false)
+
+	rec := &lpmRecorder{}
+	ch := Wrap(stub, nil, RoleServer, WithLPMFrameRecordCallback(rec.cb))
+	defer ch.Close()
+
+	envs, err := nextUntilErr(t, ch, 4)
+	var se *layer.StreamError
+	if !errors.As(err, &se) {
+		t.Fatalf("Next err = %v, want *layer.StreamError", err)
+	}
+	if se.Code != layer.ErrorProtocol {
+		t.Errorf("StreamError.Code = %v, want %v", se.Code, layer.ErrorProtocol)
+	}
+	if !strings.HasPrefix(se.Reason, "grpc: gzip decode: ") {
+		t.Errorf("StreamError.Reason = %q, want prefix %q", se.Reason, "grpc: gzip decode: ")
+	}
+	requireNoDataEnvelopes(t, envs)
+	if stub.rstCode != http2.ErrCodeInternal {
+		t.Errorf("MarkTerminatedWithRST code = %d, want INTERNAL_ERROR (%d)", stub.rstCode, http2.ErrCodeInternal)
+	}
+
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("LPM record callback fired %d times, want 1 (the complete LPM preceding the decode failure)", len(got))
+	}
+	if !bytes.Equal(got[0].Raw, complete) {
+		t.Errorf("got[0].Raw = %x, want %x (the complete LPM)", got[0].Raw, complete)
+	}
+	if got[0].Message != nil {
+		t.Errorf("got[0].Message = %T, want nil (complete LPM rows carry no anomaly)", got[0].Message)
+	}
 }
