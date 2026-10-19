@@ -231,55 +231,54 @@ func (p *TargetOverrideParams) effectiveScheme() string {
 // for an operator-declared "target" — the L7 TCP forward use case, where the
 // listener was configured to forward accepted connections to a fixed upstream
 // host:port rather than CONNECT-deriving the target from the client. It is
-// the forward-side sibling of BuildConnectionStack and shares stack_builder.go's
-// private helpers (PerformClientMITM, DialUpstreamWithALPN) for the branches
-// that perform TLS.
+// the forward-side sibling of BuildConnectionStack. Unlike the MITM builder
+// it performs no TLS handshake on either side; it only assembles Layers over
+// the conns it is handed.
 //
-// Contract (USK-912 minimum-viable surface):
+// Contract:
 //
 //   - target is fixed by the caller. This function does NOT consult CONNECT
 //     headers, SOCKS5 negotiation results, or any other source of "what host
 //     does the client want to reach". The caller obtained the target from
 //     operator config (config.ForwardConfig.Target).
 //
-//   - No SNI is derived from target. When USK-915 wires in TLS termination,
-//     the caller will pass the SNI value separately (likely as an additional
-//     field on TargetOverrideParams) — the operator-declared target may be
-//     an IP literal or a name that differs from the SNI the client would
-//     present.
+//   - No SNI is derived from target. Client-side TLS termination happens
+//     caller-side (proxybuild.handleTCPForwardTLSConn in
+//     internal/proxybuild/tcp_forward_tls.go), whose per-entry tls.Config
+//     honours the wire SNI and falls back to the target host only when the
+//     client omits it — the operator-declared target may be an IP literal
+//     or a name that differs from the SNI the client presents.
 //
 //   - No ALPN is chosen here. Both TLS handshakes happen caller-side
 //     (proxybuild), which picks the client / upstream ALPN lists itself;
 //     ALPNOffers is not read by this builder.
 //
-//   - Protocol selectors other than "raw" return a "not yet wired" error
-//     citing the responsible follow-up Issue (USK-913 for L7 dispatch,
-//     USK-914 for protocol-specific dispatch, USK-915 for TLS terminate,
-//     USK-916 for upstream TLS dial). The signature and the validation pass
-//     are real today so downstream Issues can wire in their branch without
-//     re-litigating the API surface.
+//   - Protocol selects the stack shape: "raw" → [bytechunk → bytechunk];
+//     "http" / "websocket" / "sse" → [http1 → http1]; "http2" / "grpc" →
+//     h2c [http2 ServerRole → http2 ClientRole]; "auto" (or empty) peeks
+//     the client's first bytes to choose between the HTTP/1.x and raw arms
+//     (an h2c preface is rejected; h2c needs an explicit "http2").
+//     Expectation filters that need the first request / response (the
+//     websocket / sse / grpc selectors) are applied by the proxybuild
+//     handlers (internal/proxybuild/tcp_forward.go, tcp_forward_h2.go), not
+//     here.
 //
-//   - upstreamConn must be a dialed, plain (or TLS, when the caller has its
-//     own dial path) net.Conn. This builder does NOT dial; it takes the
-//     pre-dialed conn so callers retain control of dial timeouts,
-//     upstream-proxy resolution, and per-host TLS material (consistent with
+//   - upstreamConn must already be dialed — plain, or TLS-wrapped when the
+//     caller dialed upstream TLS (proxybuild.dialForwardUpstream via
+//     DialUpstreamRaw). This builder does NOT dial; it takes the pre-dialed
+//     conn so callers retain control of dial timeouts, upstream-proxy
+//     resolution, and per-host TLS material (consistent with
 //     BuildPlainHTTPStack / BuildPlainH2CStack / BuildBytechunkStack).
 //
 //   - Returns *ConnectionStack only (vs. the MITM builder's three-value
-//     return) because there are no TLS snapshots to surface in the raw case.
-//     When USK-915 / USK-916 add TLS termination this signature will be
-//     extended (or a sibling builder added — see the seam discipline in
-//     CLAUDE.md MITM Principle 2).
+//     return) because the builder produces no TLS snapshots: the caller
+//     passes the snapshots of the handshakes it performed via
+//     params.ClientTLSSnapshot / params.UpstreamTLSSnapshot, and the
+//     L7 builders stamp them onto the Layers' EnvelopeContext.TLS.
 //
 // Ownership: the returned ConnectionStack owns clientConn and upstreamConn
 // via its Layers; callers must defer stack.Close() exactly as the existing
 // sibling builders document.
-//
-// USK-912 implementation scope: the function validates inputs, returns a
-// bytechunk stack for ForwardProtocolRaw, and errors for every other
-// branch. No client-side TLS terminate happens; no L7 protocol dispatch
-// happens; no upstream TLS handshake happens. The "API ready, not yet
-// wired" stance is intentional — see the design review record on USK-912.
 func BuildConnectionStackWithTarget(
 	ctx context.Context,
 	clientConn net.Conn,
