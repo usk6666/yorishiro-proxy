@@ -204,6 +204,15 @@ type StreamUpdate struct {
 	// (Protocol="http") to the post-swap value (Protocol="websocket")
 	// once the upgrade fires. Only applied when non-empty.
 	Protocol string
+	// Scheme backfills the stream's recorded scheme (USK-1197). It exists
+	// for the overlay-first createStream path: when a wire-level overlay
+	// envelope (h2-frame / grpcweb-base64) wins the USK-908 first-write-
+	// wins race it carries no Message, so the Stream row is created with
+	// an empty Scheme; RecordStep then copies the scheme the following
+	// semantic message carries. It is not a TLS / handshake oracle — the
+	// value is whatever the semantic message records (see USK-1067).
+	// Only applied when non-empty.
+	Scheme string
 	// State sets the stream state (e.g., "complete", "error").
 	State string
 	// FailureReason sets the classification label for an errored stream.
