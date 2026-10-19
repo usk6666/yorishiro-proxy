@@ -99,8 +99,8 @@ func TestE2E_Binary_SIGHUPReloadsPolicy(t *testing.T) {
 	srv := startServerProcess(t, binary, port, token, filepath.Join(dir, "sighup.db"),
 		"-target-policy-file", policyPath, "-log-level", "info")
 	defer srv.terminate(t)
-	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 15*time.Second) {
-		t.Fatalf("binary server did not bind within 15s; stderr:\n%s", srv.stderrSnapshot())
+	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), binaryBootTimeout) {
+		t.Fatalf("binary server did not bind within %v; stderr:\n%s", binaryBootTimeout, srv.stderrSnapshot())
 	}
 
 	testTarget := func(host string) bool {
@@ -176,8 +176,8 @@ func TestE2E_Binary_SIGHUPWithoutPolicySourceUnchanged(t *testing.T) {
 	port := pickFreeBinaryPort(t)
 	srv := startServerProcess(t, binary, port, "binary-sighup-nosrc-token-0123456789", filepath.Join(t.TempDir(), "nosrc.db"))
 	defer srv.terminate(t)
-	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 15*time.Second) {
-		t.Fatalf("binary server did not bind within 15s; stderr:\n%s", srv.stderrSnapshot())
+	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), binaryBootTimeout) {
+		t.Fatalf("binary server did not bind within %v; stderr:\n%s", binaryBootTimeout, srv.stderrSnapshot())
 	}
 
 	if err := srv.cmd.Process.Signal(syscall.SIGHUP); err != nil {

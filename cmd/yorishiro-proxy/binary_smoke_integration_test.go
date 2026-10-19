@@ -72,9 +72,9 @@ func TestE2E_Binary_ServerClientRoundTrip(t *testing.T) {
 	srv := startServerProcess(t, binary, port, token, dbPath)
 	defer srv.terminate(t)
 
-	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 15*time.Second) {
+	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), binaryBootTimeout) {
 		srv.terminate(t)
-		t.Fatalf("binary server did not bind 127.0.0.1:%d within 15s; stderr so far:\n%s", port, srv.stderrSnapshot())
+		t.Fatalf("binary server did not bind 127.0.0.1:%d within %v; stderr so far:\n%s", port, binaryBootTimeout, srv.stderrSnapshot())
 	}
 
 	statusJSON := runClientQuery(t, binary, port, token, "status")
@@ -188,6 +188,13 @@ func buildBinary(t *testing.T) string {
 	}
 	return binaryBuildPath
 }
+
+// binaryBootTimeout bounds how long a spawned server may take to bind its
+// MCP listener. Generous because the child is a -race binary when the test
+// is (see buildBinary), and race-instrumented SQLite migrations make its
+// boot several times slower on a loaded runner. It is a bound, not a
+// sleep: a healthy boot returns as soon as the port answers.
+const binaryBootTimeout = 30 * time.Second
 
 // binaryChildEnv returns the environment for a spawned yorishiro-proxy
 // child: the test's own environment with HOME (and XDG_CONFIG_HOME) moved
@@ -439,10 +446,10 @@ func TestE2E_Binary_CurlProxytunnel_Smoke(t *testing.T) {
 	srv := startServerProcess(t, binary, mcpPort, token, dbPath)
 	defer srv.terminate(t)
 
-	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort)), 15*time.Second) {
+	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort)), binaryBootTimeout) {
 		srv.terminate(t)
-		t.Fatalf("binary server did not bind 127.0.0.1:%d within 15s; stderr so far:\n%s",
-			mcpPort, srv.stderrSnapshot())
+		t.Fatalf("binary server did not bind 127.0.0.1:%d within %v; stderr so far:\n%s",
+			mcpPort, binaryBootTimeout, srv.stderrSnapshot())
 	}
 
 	// Use the client subcommand to invoke proxy_start. The proxy must
