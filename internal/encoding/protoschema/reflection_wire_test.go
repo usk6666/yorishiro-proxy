@@ -1,6 +1,4 @@
-//go:build e2e
-
-// reflection_wire_integration_test.go drives protoschema.Discover end to
+// reflection_wire_test.go drives protoschema.Discover end to
 // end through defaultReflectionDialFunc — the real TCP dial /
 // http2.New(ClientRole) / OpenStream / grpclayer.Wrap /
 // buildReflectionStartEnvelope path — against a live grpc-go reflection
@@ -13,14 +11,17 @@
 // see it. assertProductionDialer below makes that structurally
 // impossible to regress back into.
 //
-// Tier — plain `//go:build e2e` (merge-gate smoke), deviating from the
-// CLAUDE.md default of `e2e && !e2e_smoke`: a well-formed `:authority` is
-// a hard precondition for every outbound gRPC dial against grpc-go
-// >= 1.83.2, it sits one line away from regression, and the existing
-// merge-gate wire guard (internal/layer/grpc/grpc_integration_test.go)
-// covers only the MITM relay path — none of the three synthetic
-// producers (resend / fuzz / reflection discover) had merge-gate wire
-// coverage.
+// Tier — untagged (fast), USK-1213. USK-1054 deliberately put these tests
+// in the per-PR merge gate rather than the CLAUDE.md default of
+// `e2e && !e2e_smoke`: a well-formed `:authority` is a hard precondition
+// for every outbound gRPC dial against grpc-go >= 1.83.2, it sits one line
+// away from regression, and the existing merge-gate wire guard
+// (internal/layer/grpc/grpc_integration_test.go) covers only the MITM relay
+// path — none of the three synthetic producers (resend / fuzz / reflection
+// discover) had merge-gate wire coverage. The tests need nothing beyond a
+// loopback grpc-go server, so dropping the build tag keeps them per-PR
+// (fast ⊂ smoke ⊂ full) while running them in every tier, including
+// `make test`.
 //
 // e2e Subsystem Verification Checklist applicability — the rows covered
 // here are Communication success, Raw bytes / wire fidelity (via the h2c
