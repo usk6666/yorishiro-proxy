@@ -76,7 +76,10 @@ func passthroughBodyForms(env *envelope.Envelope, msg envelope.Message) *passthr
 	// and a base64 body fails LPM parsing and lands here, and a backend
 	// that honours the last value decodes it — so the deny-only scan must
 	// see the decoded form too. On a genuinely binary body the extra
-	// candidates are only noise for the pattern match.
+	// candidates are only noise for the pattern match; that noise can yield
+	// a blocking false positive on a malformed binary body when payload
+	// rules are loaded, which is accepted (errs toward blocking; USK-1219
+	// review S-R1-2).
 	for _, decoded := range [][]byte{lenientBase64Decode(env.Raw), base64DecodeIgnoringPadding(env.Raw)} {
 		if len(decoded) > 0 {
 			binaries = append(binaries, decoded)

@@ -37,6 +37,11 @@ type opaqueGRPCWeb struct {
 	wireBase64 bool
 	encoding   string
 	layout     *headerLayout
+	// trailersOnlyEnd snapshots the Status / Message / StatusDetails of
+	// the End emitted for a trailers-only response (grpc-status in the
+	// HTTP headers, empty body); nil otherwise. withEndStatusInHeaders
+	// compares the End being sent against it (USK-1219 review F-R1-1).
+	trailersOnlyEnd *envelope.GRPCEndMessage
 }
 
 // channel is the layer.Channel returned by Wrap. It maintains a small
@@ -536,10 +541,20 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 //
 // Caller holds c.mu.
 func (c *channel) queueEmptyBodyResponseEndLocked(env *envelope.Envelope, msg *envelope.HTTPMessage, opaque *opaqueGRPCWeb) (*envelope.Envelope, *envelope.GRPCEndMessage) {
-	if isInformationalStatus(msg.Status) {
+	if isInformationalStatus(msg.Status, msg.HTTPVersion) {
 		return nil, nil
 	}
 	end := endFromResponseHeaders(msg.Headers)
+	if headerHas(msg.Headers, "grpc-status") {
+		// Trailers-only: remember the End as emitted so the opposite-side
+		// Send can tell an End edit from an untouched End (USK-1219 review
+		// F-R1-1 / F-R1-2). The opaque is shared with the Start.
+		opaque.trailersOnlyEnd = &envelope.GRPCEndMessage{
+			Status:        end.Status,
+			Message:       end.Message,
+			StatusDetails: bytes.Clone(end.StatusDetails),
+		}
+	}
 	endEnv := c.buildEnvelope(env, envelope.Receive, end, nil, opaque)
 	c.emitQueue = append(c.emitQueue, endEnv)
 	return endEnv, end
@@ -581,48 +596,80 @@ func endFromResponseHeaders(headers []envelope.KeyValue) *envelope.GRPCEndMessag
 
 // isInformationalStatus reports whether status is a 1xx interim response
 // (100 Continue, 103 Early Hints, ...) that precedes the final response on
-// the same exchange (USK-1219 review F-1). 101 Switching Protocols is
-// excluded: it ends the HTTP exchange, so it is treated as final.
-func isInformationalStatus(status int) bool {
-	return status >= 100 && status < 200 && status != 101
+// the same exchange (USK-1219 review F-1), classified the way the inner
+// HTTP Layer that produced it does (review S-R1-1):
+//
+//   - HTTP/1.x (http1 Layer): 101 Switching Protocols ends the HTTP
+//     exchange (the Layer swaps to the upgraded protocol), so it is final.
+//   - HTTP/2 (http2 assembler, httpaggregator): every 1xx, 101 included, is
+//     delivered as an interim message before the real response. 101 is
+//     forbidden in HTTP/2 (RFC 9113 §8.6) but a hostile upstream can send
+//     it; treating it as final would emit two Ends and latch on_end on the
+//     101's placeholder status.
+//
+// An unknown version (synthetic producer) keeps 101 final.
+func isInformationalStatus(status int, httpVersion string) bool {
+	if status < 100 || status >= 200 {
+		return false
+	}
+	if status != 101 {
+		return true
+	}
+	return httpVersion == envelope.HTTPVersionH2 || httpVersion == envelope.HTTPVersionH2C
 }
 
-// withEndStatusInHeaders projects a trailers-only response's End onto the
-// HTTP headers that carry its status (USK-1219 review F-3). The End of a
-// trailers-only response is derived from the Start's grpc-status /
-// grpc-message / grpc-status-details-bin headers (endFromResponseHeaders),
-// and no trailer frame is written for it, so an End edit (Transform
-// set_status / set_status_message, intercept, plugin) must land in those
-// headers or it is silently a no-op on the wire.
+// trailersOnlyBaseline returns the End a trailers-only response emitted
+// (opaqueGRPCWeb.trailersOnlyEnd), read from the End's Envelope or, when
+// that was Clone()d (intercept modify_and_forward drops Opaque), from the
+// Start's. nil when neither carries one: the response was not
+// trailers-only, or both Envelopes are synthetic / cloned.
+func trailersOnlyBaseline(endEnv, startEnv *envelope.Envelope) *envelope.GRPCEndMessage {
+	for _, e := range []*envelope.Envelope{endEnv, startEnv} {
+		if e == nil {
+			continue
+		}
+		if o, ok := e.Opaque.(*opaqueGRPCWeb); ok && o.trailersOnlyEnd != nil {
+			return o.trailersOnlyEnd
+		}
+	}
+	return nil
+}
+
+// withEndStatusInHeaders projects an End edit onto the HTTP headers of a
+// trailers-only response (USK-1219 review F-3). Its End is derived from the
+// grpc-status / grpc-message / grpc-status-details-bin headers
+// (endFromResponseHeaders) and no trailer frame is written for it, so an
+// End edit (Transform set_status / set_status_message, intercept, plugin)
+// must land in those headers or it is silently a no-op on the wire.
 //
-// Each field is compared with what the headers already say; an unchanged
-// field leaves its entries byte-identical. A changed field rewrites every
-// entry of that name in place (casing and position kept), a cleared
-// grpc-message / grpc-status-details-bin drops its entries, and a value the
-// wire never carried is appended lowercase. start itself is never mutated —
-// it is the recorded Start — so a copy is returned when anything changed.
-func withEndStatusInHeaders(start *envelope.GRPCStartMessage, m *envelope.GRPCEndMessage) *envelope.GRPCStartMessage {
-	observed := endFromResponseHeaders(start.Metadata)
-	md := start.Metadata
-	changed := false
-	if m.Status != observed.Status {
-		md = setHeaderValues(md, "grpc-status", strconv.FormatUint(uint64(m.Status), 10))
-		changed = true
+// An edit is detected by comparing m with baseline — the End as the Layer
+// emitted it — never with the headers being sent (review F-R1-1 / F-R1-2):
+// a Start-side edit of grpc-status must reach the wire as edited, and an
+// End that simply disagrees with the headers is not an edit. Only fields
+// that changed are rewritten: every entry of that name in place (casing and
+// position kept), a cleared grpc-message / grpc-status-details-bin drops
+// its entries, and a value the wire never carried is appended lowercase.
+//
+// headers is the final outbound list (control headers already restored by
+// rebuildStartHeaders), so a dropped entry cannot shift a control header's
+// anchor (review F-R1-3). A nil baseline (both the Start and End Envelopes
+// synthetic or Clone()d) means no projection: without the emitted End there
+// is no way to tell an edit from wire reality, and relaying the headers
+// untouched is the wire-faithful default (package doc).
+func withEndStatusInHeaders(headers []envelope.KeyValue, m, baseline *envelope.GRPCEndMessage) []envelope.KeyValue {
+	if baseline == nil {
+		return headers
 	}
-	if m.Message != observed.Message {
-		md = setHeaderValues(md, "grpc-message", m.Message)
-		changed = true
+	if m.Status != baseline.Status {
+		headers = setHeaderValues(headers, "grpc-status", strconv.FormatUint(uint64(m.Status), 10))
 	}
-	if !bytes.Equal(m.StatusDetails, observed.StatusDetails) {
-		md = setHeaderValues(md, "grpc-status-details-bin", string(m.StatusDetails))
-		changed = true
+	if m.Message != baseline.Message {
+		headers = setHeaderValues(headers, "grpc-message", m.Message)
 	}
-	if !changed {
-		return start
+	if !bytes.Equal(m.StatusDetails, baseline.StatusDetails) {
+		headers = setHeaderValues(headers, "grpc-status-details-bin", string(m.StatusDetails))
 	}
-	cp := *start
-	cp.Metadata = md
-	return &cp
+	return headers
 }
 
 // setHeaderValues returns a copy of kvs with every entry named name
@@ -963,12 +1010,11 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	}
 	body = emptyResponseBody(body, dir, start.HTTPStatus)
 
-	if statusInHeaders {
-		start = withEndStatusInHeaders(start, m)
-	}
-
 	// Reconstruct HTTPMessage.
 	httpMsg := buildHTTPMessage(start, body, dir, srcEnv)
+	if statusInHeaders && len(env.Raw) == 0 {
+		httpMsg.Headers = withEndStatusInHeaders(httpMsg.Headers, m, trailersOnlyBaseline(env, srcEnv))
+	}
 
 	out := &envelope.Envelope{
 		StreamID:  streamID,

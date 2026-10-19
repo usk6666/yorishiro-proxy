@@ -60,9 +60,17 @@
 // AnomalyMissingGRPCWebTrailer placeholder when there is none (e.g. a bare
 // 503). The opposite-side Send writes such a response with an empty body —
 // a trailers-only status already travels in the headers, so no trailer
-// frame is added; an edit to that End is written back into those header
-// entries in place. A 1xx informational response (100, 103) is not final:
-// it yields only a Start and no End.
+// frame is added; an edit to that End (detected against the End as emitted,
+// not against the headers) is written back into those header entries in
+// place, while a Start-side edit of the same headers is relayed as edited.
+// The End baseline lives on the Layer's per-RPC Opaque, so when both the
+// Start and End Envelopes were Clone()d or synthesized an End edit is not
+// projected and the headers are relayed as the Start carries them. A
+// response that carried a trailer frame is never projected onto its
+// headers: header and trailer statuses are relayed as observed even when
+// they disagree. A 1xx informational response (100, 103; 101 too when the
+// inner Layer is HTTP/2, which delivers it as interim) is not final: it
+// yields only a Start and no End.
 //
 // # Status, path and query (USK-1219, USK-1069 / USK-1110)
 //
