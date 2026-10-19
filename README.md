@@ -183,6 +183,9 @@ yorishiro-proxy provides the following subcommands:
 | `install` | Install and configure components (MCP, CA, Playwright) |
 | `upgrade` | Check for and install updates from GitHub Releases |
 | `version` | Print version information |
+| `help` | Show the top-level usage (same as `-h`) |
+
+Flags with no subcommand start the server (`yorishiro-proxy -db pentest-2026`). Any other first word must be one of the subcommands above; an unknown one (for example a typo such as `serevr`) is an error rather than a silently started server. The server takes flags only, so a boolean value must be joined to its flag (`-insecure=false`, not `-insecure false`).
 
 The `client` subcommand connects to a running server and calls MCP tools with `key=value` parameters, providing a lightweight interface for scripting and ad-hoc pentest workflows:
 
