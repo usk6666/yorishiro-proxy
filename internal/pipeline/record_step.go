@@ -623,6 +623,14 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	// LoadOrStore so subsequent WS frames are write-free.
 	s.maybeRetagProtocol(ctx, env)
 
+	// USK-1109: append the Run's Result.Annotations (e.g. SafetyStep
+	// log_only observations) to the Stream's tags. Runs after the
+	// ensureStream block above so the row exists even when the annotated
+	// envelope is the stream's first Send, and before the per-Stream
+	// record cap gate so a capped streaming envelope still leaves its
+	// observation on the Stream.
+	s.appendAnnotations(ctx, env)
+
 	// On Receive, project upstream TLS snapshot (if present) onto
 	// Stream.ConnInfo. The Send side carries the synthetic MITM cert we
 	// presented to the client; Receive carries the real upstream TLS
@@ -778,6 +786,27 @@ func (s *RecordStep) markStreamTruncated(ctx context.Context, env *envelope.Enve
 		AppendTags: map[string]string{"records_truncated": recordsTruncatedReason},
 	}); err != nil {
 		s.logger.Error("record step: truncated tag update failed",
+			"stream_id", env.StreamID,
+			"error", err,
+		)
+	}
+}
+
+// appendAnnotations writes the Run's merged Result.Annotations onto env's
+// Stream via AppendTags, so tags written earlier (TLS metadata, cap
+// markers, other annotations) are preserved. No-op without annotations or
+// without a StreamID.
+func (s *RecordStep) appendAnnotations(ctx context.Context, env *envelope.Envelope) {
+	tags := annotationsFromContext(ctx)
+	if len(tags) == 0 || env.StreamID == "" {
+		return
+	}
+	appendTags := make(map[string]string, len(tags))
+	for k, v := range tags {
+		appendTags[k] = v
+	}
+	if err := s.store.UpdateStream(ctx, env.StreamID, flow.StreamUpdate{AppendTags: appendTags}); err != nil {
+		s.logger.Error("record step: annotation tag update failed",
 			"stream_id", env.StreamID,
 			"error", err,
 		)

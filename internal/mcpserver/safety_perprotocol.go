@@ -82,7 +82,15 @@ func InitPerProtocolSafetyEngines(cfg *config.Config, proxyCfg *config.ProxyConf
 		grpcEng.AddRule(compiled)
 	}
 
-	return PerProtocolSafetyEngines{HTTP: httpEng, WS: wsEng, GRPC: grpcEng}, nil
+	// USK-1109: the section-level action applies to every rule on the live
+	// wire. ValidateSafetyFilterConfig admits only "" / "block" /
+	// "log_only" for input, so anything but "log_only" blocks.
+	return PerProtocolSafetyEngines{
+		HTTP:    httpEng,
+		WS:      wsEng,
+		GRPC:    grpcEng,
+		LogOnly: sfCfg.Input.Action == "log_only",
+	}, nil
 }
 
 // loadPresetIntoAll loads a preset by name into all three per-protocol

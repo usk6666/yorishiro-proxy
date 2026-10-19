@@ -8,6 +8,7 @@ import (
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // SafetyStep is a Message-typed Pipeline Step that checks Send-direction
@@ -39,12 +40,23 @@ import (
 // the MCP transport boundary. The two filters serve different threat
 // models and must not be conflated. See RFC-001 §3.7
 // (docs/rfc/envelope.md) for the full role split (USK-702 / USK-894).
+//
+// log_only mode (USK-1109, safety_filter.input.action "log_only"): a
+// violation is logged and the envelope continues untouched; the Result
+// carries Annotations {"safety_log_only:<rule_id>": <target>} so RecordStep
+// tags the Stream. Block mode (the default) is unchanged.
 type SafetyStep struct {
-	http   *httprules.SafetyEngine
-	ws     *wsrules.SafetyEngine
-	grpc   *grpcrules.SafetyEngine
-	logger *slog.Logger
+	http    *httprules.SafetyEngine
+	ws      *wsrules.SafetyEngine
+	grpc    *grpcrules.SafetyEngine
+	logger  *slog.Logger
+	logOnly bool
 }
+
+// SafetyLogOnlyTagPrefix prefixes the Stream tag key SafetyStep emits (via
+// Result.Annotations) for a log_only match. The full key is the prefix plus
+// the matched rule ID; the value is the matched target name (USK-1109).
+const SafetyLogOnlyTagPrefix = "safety_log_only:"
 
 // NewSafetyStep creates a SafetyStep. Any nil engine causes the corresponding
 // protocol arm to pass through. Engine arguments are positional in protocol
@@ -58,9 +70,42 @@ func NewSafetyStep(httpEngine *httprules.SafetyEngine, wsEngine *wsrules.SafetyE
 	}
 }
 
-// WithLogOnly switches the step to log_only mode (USK-1109).
+// WithLogOnly sets log_only mode (USK-1109): violations are logged and
+// annotated but never block. Returns s for chaining, mirroring the
+// InterceptStep With* options. Boot-time only — call before the step is
+// shared with a Pipeline.
 func (s *SafetyStep) WithLogOnly(logOnly bool) *SafetyStep {
+	s.logOnly = logOnly
 	return s
+}
+
+// safetyMatch is the protocol-neutral view of a per-protocol Violation.
+type safetyMatch struct {
+	ruleID, ruleName, target, fragment string
+}
+
+// observe logs the match and, in log_only mode, returns the pass Result
+// (Continue + annotation) with ok=true. In block mode it returns ok=false
+// and the caller builds the protocol-specific block Result. The matched
+// fragment is never logged raw (CWE-312).
+func (s *SafetyStep) observe(ctx context.Context, m safetyMatch) (Result, bool) {
+	msg := "safety: request blocked"
+	if s.logOnly {
+		msg = safety.LogOnlyMessage
+	}
+	if s.logger != nil {
+		s.logger.InfoContext(ctx, msg,
+			slog.String("filter", BlockedBySafetyFilter),
+			slog.String("rule_id", m.ruleID),
+			slog.String("rule_name", m.ruleName),
+			slog.String("target", m.target),
+			slog.String("match", safety.RedactFragment(m.fragment)),
+		)
+	}
+	if !s.logOnly {
+		return Result{}, false
+	}
+	return Result{Annotations: map[string]string{SafetyLogOnlyTagPrefix + m.ruleID: m.target}}, true
 }
 
 // Process checks Send-direction envelopes against safety rules. Receive
@@ -109,13 +154,8 @@ func (s *SafetyStep) processHTTP(ctx context.Context, env *envelope.Envelope, ms
 
 	violation := s.http.CheckInput(ctx, msg)
 	if violation != nil {
-		if s.logger != nil {
-			s.logger.InfoContext(ctx, "safety: request blocked",
-				slog.String("rule_id", violation.RuleID),
-				slog.String("rule_name", violation.RuleName),
-				slog.String("target", violation.Target),
-				slog.String("match", violation.Match),
-			)
+		if r, pass := s.observe(ctx, safetyMatch{violation.RuleID, violation.RuleName, violation.Target, violation.Match}); pass {
+			return r
 		}
 		// USK-829: emit a 403 terminator on the wire for HTTP requests
 		// so the client closes cleanly. Surface the matched safety rule
@@ -141,13 +181,8 @@ func (s *SafetyStep) processWS(ctx context.Context, msg *envelope.WSMessage) Res
 	// asymmetry vs gRPC is preserved.
 	violation := s.ws.CheckInput(ctx, msg)
 	if violation != nil {
-		if s.logger != nil {
-			s.logger.InfoContext(ctx, "safety: request blocked",
-				slog.String("rule_id", violation.RuleID),
-				slog.String("rule_name", violation.RuleName),
-				slog.String("target", violation.Target),
-				slog.String("match", violation.Match),
-			)
+		if r, pass := s.observe(ctx, safetyMatch{violation.RuleID, violation.RuleName, violation.Target, violation.Match}); pass {
+			return r
 		}
 		// USK-829: mid-stream WS frame Drop. The protocol-correct
 		// terminator is a Close control frame, which HTTPMessage cannot
@@ -170,13 +205,8 @@ func (s *SafetyStep) processGRPC(ctx context.Context, env *envelope.Envelope, ms
 
 	violation := s.grpc.CheckInput(ctx, env, msg)
 	if violation != nil {
-		if s.logger != nil {
-			s.logger.InfoContext(ctx, "safety: request blocked",
-				slog.String("rule_id", violation.RuleID),
-				slog.String("rule_name", violation.RuleName),
-				slog.String("target", violation.Target),
-				slog.String("match", violation.Match),
-			)
+		if r, pass := s.observe(ctx, safetyMatch{violation.RuleID, violation.RuleName, violation.Target, violation.Match}); pass {
+			return r
 		}
 		// USK-1202: native gRPC answers the client with grpc-status 7
 		// PERMISSION_DENIED (Trailers-Only, or trailers once response

@@ -160,6 +160,11 @@ type Deps struct {
 	SSEInterceptEngine  *sserules.InterceptEngine
 	SSETransformEngine  *sserules.TransformEngine
 
+	// SafetyInputLogOnly puts the live SafetyStep in log_only mode
+	// (safety_filter.input.action "log_only", USK-1109): matches are
+	// logged and tagged on the Stream but never block.
+	SafetyInputLogOnly bool
+
 	// HoldQueue receives held envelopes from InterceptStep. nil disables
 	// hold-and-dispatch (matched envelopes still drop, but no async
 	// resolution from MCP intercept tools).
@@ -666,7 +671,7 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 	}
 	recordOpts = append(recordOpts, pipeline.WithGRPCWebBase64MaxPerStream(grpcWebBase64Cap))
 
-	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger)
+	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger).WithLogOnly(deps.SafetyInputLogOnly)
 	hostScopeStep := pipeline.NewHostScopeStep(deps.Scope)
 	httpScopeStep := pipeline.NewHTTPScopeStep(deps.Scope)
 	return pipeline.New(

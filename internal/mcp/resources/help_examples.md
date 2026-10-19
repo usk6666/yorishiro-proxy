@@ -436,7 +436,7 @@ Before enforcing rules, use `log_only` mode to observe what would be blocked wit
   }
 }
 ```
-Review the proxy logs for `safety_filter` entries. Once satisfied, change `action` to `"block"` and restart.
+Matching traffic is still sent. Each match is recorded as a stream tag `safety_log_only:<rule_id>` (value: the matched target, e.g. `body`), visible in the `tags` field of `query` `flows` / `flow` results; resend / fuzz / macro requests are let through too. The proxy log carries one Info line per match with the message `safety: match observed (log_only, not blocked)` and `filter=safety_filter` (the matched bytes appear only as a `sha256:… len=N` digest). Once satisfied, change `action` to `"block"` and restart.
 
 ### Verify active rules at runtime
 ```json

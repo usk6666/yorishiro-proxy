@@ -72,7 +72,16 @@ type Result struct {
 	BlockedBy string
 
 	// Annotations are Stream tags a Step asks RecordStep to append to the
-	// recorded Stream (USK-1109).
+	// recorded Stream (USK-1109). Only honoured on Continue: Run merges
+	// the annotations of every continuing Step (later Steps win on a key
+	// collision) and RecordStep appends the merged set to the Stream via
+	// flow.StreamUpdate.AppendTags, after the Stream row exists. They are
+	// metadata about the observation, never wire data — setting them does
+	// not modify the Envelope. Ignored for Drop / Respond (the block
+	// recorder writes its own audit Stream from BlockedBy).
+	//
+	// Current producer: SafetyStep in log_only mode
+	// ("safety_log_only:<rule_id>" = matched target).
 	Annotations map[string]string
 }
 
@@ -130,6 +139,7 @@ func (p *Pipeline) RunWithBlockedBy(ctx context.Context, env *envelope.Envelope)
 	snapshot := env.Clone()
 	ctx = withSnapshot(ctx, snapshot)
 	ctx = withWireEncodedState(ctx)
+	ctx = withAnnotations(ctx)
 
 	for _, step := range p.steps {
 		r := step.Process(ctx, env)
@@ -141,6 +151,7 @@ func (p *Pipeline) RunWithBlockedBy(ctx context.Context, env *envelope.Envelope)
 			}
 			return env, r.Action, r.Response, blockedBy
 		}
+		mergeAnnotations(ctx, r.Annotations)
 		if r.Envelope != nil {
 			env = r.Envelope
 		}

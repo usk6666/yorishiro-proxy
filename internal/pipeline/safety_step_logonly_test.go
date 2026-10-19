@@ -9,6 +9,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow/flowtest"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 )
 
 // USK-1109: safety_filter.input.action "log_only" must let a violating
@@ -367,5 +368,38 @@ func TestPipeline_ResultAnnotations_MergedAndRecorded(t *testing.T) {
 	}
 	if st.Tags["a"] != "1" || st.Tags["b"] != "2" {
 		t.Errorf("Stream.Tags = %v, want a=1 and b=2", st.Tags)
+	}
+}
+
+// TestInterceptStep_ModifyAndForward_SafetyRecheck_LogOnly: the intercept
+// modify_and_forward re-check uses the same *SafetyStep, so in log_only
+// mode a destructive modified envelope is forwarded and the observation
+// reaches RecordStep through the InterceptStep's Result.
+func TestInterceptStep_ModifyAndForward_SafetyRecheck_LogOnly(t *testing.T) {
+	engine := newTestInterceptEngine(newCatchAllRequestRule())
+	queue := common.NewHoldQueue()
+	step := NewInterceptStep(engine, nil, nil, nil, queue, newDestructiveSQLSafetyStep(t).WithLogOnly(true), nil)
+
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   &envelope.HTTPMessage{Method: "POST", Path: "/api/query", Body: []byte(`{"query":"SELECT 1"}`)},
+	}
+	modifiedEnv := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   &envelope.HTTPMessage{Method: "POST", Path: "/api/query", Body: []byte("DROP TABLE users;")},
+	}
+	releaseFirst(t, queue, &common.HoldAction{Type: common.ActionModifyAndForward, Modified: modifiedEnv})
+
+	result := step.Process(context.Background(), env)
+	if result.Action != Continue {
+		t.Fatalf("Action = %v, want Continue (log_only re-check must not block)", result.Action)
+	}
+	if result.Envelope != modifiedEnv {
+		t.Errorf("Result.Envelope = %p, want the modified envelope %p", result.Envelope, modifiedEnv)
+	}
+	if _, ok := result.Annotations["safety_log_only:destructive-sql:drop"]; !ok {
+		t.Errorf("Annotations = %v, want safety_log_only:destructive-sql:drop", result.Annotations)
 	}
 }

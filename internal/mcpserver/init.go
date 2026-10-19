@@ -643,6 +643,7 @@ func NewLiveManager(
 			HTTPSafetyEngine:        perProtoSafety.HTTP,
 			WSSafetyEngine:          perProtoSafety.WS,
 			GRPCSafetyEngine:        perProtoSafety.GRPC,
+			SafetyInputLogOnly:      perProtoSafety.LogOnly,
 			PeekTimeout:             cfg.PeekTimeout,
 			RequestTimeout:          cfg.RequestTimeout,
 			MaxConnections:          cfg.MaxConnections,

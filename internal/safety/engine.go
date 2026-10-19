@@ -242,7 +242,14 @@ func expandCustom(rc RuleConfig, index int) ([]Rule, error) {
 }
 
 // CheckInput evaluates all input rules against the given request components.
-// It returns the first violation found, or nil if no rules matched.
+// It returns the first violation of a blocking rule, or nil if no blocking
+// rule matched.
+//
+// USK-1109: a rule whose Action is ActionLogOnly is observe-only. Its match
+// is logged at Info (fragment redacted, CWE-312) and scanning continues with
+// that rule's remaining targets skipped, so a later blocking rule still
+// blocks. Callers therefore never see a violation from a log_only rule and
+// the request proceeds.
 func (e *Engine) CheckInput(body []byte, rawURL string, headers []envelope.KeyValue) *InputViolation {
 	for i := range e.inputRules {
 		r := &e.inputRules[i]
@@ -255,6 +262,16 @@ func (e *Engine) CheckInput(body []byte, rawURL string, headers []envelope.KeyVa
 					slog.String("target", target.String()),
 					slog.String("action", r.Action.String()),
 				)
+				if r.Action == ActionLogOnly {
+					slog.Info(LogOnlyMessage,
+						slog.String("filter", "safety_filter"),
+						slog.String("rule_id", r.ID),
+						slog.String("rule_name", r.Name),
+						slog.String("target", target.String()),
+						slog.String("match", RedactFragment(fragment)),
+					)
+					break
+				}
 				return &InputViolation{
 					RuleID:    r.ID,
 					RuleName:  r.Name,
