@@ -425,6 +425,34 @@ type channel struct {
 	// Layer after this exchange's final response.
 	rawWinsSent atomic.Bool
 
+	// USK-1229 exchange-completion tracking.
+	//
+	// Send direction (client-facing): requestDelivered is set when Next
+	// returned the request to the consumer; finalResponseSent when Send
+	// wrote a final response (status >= 200, 101, or raw-authoritative);
+	// responseIncomplete when the response written carried the
+	// TruncatedBody anomaly (the upstream cut its body). All are written
+	// before the consumer's Close fires termDone and read by the Layer's
+	// spawn goroutine after it, which then ends the connection when the
+	// request was not answered completely (see exchangeUnanswered).
+	requestDelivered   atomic.Bool
+	finalResponseSent  atomic.Bool
+	responseIncomplete atomic.Bool
+
+	// Receive direction (upstream-facing): requestSent is set by
+	// sendRequest before appendPending, so the parser knows a peer close
+	// left a written request unanswered. postFinalErr is the terminal
+	// error Next returns after the final response was delivered — set when
+	// that response's body was cut by the upstream closing (USK-1229).
+	requestSent  atomic.Bool
+	postFinalErr atomic.Pointer[layer.StreamError]
+
+	// requestMethod is the method sendRequest wrote, read by the response
+	// parser once the response head is in (USK-1229 review F-1: HEAD
+	// responses are bodyless). Atomic because the parse can start before
+	// the Send (Next-before-Send registration).
+	requestMethod atomic.Pointer[string]
+
 	// USK-721: priorRespWasInformational tracks whether the previous response
 	// emitted on this Channel was 1xx, so the next response advances Sequence.
 	priorRespWasInformational bool
@@ -615,6 +643,7 @@ func (c *channel) nextSend(_ context.Context) (*envelope.Envelope, error) {
 		return nil, io.EOF
 	}
 	c.delivered = true
+	c.requestDelivered.Store(true)
 	return c.queuedEnv, nil
 }
 
@@ -658,6 +687,7 @@ func (c *channel) nextSendDeferred() (*envelope.Envelope, error) {
 		return nil, err
 	}
 	c.delivered = true
+	c.requestDelivered.Store(true)
 	return env, nil
 }
 
@@ -703,6 +733,10 @@ func (c *channel) nextReceive(ctx context.Context) (*envelope.Envelope, error) {
 	select {
 	case d, ok := <-c.responseReady:
 		if !ok {
+			if se := c.postFinalErr.Load(); se != nil {
+				c.markTerminated(se)
+				return nil, se
+			}
 			c.markTerminated(io.EOF)
 			return nil, io.EOF
 		}
@@ -1097,6 +1131,11 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 	}
 	trailers, trailerAnomalies := extractTrailers(rawReq.Body)
 	anomalies = append(anomalies, trailerAnomalies...)
+	// USK-1229: a client that closed mid-body. The request is still
+	// forwarded exactly as received; the anomaly makes the cut visible.
+	if a, ok := bodyTruncationAnomaly(rawReq.Body); ok {
+		anomalies = append(anomalies, a)
+	}
 
 	msg := &envelope.HTTPMessage{
 		Method:      rawReq.Method,
@@ -1151,18 +1190,25 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 }
 
 // parseResponse reads one HTTP response from the parent Layer's bufio.Reader
-// and returns the envelope. The bool return value is true when the response
-// is a 1xx informational (the parent Layer must keep parsing on the same
-// channel for the final response).
-func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
+// and returns the envelope. isInformational is true when the response is a
+// 1xx informational (the parent Layer must keep parsing on the same channel
+// for the final response). truncated is true when the upstream closed the
+// connection before the response body was complete (USK-1229); the
+// envelope then carries the bytes received and AnomalyTruncatedBody.
+func (c *channel) parseResponse() (env *envelope.Envelope, isInformational, truncated bool, err error) {
 	rawResp, err := parser.ParseResponseWithOptions(c.layer.reader, parser.ParseOptions{
 		MaxRawCapture: c.bodyOpts.maxRawCapture,
+		// USK-1229 review F-1: the paired request's method makes a HEAD
+		// response bodyless. Read through an atomic after the response
+		// head arrived: on the Next-before-Send path the parse starts
+		// before sendRequest stored it.
+		RequestMethod: c.pairedRequestMethod,
 	})
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil, false, io.EOF
+			return nil, false, false, io.EOF
 		}
-		return nil, false, fmt.Errorf("http1: parse response: %w", err)
+		return nil, false, false, fmt.Errorf("http1: parse response: %w", err)
 	}
 
 	// Streaming-body bypass (USK-655): when the configured predicate matches
@@ -1171,12 +1217,16 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 	// orchestrator to claim via detachStreamingBody. Streaming responses
 	// are by definition final.
 	if c.streamingDetect != nil && c.streamingDetect(rawResp) {
-		return c.buildStreamingResponseEnvelope(rawResp), false, nil
+		return c.buildStreamingResponseEnvelope(rawResp), false, false, nil
 	}
 
 	bb, body, anomalies, trailers, err := c.assembleResponseBody(rawResp)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
+	}
+	truncAnomaly, truncated := bodyTruncationAnomaly(rawResp.Body)
+	if truncated {
+		anomalies = append(anomalies, truncAnomaly)
 	}
 	defer func() {
 		if err != nil && bb != nil {
@@ -1204,6 +1254,10 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 	envCtx.ReceivedAt = time.Now()
 
 	emitSeq, isInformational := c.advanceResponseSequence(rawResp.StatusCode)
+	if isInformational {
+		// 1xx responses have no body (RFC 9112 §6.3); never truncated.
+		truncated = false
+	}
 
 	opaque := &opaqueHTTP1{
 		rawResp:        rawResp,
@@ -1220,7 +1274,7 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 		c.currentStreamID = uuid.New().String()
 	}
 
-	env := &envelope.Envelope{
+	env = &envelope.Envelope{
 		StreamID:  c.currentStreamID,
 		FlowID:    uuid.New().String(),
 		Sequence:  emitSeq,
@@ -1239,7 +1293,7 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 	}
 
 	c.recordEmittedFlowID(env.FlowID)
-	return env, isInformational, nil
+	return env, isInformational, truncated, nil
 }
 
 // buildStreamingResponseEnvelope assembles the response Envelope for the
@@ -1387,6 +1441,8 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	// forwards one).
 	c.ctxTmpl.RequestPath = msg.Path
 	c.ctxTmpl.RequestMethod = msg.Method
+	method := msg.Method
+	c.requestMethod.Store(&method)
 	c.ctxTmpl.RequestRawQuery = msg.RawQuery
 	c.ctxTmpl.RequestAuthority = msg.Authority
 
@@ -1394,6 +1450,16 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	// unparsed response stream; nothing has been written for this
 	// request, so the retry wrapper may replay it on a fresh Layer
 	// (never a raw-authoritative one, see sendRawWins).
+	if c.layer.dead.Load() {
+		// USK-1229 review F-2: the receive loop ended; nothing would read
+		// this request's response. Nothing has been written, so the retry
+		// wrapper may replay it on a fresh Layer.
+		return fmt.Errorf("http1: send request: %w", &StaleUpstreamError{
+			Underlying: errUpstreamDead,
+			ReplaySafe: !env.RawWins() && isReplaySafe(msg, opaque, "header"),
+			Stage:      "header",
+		})
+	}
 	if c.layer.retired.Load() {
 		return fmt.Errorf("http1: send request: %w", &StaleUpstreamError{
 			Underlying: errUpstreamRetired,
@@ -1413,6 +1479,7 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	// atomically with the wire write so the response FIFO matches the
 	// on-wire request order. Caller (Send) holds writeMu, so this append
 	// is serialized with respect to other Channels' sendRequest invocations.
+	c.requestSent.Store(true)
 	if c.layer != nil {
 		c.layer.appendPending(c)
 	}
@@ -1429,13 +1496,77 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 func (c *channel) sendResponse(msg *envelope.HTTPMessage, env *envelope.Envelope) error {
 	opaque, _ := env.Opaque.(*opaqueHTTP1)
 
-	if env.RawWins() {
-		return c.sendRawWins(env.Raw, "response")
+	var err error
+	rawWins := env.RawWins()
+	switch {
+	case rawWins:
+		err = c.sendRawWins(env.Raw, "response")
+	case opaque != nil && opaque.rawResp != nil:
+		err = c.sendResponseOpaque(msg, opaque)
+	default:
+		err = c.sendResponseSynthetic(msg)
 	}
-	if opaque != nil && opaque.rawResp != nil {
-		return c.sendResponseOpaque(msg, opaque)
+	if err == nil {
+		c.noteResponseWritten(msg, rawWins)
 	}
-	return c.sendResponseSynthetic(msg)
+	return err
+}
+
+// pairedRequestMethod returns the method of the request this Receive
+// Channel sent, or "" when none was sent yet (USK-1229 review F-1).
+func (c *channel) pairedRequestMethod() string {
+	if p := c.requestMethod.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// noteResponseWritten records, for the USK-1229 keep-alive rule, what a
+// successfully written response did for this exchange. A raw-authoritative
+// response is treated as final: the plugin owns its bytes.
+func (c *channel) noteResponseWritten(msg *envelope.HTTPMessage, rawWins bool) {
+	if hasAnomalyType(msg.Anomalies, envelope.AnomalyTruncatedBody) {
+		c.responseIncomplete.Store(true)
+	}
+	if rawWins || msg.Status >= 200 || msg.Status == 101 {
+		c.finalResponseSent.Store(true)
+	}
+}
+
+// exchangeUnanswered reports whether this Send-direction exchange delivered
+// its request but did not write a complete final response (USK-1229). The
+// Layer must then not parse another request on the connection: HTTP/1.1
+// answers in request order (RFC 9112 §9.3), so a later response would be
+// taken as the answer to this request. Read only after termDone.
+func (c *channel) exchangeUnanswered() bool {
+	if !c.requestDelivered.Load() {
+		return false
+	}
+	return !c.finalResponseSent.Load() || c.responseIncomplete.Load()
+}
+
+func hasAnomalyType(anomalies []envelope.Anomaly, typ envelope.AnomalyType) bool {
+	for _, a := range anomalies {
+		if a.Type == typ {
+			return true
+		}
+	}
+	return false
+}
+
+// bodyTruncationAnomaly returns the AnomalyTruncatedBody anomaly when the
+// drained parser body reader reports the connection ended mid-body
+// (USK-1229).
+func bodyTruncationAnomaly(parserBody io.Reader) (envelope.Anomaly, bool) {
+	tp, ok := parserBody.(parser.BodyTruncationProvider)
+	if !ok {
+		return envelope.Anomaly{}, false
+	}
+	truncated, detail := tp.BodyTruncated()
+	if !truncated {
+		return envelope.Anomaly{}, false
+	}
+	return envelope.Anomaly{Type: envelope.AnomalyTruncatedBody, Detail: detail}, true
 }
 
 // --- Send Path 0: raw wins (RFC-001 §9.3 D4) ---

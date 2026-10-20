@@ -1592,6 +1592,7 @@ var httpAnomalyKeys = map[envelope.AnomalyType]string{
 	envelope.AnomalyTrailerForbidden:      "http_anomaly_trailer_forbidden",
 	envelope.AnomalyTrailersInPassthrough: "http_anomaly_trailers_in_passthrough",
 	envelope.AnomalyRawBodyTruncated:      "http_anomaly_raw_body_truncated",
+	envelope.AnomalyTruncatedBody:         "http_anomaly_truncated_body",
 	// HTTP/2 receive-side anomalies emitted by the aggregator on parse.
 	envelope.H2DuplicatePseudoHeader:    "http_anomaly_h2_duplicate_pseudo_header",
 	envelope.H2PseudoHeaderAfterRegular: "http_anomaly_h2_pseudo_header_after_regular",
@@ -1603,6 +1604,19 @@ var httpAnomalyKeys = map[envelope.AnomalyType]string{
 	envelope.H2TrailersAfterPassthrough:               "http_anomaly_h2_trailers_after_passthrough",
 	envelope.H2PushPromise:                            "http_anomaly_h2_push_promise",
 	envelope.H2UnsupportedConnectProtocol:             "http_anomaly_h2_unsupported_connect_protocol",
+}
+
+// HTTPAnomalyMetadataKeys returns a copy of the closed HTTP AnomalyType →
+// flow Metadata key table RecordStep projects with. The MCP query tool
+// decodes those keys with its own reverse table
+// (internal/mcp flowMetadataAnomalyKeyToType); this accessor lets a test
+// there fail when the two diverge (USK-1229 review F-3).
+func HTTPAnomalyMetadataKeys() map[envelope.AnomalyType]string {
+	out := make(map[envelope.AnomalyType]string, len(httpAnomalyKeys))
+	for k, v := range httpAnomalyKeys {
+		out[k] = v
+	}
+	return out
 }
 
 // httpAnomalyMetadataKey returns the stable Metadata key under which an

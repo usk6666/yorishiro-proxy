@@ -127,6 +127,17 @@ type ParseOptions struct {
 	// (USK-772) honors the spill MaxSize instead — this knob does not
 	// reach it.
 	MaxRawCapture int64
+
+	// RequestMethod reports the method of the request a parsed response
+	// answers. Only ParseResponseWithOptions consults it, once, after the
+	// response's header section has been read — so a caller whose parse
+	// starts before its request is written still sees the method. A
+	// response to HEAD has no body whatever its Content-Length /
+	// Transfer-Encoding declare (RFC 9112 §6.3 rule 1), so its body is
+	// read as empty and the bytes that follow are left for the next
+	// response. Nil, or an empty result, means unknown and keeps the
+	// header-framed body rules.
+	RequestMethod func() string
 }
 
 // rawSink is the minimal write/truncation interface used by readLine and
@@ -302,7 +313,13 @@ func ParseResponseWithOptions(r *bufio.Reader, opts ParseOptions) (*RawResponse,
 	detectSmugglingAnomalies(resp.Headers, &resp.Anomalies)
 
 	// Determine body reader.
-	resp.Body = resolveResponseBody(r, resp.Headers, resp.Proto, resp.StatusCode, opts.MaxRawCapture)
+	if opts.RequestMethod != nil && opts.RequestMethod() == "HEAD" {
+		// RFC 9112 §6.3 rule 1: a response to HEAD ends after its header
+		// section; the framing headers describe the GET body it omits.
+		resp.Body = newIdentityBodyReaderWithCap(io.LimitReader(r, 0), opts.MaxRawCapture)
+	} else {
+		resp.Body = resolveResponseBody(r, resp.Headers, resp.Proto, resp.StatusCode, opts.MaxRawCapture)
+	}
 
 	// Finalize raw bytes capture.
 	resp.RawBytes = cw.bytes()
@@ -726,7 +743,7 @@ func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string, memor
 			// Invalid Content-Length: return empty body.
 			return newIdentityBodyReaderWithCap(io.LimitReader(r, 0), memoryCap)
 		}
-		return newIdentityBodyReaderWithCap(io.LimitReader(r, n), memoryCap)
+		return newContentLengthBodyReaderWithCap(r, n, memoryCap)
 	}
 
 	// No Content-Length, no chunked TE.
@@ -761,7 +778,7 @@ func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, stat
 		if err != nil || n < 0 {
 			return newIdentityBodyReaderWithCap(io.LimitReader(r, 0), memoryCap)
 		}
-		return newIdentityBodyReaderWithCap(io.LimitReader(r, n), memoryCap)
+		return newContentLengthBodyReaderWithCap(r, n, memoryCap)
 	}
 
 	// HTTP/1.0 or Connection: close: body ends at EOF.
@@ -789,13 +806,29 @@ func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, stat
 type identityBodyReader struct {
 	r          io.Reader
 	rawCapture *bodyCaptureSink
+
+	// expected is the declared Content-Length, or -1 when the body is not
+	// length-framed (EOF-delimited, or a forced-empty body). read counts
+	// the bytes delivered; truncated is set when the underlying reader hit
+	// EOF before expected bytes arrived (USK-1229).
+	expected  int64
+	read      int64
+	truncated bool
 }
 
 // newIdentityBodyReaderWithCap constructs an identityBodyReader whose body
 // capture sink is bounded by memoryCap. Zero memoryCap falls back to
-// MaxRawCaptureSize at write time.
+// MaxRawCaptureSize at write time. The body is not length-framed, so it
+// never reports truncation.
 func newIdentityBodyReaderWithCap(r io.Reader, memoryCap int64) *identityBodyReader {
-	return &identityBodyReader{r: r, rawCapture: newBodyCaptureSinkWithCap(memoryCap)}
+	return &identityBodyReader{r: r, rawCapture: newBodyCaptureSinkWithCap(memoryCap), expected: -1}
+}
+
+// newContentLengthBodyReaderWithCap constructs an identityBodyReader for a
+// body framed by Content-Length n. It reads at most n bytes from r and
+// reports truncation (BodyTruncated) when r ends before n bytes arrived.
+func newContentLengthBodyReaderWithCap(r io.Reader, n, memoryCap int64) *identityBodyReader {
+	return &identityBodyReader{r: io.LimitReader(r, n), rawCapture: newBodyCaptureSinkWithCap(memoryCap), expected: n}
 }
 
 // EnableRawBodySpill installs the disk-spill knobs on the body capture sink.
@@ -818,8 +851,21 @@ func (ir *identityBodyReader) Read(p []byte) (int, error) {
 	n, err := ir.r.Read(p)
 	if n > 0 {
 		ir.rawCapture.write(p[:n])
+		ir.read += int64(n)
+	}
+	if err != nil && ir.expected >= 0 && ir.read < ir.expected &&
+		(errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+		ir.truncated = true
 	}
 	return n, err
+}
+
+// BodyTruncated implements BodyTruncationProvider (USK-1229).
+func (ir *identityBodyReader) BodyTruncated() (bool, string) {
+	if !ir.truncated {
+		return false, ""
+	}
+	return true, fmt.Sprintf("connection closed after %d of %d Content-Length body bytes", ir.read, ir.expected)
 }
 
 // RawBody returns the on-wire body bytes captured during reads when the body

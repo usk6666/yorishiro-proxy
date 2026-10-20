@@ -62,6 +62,12 @@ const (
 	// The semantic body (HTTPMessage.Body / BodyBuffer) is not affected by
 	// this cap (it is bounded independently by spillThreshold / MaxBodySize).
 	AnomalyRawBodyTruncated AnomalyType = "RawBodyTruncated"
+	// AnomalyTruncatedBody indicates that the peer closed the connection
+	// before the message body framed by its own headers was complete: a
+	// Content-Length body shorter than declared, or a chunked body that
+	// ended before the terminal zero-size chunk (USK-1229). Body and Raw
+	// hold exactly the bytes the wire carried; nothing is padded.
+	AnomalyTruncatedBody AnomalyType = "TruncatedBody"
 
 	// HTTP/2 specific anomalies.
 	H2DuplicatePseudoHeader    AnomalyType = "H2DuplicatePseudoHeader"

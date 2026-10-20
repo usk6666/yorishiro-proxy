@@ -99,6 +99,16 @@ type Layer struct {
 	// HealthCheck into reusing the conn.
 	retired atomic.Bool
 
+	// dead is set (Receive direction only) when spawnLoopReceive ended on
+	// a terminal condition — the upstream closed before or in the middle
+	// of a response, or a response failed to parse (USK-1229 review
+	// F-2). No parser remains to
+	// answer a further request, so a dead Layer is reported Retired,
+	// refuses new exchanges and fails their Send immediately. Written
+	// under pendingMu so appendPending cannot queue a Channel behind a
+	// loop that has already drained pendingQ for the last time.
+	dead atomic.Bool
+
 	// stateReleaser invocation is per-Channel; the Layer-level field is held
 	// only so newly spawned channels inherit it.
 
@@ -428,6 +438,9 @@ func (l *Layer) runInitialSend(initial *channel) {
 	if initial.connClosed || l.isDetached() || initial.parseFailed {
 		return
 	}
+	if l.endAfterUnanswered(initial) {
+		return
+	}
 	l.spawnLoopSend()
 }
 
@@ -465,7 +478,7 @@ func (l *Layer) OpenExchange() layer.Channel {
 		return nil
 	default:
 	}
-	if l.retired.Load() {
+	if l.retired.Load() || l.dead.Load() {
 		return nil
 	}
 	return l.newChannelLocked()
@@ -504,6 +517,13 @@ func (l *Layer) appendPending(ch *channel) {
 	}
 	ch.pendingOnce.Do(func() {
 		l.pendingMu.Lock()
+		if l.dead.Load() {
+			// USK-1229 review F-2: the receive loop is gone; fail the
+			// exchange now instead of queueing it where nothing reads.
+			l.pendingMu.Unlock()
+			ch.deliverResponse(nil, errUpstreamDead)
+			return
+		}
 		l.pendingQ = append(l.pendingQ, ch)
 		l.pendingMu.Unlock()
 		select {
@@ -662,7 +682,31 @@ func (l *Layer) spawnLoopSend() {
 		if ch.connClosed {
 			return
 		}
+		if l.endAfterUnanswered(ch) {
+			return
+		}
 	}
+}
+
+// endAfterUnanswered reports whether the Send-direction connection must end
+// because ch delivered its request without a complete final response
+// written back (USK-1229): the upstream closed before (or in the middle of)
+// its response, or the Pipeline dropped the request. HTTP/1.1 answers in
+// request order (RFC 9112 §9.3), so answering a later request on this
+// connection would pair that response with ch's request; and an origin
+// that closed is mirrored by closing, never by inventing a response. The
+// spawn loop returning closes Channels(), which ends the owner's exchange
+// loop and its deferred stack teardown closes the client connection.
+// Called only after ch's termDone.
+func (l *Layer) endAfterUnanswered(ch *channel) bool {
+	if !ch.exchangeUnanswered() {
+		return false
+	}
+	slog.Debug("http1: request not answered completely; ending client connection",
+		"stream_id", l.streamID,
+		"final_response_sent", ch.finalResponseSent.Load(),
+		"response_incomplete", ch.responseIncomplete.Load())
+	return true
 }
 
 // spawnLoopReceive parses responses and demultiplexes them in FIFO order to
@@ -710,10 +754,43 @@ func (l *Layer) receiveOne(head *channel) bool {
 		return false
 	}
 
-	env, isInformational, perr := head.parseResponse()
+	env, isInformational, truncated, perr := head.parseResponse()
 	if perr != nil {
+		if errors.Is(perr, io.EOF) && head.requestSent.Load() {
+			// USK-1229: the upstream closed after a request was written
+			// to it and before its response head completed. That is an
+			// aborted exchange, not a clean end; every request pipelined
+			// behind it is equally unanswered.
+			slog.Debug("http1: upstream closed before sending a response",
+				"stream_id", l.streamID)
+			perr = &layer.StreamError{
+				Code:   layer.ErrorAborted,
+				Reason: "http1: upstream closed the connection before sending a response",
+			}
+		}
 		// Drain all remaining pending channels with the terminal err.
+		l.markDead("response parse ended", perr)
 		l.failPending(perr)
+		return false
+	}
+	if truncated {
+		// USK-1229: the upstream closed mid-body. Deliver the response as
+		// received (the client gets exactly those bytes), then end the
+		// exchange with an aborted error; the connection is gone, so every
+		// request pipelined behind it fails the same way.
+		slog.Debug("http1: upstream closed the connection mid-body",
+			"stream_id", l.streamID)
+		se := &layer.StreamError{
+			Code:   layer.ErrorAborted,
+			Reason: "http1: upstream closed the connection mid-body",
+		}
+		head.postFinalErr.Store(se)
+		// Dead before delivering, so an owner that checks Retired once
+		// this response was written already sees the conn as gone.
+		l.markDead("upstream closed mid-body", se)
+		head.deliverResponse(env, nil)
+		_ = l.popPending()
+		l.failPending(se)
 		return false
 	}
 	if !isInformational && head.rawWinsSent.Load() {
@@ -740,6 +817,27 @@ func (l *Layer) receiveOne(head *channel) bool {
 // Layer retired after a raw-authoritative exchange (USK-1079). It wraps
 // net.ErrClosed so callers treating the Layer as closed keep working.
 var errUpstreamRetired = fmt.Errorf("http1: upstream retired after raw-authoritative exchange: %w", net.ErrClosed)
+
+// errUpstreamDead is delivered to an exchange registered on, and reported
+// by sendRequest / HealthCheck for, a Layer whose receive loop has ended
+// (USK-1229 review F-2). It wraps net.ErrClosed like errUpstreamRetired.
+var errUpstreamDead = fmt.Errorf("http1: upstream connection can carry no further exchange: %w", net.ErrClosed)
+
+// markDead records that spawnLoopReceive is ending on a terminal condition
+// (USK-1229 review F-2). Set under pendingMu (see dead). Never called for a
+// detach: a Layer that handed its conn to a WebSocket / SSE successor is
+// not dead, and reporting it Retired would make tcp_forward end the
+// upgraded client connection.
+func (l *Layer) markDead(reason string, cause error) {
+	l.pendingMu.Lock()
+	already := l.dead.Swap(true)
+	l.pendingMu.Unlock()
+	if already {
+		return
+	}
+	slog.Debug("http1: upstream receive loop ended; no further exchanges on this connection",
+		"stream_id", l.streamID, "reason", reason, "cause", cause)
+}
 
 // retire marks the Receive-direction Layer unusable for further exchanges
 // after the final response to a raw-authoritative request (USK-1079). Any
@@ -824,8 +922,12 @@ func (l *Layer) Scheme() string {
 // USK-1079). A retired Layer opens no further exchanges; an owner without
 // a redial chain must end the client connection instead of waiting for a
 // response that will never come.
+//
+// It is also true once the receive loop ended on a terminal condition
+// (upstream close before or mid-response, parse failure, Connection:
+// close; USK-1229 review F-2): such a Layer can answer nothing further.
 func (l *Layer) Retired() bool {
-	return l.retired.Load()
+	return l.retired.Load() || l.dead.Load()
 }
 
 // HealthCheck performs a non-blocking peek on the underlying conn to detect
@@ -894,6 +996,9 @@ func (l *Layer) HealthCheck() error {
 	// still hold responses to smuggled requests; it must be replaced.
 	if l.retired.Load() {
 		return errUpstreamRetired
+	}
+	if l.dead.Load() {
+		return errUpstreamDead
 	}
 
 	l.pendingMu.Lock()
