@@ -724,22 +724,15 @@ func splitAndTrimComma(s string) []string {
 }
 
 // resolveResendGRPCDialTarget produces the (host:port, sni) pair for the
-// upstream connection. authority may be host:port or just host.
+// upstream connection. authority may be host:port or just host; an
+// authority resolveDialAuthority refuses (USK-1264) is an error before
+// any dial.
 func resolveResendGRPCDialTarget(authority string, useTLS bool) (addr, sni string, err error) {
-	host := authority
-	port := ""
-	if h, p, err := net.SplitHostPort(authority); err == nil {
-		host = h
-		port = p
+	addr, sni, err = resolveDialAuthority(authority, useTLS)
+	if err != nil {
+		return "", "", fmt.Errorf("resend_grpc: %w", err)
 	}
-	if port == "" {
-		if useTLS {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	return net.JoinHostPort(host, port), host, nil
+	return addr, sni, nil
 }
 
 // resendGRPCCanonicalURL builds the canonical *url.URL used for scope

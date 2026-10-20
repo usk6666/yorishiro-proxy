@@ -110,7 +110,11 @@ func NewTargetScope() *TargetScope {
 func (s *TargetScope) CheckTarget(scheme, hostname string, port int, path string) (allowed bool, reason string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.checkTargetLocked(scheme, hostname, port, path)
+}
 
+// checkTargetLocked is CheckTarget for a caller already holding s.mu.
+func (s *TargetScope) checkTargetLocked(scheme, hostname string, port int, path string) (allowed bool, reason string) {
 	// 0. Fail closed on an unparsable numeric host (rules exist only).
 	if s.hasRulesLocked() && numericHostUnparsable(hostname) {
 		return false, numericHostReason

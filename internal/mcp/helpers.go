@@ -237,6 +237,25 @@ func checkHostHeaderLegs(ts *connector.TargetScope, scheme string, headers []env
 	return nil
 }
 
+// checkAuthorityNameLeg checks the request authority (HTTP/1 Host when
+// none is listed, HTTP/2 :authority) as a TargetScope name leg against the
+// dial address dialAddr (connector.TargetScope.CheckAuthority). The
+// canonical URL leg already gives the authority the full check; this leg
+// adds what only a name leg sees: the dial port in the deny match
+// (USK-1306) and the deny check of every comma-separated part (USK-1304).
+// It matters most with override_host, where the dial address and the
+// authority differ — an h2 resend carries no Host header, so nothing else
+// compares :authority with the dialled port. Returns nil in open mode.
+func checkAuthorityNameLeg(ts *connector.TargetScope, scheme, authority, path, dialAddr string) error {
+	if ts == nil || !ts.HasRules() || authority == "" {
+		return nil
+	}
+	if allowed, reason := ts.CheckAuthority(scheme, authority, path, dialAddr); !allowed {
+		return fmt.Errorf("request blocked by target scope: authority %q is %s", authority, reason)
+	}
+	return nil
+}
+
 // isDecimalPort reports whether a port string taken from net.SplitHostPort is
 // a decimal TCP port number the scope engine can resolve.
 //

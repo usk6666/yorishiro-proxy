@@ -19,9 +19,12 @@ import "strings"
 // HTTPMessage.Authority, and HTTP/2 forwards a regular "host" header next
 // to :authority, so every value a server may route on must be judged.
 // headers is never modified and nothing is deduplicated or merged (MITM
-// Principle 1). Values are not split on commas: Host is a single
-// uri-host [":" port] (RFC 9110 §7.2), not a list, so a comma-bearing
-// value is judged whole. The trim only matters for values written by an
+// Principle 1). Values are not split on commas here: Host is a single
+// uri-host [":" port] (RFC 9110 §7.2), not a list, so each value is
+// returned whole. The policy check splits a comma-bearing value itself,
+// for deny rules only (connector.TargetScope.CheckHostHeader, USK-1304),
+// because some servers and load balancers do treat it as a list. The
+// trim only matters for values written by an
 // agent (intercept, resend, fuzz, Transform) — the HTTP/1 parser already
 // strips OWS from wire values.
 func HostHeaderValues(headers []KeyValue) []string {

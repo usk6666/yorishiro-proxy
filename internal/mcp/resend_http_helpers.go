@@ -79,6 +79,12 @@ func validateOverrideHost(host string) error {
 	if !isDecimalPort(p) {
 		return fmt.Errorf("port %q must be a decimal number in 1-65535 (a service name resolves at dial time but not in the scope check)", p)
 	}
+	// USK-1264: a bracket must hold an IPv6 literal. net.SplitHostPort
+	// strips any bracket pair, so "[db.internal:5432]:80" would reach the
+	// override leg's scope check as the host "db.internal:5432".
+	if _, _, err := connector.SplitTargetHostPort(host); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -578,31 +584,50 @@ func resolveResendHTTPDial(msg *envelope.HTTPMessage, overrideHost string) (addr
 		return "", false, "", errors.New("resend_http: authority is empty")
 	}
 	useTLS = strings.EqualFold(msg.Scheme, "https")
-	host := msg.Authority
-	if h, _, splitErr := net.SplitHostPort(msg.Authority); splitErr == nil {
-		host = h
-	}
-	sni = host
-	port := ""
-	if _, p, splitErr := net.SplitHostPort(msg.Authority); splitErr == nil {
-		port = p
-	}
-	if port == "" {
-		if useTLS {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	addr = net.JoinHostPort(host, port)
-
 	if overrideHost != "" {
+		// The authority is not dialled: it stays on the wire as written
+		// (Host / :authority), judged by the scope's name legs.
 		addr = overrideHost
 		if h, _, splitErr := net.SplitHostPort(overrideHost); splitErr == nil {
 			sni = h
 		}
+		return addr, useTLS, sni, nil
+	}
+	addr, sni, err = resolveDialAuthority(msg.Authority, useTLS)
+	if err != nil {
+		return "", false, "", fmt.Errorf("resend_http: %w", err)
 	}
 	return addr, useTLS, sni, nil
+}
+
+// resolveDialAuthority derives the (host:port, sni) dial pair from an
+// authority that may omit its port — or carry an empty one — taking 443
+// for TLS and 80 otherwise. Shared by resend_http / fuzz_http, resend_ws
+// and resend_grpc. The join is connector.JoinDefaultPort, the plain-HTTP
+// forward proxy's rule (USK-1264): an authority with colons that is not
+// an IPv6 literal ("db.internal:5432:80") or a bracket that does not hold
+// one ("[db.internal:5432]:80") is an error before any dial. Wrapping it
+// in brackets used to hand the scope check the host "db.internal:5432".
+func resolveDialAuthority(authority string, useTLS bool) (addr, sni string, err error) {
+	defaultPort := "80"
+	if useTLS {
+		defaultPort = "443"
+	}
+	a := strings.TrimSuffix(authority, ":") // an empty port takes the default
+	if a != authority {
+		if _, _, splitErr := net.SplitHostPort(authority); splitErr != nil {
+			a = authority // the colon was not a port separator
+		}
+	}
+	addr, err = connector.JoinDefaultPort(a, defaultPort)
+	if err != nil {
+		return "", "", err
+	}
+	sni, _, err = net.SplitHostPort(addr)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid authority %q: %w", authority, err)
+	}
+	return addr, sni, nil
 }
 
 // checkResendHTTPScope enforces TargetScope rules on both the canonical
@@ -660,6 +685,9 @@ func (s *Server) checkResendHTTPScopeHostHeaders(msg *envelope.HTTPMessage, addr
 		if err := s.checkTargetScopeAddrPath(scheme, addr, path); err != nil {
 			return err
 		}
+	}
+	if err := checkAuthorityNameLeg(s.connector.targetScope, scheme, msg.Authority, path, addr); err != nil {
+		return err
 	}
 	return checkHostHeaderLegs(s.connector.targetScope, scheme, hostHeaders, path, addr)
 }
