@@ -12,6 +12,13 @@ import { HeaderEditor } from "./HeaderEditor.js";
 import "./InterceptPage.css";
 import { RawBytesEditor } from "./RawBytesEditor.js";
 import { RulesPanel } from "./RulesPanel.js";
+import {
+  buildModifyAndForwardArgs,
+  type DetailViewMode,
+  entryToEditState,
+  rawModeAllowed,
+  resolvePhase,
+} from "./interceptPayload.js";
 
 const TABS = [
   { id: "queue", label: "Queue" },
@@ -32,12 +39,6 @@ const HTTP_STATUS_CODES = [
   200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 405, 500, 502, 503, 504,
 ];
 
-type DetailViewMode = "structured" | "raw";
-
-/** Resolve the effective phase of an entry, defaulting to "request" for backward compat. */
-function resolvePhase(entry: InterceptQueueEntry): InterceptPhase {
-  return entry.phase ?? "request";
-}
 
 export function InterceptPage() {
   const [activeTab, setActiveTab] = useState("queue");
@@ -120,37 +121,13 @@ export function InterceptPage() {
   const handleSelect = useCallback((entry: InterceptQueueEntry) => {
     setSelectedId(entry.id);
 
-    const phase = resolvePhase(entry);
-
-    if (phase === "websocket_frame") {
-      // WebSocket frames: only body (payload) is editable
-      setEditMethod("");
-      setEditUrl("");
-      setEditHeaders([]);
-      setEditBody(entry.body);
-      setEditStatusCode(0);
-    } else if (phase === "response") {
-      // Response phase: status code, headers, body
-      setEditMethod("");
-      setEditUrl("");
-      setEditStatusCode(entry.status_code ?? 200);
-      setEditBody(entry.body);
-      setEditHeaders(flattenHeaders(entry.headers));
-    } else {
-      // Request phase (default)
-      setEditMethod(entry.method ?? "");
-      setEditUrl(entry.url ?? "");
-      setEditBody(entry.body);
-      setEditStatusCode(0);
-      setEditHeaders(flattenHeaders(entry.headers));
-    }
-
-    // Populate raw bytes if available
-    if (entry.raw_bytes) {
-      setEditRawBytes(entry.raw_bytes);
-    } else {
-      setEditRawBytes("");
-    }
+    const edit = entryToEditState(entry);
+    setEditMethod(edit.method);
+    setEditUrl(edit.url);
+    setEditHeaders(edit.headers);
+    setEditBody(edit.body);
+    setEditStatusCode(edit.statusCode);
+    setEditRawBytes(edit.rawBytes);
   }, []);
 
   // Release: forward as-is
@@ -190,52 +167,27 @@ export function InterceptPage() {
 
     setIsActionInFlight(true);
     try {
-      if (detailViewMode === "raw") {
-        // Raw mode: send raw_override_base64 (same for all phases)
-        await interceptAction({
-          action: "modify_and_forward",
-          params: {
-            intercept_id: selectedId,
-            mode: "raw",
-            raw_override_base64: editRawBytes,
+      await interceptAction(
+        buildModifyAndForwardArgs(
+          selectedEntry,
+          {
+            phase,
+            method: editMethod,
+            url: editUrl,
+            headers: editHeaders,
+            body: editBody,
+            statusCode: editStatusCode,
+            rawBytes: editRawBytes,
           },
-        });
-        addToast({ type: "success", message: `${phaseLabel(phase)} modified (raw) and forwarded` });
-      } else {
-        // Structured mode: phase-specific parameters
-        if (phase === "websocket_frame") {
-          await interceptAction({
-            action: "modify_and_forward",
-            params: {
-              intercept_id: selectedId,
-              override_body: editBody,
-            },
-          });
-        } else if (phase === "response") {
-          await interceptAction({
-            action: "modify_and_forward",
-            params: {
-              intercept_id: selectedId,
-              override_status: editStatusCode,
-              override_response_headers: mergeHeaders(editHeaders),
-              override_response_body: editBody,
-            },
-          });
-        } else {
-          // Request phase
-          await interceptAction({
-            action: "modify_and_forward",
-            params: {
-              intercept_id: selectedId,
-              override_method: editMethod,
-              override_url: editUrl,
-              override_headers: mergeHeaders(editHeaders),
-              override_body: editBody,
-            },
-          });
-        }
-        addToast({ type: "success", message: `${phaseLabel(phase)} modified and forwarded` });
-      }
+          detailViewMode,
+        ),
+      );
+      addToast({
+        type: "success",
+        message: detailViewMode === "raw"
+          ? `${phaseLabel(phase)} modified (raw) and forwarded`
+          : `${phaseLabel(phase)} modified and forwarded`,
+      });
 
       // Await the refetch BEFORE clearing selectedId so the detail panel
       // does not render a stale (already-forwarded) entry between the
@@ -278,7 +230,7 @@ export function InterceptPage() {
     }
   }, [selectedId, isActionInFlight, selectedEntry, interceptAction, addToast, refetchQueue]);
 
-  const hasRawBytes = selectedEntry?.raw_bytes_available ?? false;
+  const hasRawBytes = selectedEntry ? rawModeAllowed(selectedEntry) : false;
   const selectedPhase = selectedEntry ? resolvePhase(selectedEntry) : "request";
 
   return (
@@ -645,34 +597,6 @@ function QueueMethodCell({ entry, phase }: { entry: InterceptQueueEntry; phase: 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Flatten headers Record to editable HeaderRow array. */
-function flattenHeaders(headers: Record<string, string[]> | undefined): HeaderRow[] {
-  if (!headers) return [];
-  const rows: HeaderRow[] = [];
-  for (const [name, values] of Object.entries(headers)) {
-    for (const value of values) {
-      rows.push({ id: crypto.randomUUID(), name, value });
-    }
-  }
-  return rows;
-}
-
-/** Merge HeaderRow array to Record with comma concatenation (RFC 7230). */
-function mergeHeaders(rows: HeaderRow[]): Record<string, string> {
-  const merged: Record<string, string> = {};
-  for (const h of rows) {
-    const key = h.name.trim();
-    if (key) {
-      if (key in merged) {
-        merged[key] = merged[key] + ", " + h.value;
-      } else {
-        merged[key] = h.value;
-      }
-    }
-  }
-  return merged;
-}
 
 function truncateId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
