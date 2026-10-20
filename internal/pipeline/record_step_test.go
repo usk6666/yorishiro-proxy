@@ -3432,3 +3432,35 @@ func TestRecordStep_GRPCStartProjectsURLAndScheme(t *testing.T) {
 		})
 	}
 }
+
+// TestHTTPMessageModified_LineFields (USK-1148): every request-line and
+// status-line field a plugin can write counts as a modification, so a
+// raw_query-only or status_reason-only rewrite records a modified variant.
+func TestHTTPMessageModified_LineFields(t *testing.T) {
+	base := envelope.HTTPMessage{
+		Method: "GET", Scheme: "http", Authority: "example.test",
+		Path: "/p", RawQuery: "a=1", Status: 200, StatusReason: "OK",
+	}
+	cases := []struct {
+		name   string
+		mutate func(m *envelope.HTTPMessage)
+		want   bool
+	}{
+		{name: "unchanged", mutate: func(*envelope.HTTPMessage) {}, want: false},
+		{name: "method", mutate: func(m *envelope.HTTPMessage) { m.Method = "PUT" }, want: true},
+		{name: "path", mutate: func(m *envelope.HTTPMessage) { m.Path = "/q" }, want: true},
+		{name: "raw_query", mutate: func(m *envelope.HTTPMessage) { m.RawQuery = "b=2" }, want: true},
+		{name: "status", mutate: func(m *envelope.HTTPMessage) { m.Status = 404 }, want: true},
+		{name: "status_reason", mutate: func(m *envelope.HTTPMessage) { m.StatusReason = "Fine" }, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := base
+			b := base
+			tc.mutate(&b)
+			if got := httpMessageModified(&a, &b); got != tc.want {
+				t.Errorf("httpMessageModified = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

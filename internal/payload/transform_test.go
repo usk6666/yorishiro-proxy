@@ -1,6 +1,7 @@
 package payload
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -137,7 +138,7 @@ func TestApplyTransforms(t *testing.T) {
 
 	t.Run("no transforms", func(t *testing.T) {
 		got := ApplyTransforms(payloads)
-		if !strSliceEqual(got, payloads) {
+		if !slices.Equal(got, payloads) {
 			t.Errorf("got %v, want %v", got, payloads)
 		}
 	})
@@ -145,7 +146,7 @@ func TestApplyTransforms(t *testing.T) {
 	t.Run("single transform", func(t *testing.T) {
 		got := ApplyTransforms(payloads, Prefix("["))
 		want := []string{"[hello", "[world"}
-		if !strSliceEqual(got, want) {
+		if !slices.Equal(got, want) {
 			t.Errorf("got %v, want %v", got, want)
 		}
 	})
@@ -153,7 +154,7 @@ func TestApplyTransforms(t *testing.T) {
 	t.Run("chained transforms", func(t *testing.T) {
 		got := ApplyTransforms(payloads, Prefix("["), Suffix("]"))
 		want := []string{"[hello]", "[world]"}
-		if !strSliceEqual(got, want) {
+		if !slices.Equal(got, want) {
 			t.Errorf("got %v, want %v", got, want)
 		}
 	})
@@ -177,7 +178,7 @@ func TestTransformPipeline(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := []string{"<1>", "<2>", "<3>"}
-	if !strSliceEqual(got, want) {
+	if !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }

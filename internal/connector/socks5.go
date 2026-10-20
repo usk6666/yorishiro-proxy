@@ -634,18 +634,15 @@ func (n *SOCKS5Negotiator) logger(ctx context.Context) *slog.Logger {
 // socks5ScopeCheck is the SOCKS5 gate's scope check: blank scheme (see the
 // USK-1061 note in Negotiate), the requested host and port, path "". It is
 // both the admission check and the live-connection predicate (USK-1160).
-// A nil or rule-less scope allows everything; an unparsable port is
-// checked as 0, exactly as at admission.
+// A nil or rule-less scope allows everything; with rules, a target that
+// SplitTargetHostPort rejects (port 0 included) is denied (USK-1249).
 func socks5ScopeCheck(scope *TargetScope, target string) (allowed bool, reason string) {
 	if scope == nil || !scope.HasRules() {
 		return true, ""
 	}
-	host, portStr, splitErr := net.SplitHostPort(target)
-	port := 0
-	if splitErr == nil {
-		if p, perr := strconv.Atoi(portStr); perr == nil {
-			port = p
-		}
+	host, port, err := SplitTargetHostPort(target)
+	if err != nil {
+		return false, err.Error()
 	}
 	return scope.CheckTarget("", host, port, "")
 }

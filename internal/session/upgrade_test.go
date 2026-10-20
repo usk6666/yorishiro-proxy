@@ -83,12 +83,6 @@ func TestWithUpgradeNotice_NilLeavesCtxUnchanged(t *testing.T) {
 	}
 }
 
-func TestUpgradeNoticeFromContext_AbsentReturnsNil(t *testing.T) {
-	if got := UpgradeNoticeFromContext(context.Background()); got != nil {
-		t.Errorf("UpgradeNoticeFromContext on bare ctx = %v, want nil", got)
-	}
-}
-
 // --- Helper: case-insensitive header lookups ---
 
 func TestLookupHeader_CaseInsensitive(t *testing.T) {

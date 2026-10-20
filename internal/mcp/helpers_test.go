@@ -23,20 +23,29 @@ func TestRedactMatchedFragment(t *testing.T) {
 		if strings.Contains(got, secret) {
 			t.Fatalf("redacted output %q leaks the raw fragment", got)
 		}
-		if !strings.HasPrefix(got, "sha256:") {
-			t.Errorf("redacted output %q does not start with sha256:", got)
+		if !strings.HasPrefix(got, "hmac:") {
+			t.Errorf("redacted output %q does not start with hmac:", got)
 		}
 		if !strings.Contains(got, fmt.Sprintf("len=%d", len(secret))) {
 			t.Errorf("redacted output %q missing byte length", got)
 		}
 	})
 
-	t.Run("digest is deterministic and matches SHA-256 prefix", func(t *testing.T) {
+	// USK-1109 review S-2: the digest is keyed per process (HMAC-SHA256),
+	// so it is stable within the process but must NOT equal the unkeyed
+	// SHA-256 prefix an attacker could brute-force offline.
+	t.Run("digest is deterministic and keyed", func(t *testing.T) {
 		frag := "DROP TABLE users"
+		got := redactMatchedFragment(frag)
+		if again := redactMatchedFragment(frag); again != got {
+			t.Errorf("redactMatchedFragment(%q) not stable: %q vs %q", frag, got, again)
+		}
 		sum := sha256.Sum256([]byte(frag))
-		want := fmt.Sprintf("sha256:%x len=%d", sum[:8], len(frag))
-		if got := redactMatchedFragment(frag); got != want {
-			t.Errorf("redactMatchedFragment(%q) = %q, want %q", frag, got, want)
+		if unkeyed := fmt.Sprintf("%x", sum[:8]); strings.Contains(got, unkeyed) {
+			t.Errorf("redactMatchedFragment(%q) = %q exposes the unkeyed SHA-256 prefix %s", frag, got, unkeyed)
+		}
+		if !strings.HasSuffix(got, fmt.Sprintf(" len=%d", len(frag))) {
+			t.Errorf("redactMatchedFragment(%q) = %q, want len=%d suffix", frag, got, len(frag))
 		}
 	})
 

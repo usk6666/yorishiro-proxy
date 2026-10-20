@@ -333,7 +333,9 @@ func checkClientExample(ctx context.Context, session *gomcp.ClientSession, args 
 }
 
 // guardedDocs returns the documents the guard covers, as (display name,
-// path) pairs: every .claude/skills/*/SKILL.md plus both READMEs.
+// path) pairs: every .claude/skills/*/SKILL.md, both READMEs, and the
+// embedded MCP help resources (internal/mcp/resources/help_*.md, served by
+// the docs tool and the offline `docs` subcommand).
 func guardedDocs(t *testing.T) map[string]string {
 	t.Helper()
 	const root = "../.."
@@ -341,7 +343,15 @@ func guardedDocs(t *testing.T) map[string]string {
 	if err != nil {
 		t.Fatalf("glob skills: %v", err)
 	}
-	paths := append(skills, filepath.Join(root, "README.md"), filepath.Join(root, "README-ja.md"))
+	helpDocs, err := filepath.Glob(filepath.Join(root, "internal", "mcp", "resources", "help_*.md"))
+	if err != nil {
+		t.Fatalf("glob help resources: %v", err)
+	}
+	if len(helpDocs) == 0 {
+		t.Fatal("no internal/mcp/resources/help_*.md found")
+	}
+	paths := append(skills, helpDocs...)
+	paths = append(paths, filepath.Join(root, "README.md"), filepath.Join(root, "README-ja.md"))
 	docs := make(map[string]string, len(paths))
 	for _, p := range paths {
 		rel, err := filepath.Rel(root, p)
@@ -447,6 +457,161 @@ func TestDocCLIExamples_NotVacuous(t *testing.T) {
 			t.Errorf("%s: extracted no examples", readme)
 		}
 	}
+}
+
+// --- USK-1244: clientToolHelp ------------------------------------------
+//
+// `yorishiro-proxy client <tool> --help` prints clientToolHelp verbatim.
+// It is plain text, not Markdown, and every line that mentions the client
+// command is an example, so each help string is checked as if it were one
+// fenced code block: fail-closed, every marker line becomes a command.
+
+// extractHelpExamples returns every `yorishiro-proxy client` command in one
+// clientToolHelp entry. Line numbers are 1-based within the help string.
+func extractHelpExamples(tool, help string) []cliExample {
+	source := "clientToolHelp[" + tool + "]"
+	examples := extractClientExamples(source, "```\n"+help+"\n```")
+	for i := range examples {
+		// The synthetic opening fence shifts every line by one.
+		examples[i].Line--
+		examples[i].EndLine--
+	}
+	return examples
+}
+
+// helpExampleCoverage is the non-vacuity check for the help guard. It
+// returns one finding per help entry that yields no example at all, or
+// whose extracted example count differs from an independent naive count
+// of lines mentioning the client command (a marker line the extractor
+// dropped is a hole in the guard).
+func helpExampleCoverage(help map[string]string) []string {
+	var out []string
+	for _, tool := range sortedKeys(help) {
+		text := help[tool]
+		got := len(extractHelpExamples(tool, text))
+		if got == 0 {
+			out = append(out, fmt.Sprintf("clientToolHelp[%s]: no `%s` example extracted", tool, clientCommandMarker))
+			continue
+		}
+		want := 0
+		for _, line := range strings.Split(text, "\n") {
+			if strings.Contains(line, clientCommandMarker) {
+				want++
+			}
+		}
+		if got != want {
+			out = append(out, fmt.Sprintf("clientToolHelp[%s]: extracted %d examples, but %d lines mention `%s`", tool, got, want, clientCommandMarker))
+		}
+	}
+	return out
+}
+
+// knownBrokenHelpExamples are help examples that are wrong for a reason
+// tracked elsewhere. Each stays excluded only while it still matches an
+// example that still fails: once the example passes the guard, or no help
+// example matches the entry any more, the exclusion is reported as stale.
+var knownBrokenHelpExamples = []struct {
+	tool, substr, issue string
+}{}
+
+// knownBrokenHelpExample returns the knownBrokenHelpExamples index that
+// matches the example, or -1.
+func knownBrokenHelpExample(tool string, args []string) int {
+	joined := strings.Join(args, " ")
+	for i, kb := range knownBrokenHelpExamples {
+		if kb.tool == tool && strings.Contains(joined, kb.substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// TestClientToolHelpExamples_AcceptedByLiveSchema is the help-text guard:
+// every example printed by `yorishiro-proxy client <tool> --help` must be
+// accepted end-to-end, exactly like the skill / README examples.
+func TestClientToolHelpExamples_AcceptedByLiveSchema(t *testing.T) {
+	ctx, session := newValidationSession(t)
+
+	matched := make([]bool, len(knownBrokenHelpExamples))
+	for _, tool := range sortedKeys(clientToolHelp) {
+		for _, ex := range extractHelpExamples(tool, clientToolHelp[tool]) {
+			kb := knownBrokenHelpExample(tool, ex.Args)
+			if kb >= 0 {
+				matched[kb] = true
+			}
+			t.Run(ex.name(), func(t *testing.T) {
+				err := ex.Err
+				if err == nil {
+					err = checkClientExample(ctx, session, ex.Args)
+				}
+				if kb >= 0 {
+					issue := knownBrokenHelpExamples[kb].issue
+					if err == nil {
+						t.Errorf("stale exclusion: the example now passes; remove the %s entry from knownBrokenHelpExamples", issue)
+						return
+					}
+					t.Skip("not yet implemented: " + issue)
+				}
+				switch {
+				case ex.Err != nil:
+					t.Error(ex.Err)
+				case err != nil:
+					t.Errorf("`yorishiro-proxy client %s`: %v", strings.Join(ex.Args, " "), err)
+				}
+			})
+		}
+	}
+	for i, kb := range knownBrokenHelpExamples {
+		if !matched[i] {
+			t.Errorf("stale exclusion: no clientToolHelp[%s] example contains %q any more; remove the %s entry from knownBrokenHelpExamples", kb.tool, kb.substr, kb.issue)
+		}
+	}
+}
+
+// TestHelpExampleCoverage pins the help guard's non-vacuity check with
+// fixtures, then runs it over the live clientToolHelp map.
+func TestHelpExampleCoverage(t *testing.T) {
+	tests := []struct {
+		name      string
+		help      map[string]string
+		wantFound bool
+	}{
+		{"entry without examples", map[string]string{"x": "x: does things.\n\nParameters:\n  a=<b>"}, true},
+		{"marker line the extractor drops", map[string]string{"x": "Examples:\n```\n  yorishiro-proxy client query resource=flows"}, true},
+		{"one example per entry", map[string]string{
+			"query":  "Examples:\n  yorishiro-proxy client query resource=flows",
+			"manage": "Examples:\n  yorishiro-proxy client manage action=delete_flows params.flow_id=X\n  yorishiro-proxy client manage action=delete_flows params.confirm=true",
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := helpExampleCoverage(tt.help)
+			if tt.wantFound && len(got) == 0 {
+				t.Errorf("helpExampleCoverage(%q) found nothing, want a finding", tt.help)
+			}
+			if !tt.wantFound && len(got) != 0 {
+				t.Errorf("helpExampleCoverage(%q) = %q, want no findings", tt.help, got)
+			}
+		})
+	}
+
+	t.Run("live clientToolHelp", func(t *testing.T) {
+		if len(clientToolHelp) == 0 {
+			t.Fatal("clientToolHelp is empty")
+		}
+		for _, f := range helpExampleCoverage(clientToolHelp) {
+			t.Error(f)
+		}
+	})
 }
 
 // bareClientMention is the one prose form the extractor skips on purpose
@@ -573,6 +738,10 @@ func TestCheckClientExample_Controls(t *testing.T) {
 		{"help for unknown tool", "`yorishiro-proxy client resend --help`", "clientToolHelp"},
 		{"unsupported shell construct", "`yorishiro-proxy client query resource=flows | jq .`", "unsupported shell construct"},
 		{"not a plain invocation", "`YP_CLIENT_FORMAT=raw yorishiro-proxy client query resource=flows`", "not a plain"},
+		// USK-1244: a gRPC RPC needs at least one DATA frame, so messages
+		// is required even when flow_id supplies everything else.
+		{"resend_grpc without messages", "`yorishiro-proxy client resend_grpc flow_id=X`", "messages"},
+		{"fuzz_grpc without messages", "`yorishiro-proxy client fuzz_grpc flow_id=X positions='[{\"path\":\"method\",\"payloads\":[\"A\"]}]'`", "messages"},
 
 		// T4 positive controls.
 		{"comma array", "`yorishiro-proxy client configure tls_passthrough.add='a,b'`", ""},
@@ -584,6 +753,7 @@ func TestCheckClientExample_Controls(t *testing.T) {
 		{"fuzz positions JSON", "```bash\nyorishiro-proxy client fuzz_http flow_id=X \\\n  positions='[{\"path\":\"raw_query\",\"payloads\":[\"test1\",\"test2\",\"test3\"]}]'\n```", ""},
 		{"SQLi quote idiom", "```bash\nyorishiro-proxy client fuzz_http flow_id=X positions='[{\"path\":\"raw_query\",\"payloads\":[\"'\\'' OR '\\''1'\\''='\\''1\"]}]'\n```", ""},
 		{"conn flag", "`yorishiro-proxy client query resource=status --format table`", ""},
+		{"resend_grpc with messages", "`yorishiro-proxy client resend_grpc flow_id=X messages='[{\"payload\":\"hi\"}]'`", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

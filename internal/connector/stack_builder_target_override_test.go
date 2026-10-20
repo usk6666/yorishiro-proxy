@@ -149,34 +149,34 @@ func TestBuildConnectionStackWithTarget_EmptyProtocolRoutesViaAuto(t *testing.T)
 	}
 }
 
-// TestBuildConnectionStackWithTarget_DeferredProtocols was the
-// USK-912-era enumeration of "not yet wired" protocol arms. After
-// USK-913 (http/ws/sse/auto) and USK-914 (http2/grpc) landed the
-// entire BuildConnectionStackWithTarget protocol switch is wired, so
-// this table is intentionally empty. Kept as a structural placeholder
-// so future deferrals (e.g., a new ForwardProtocol value introduced
-// without a wired arm) re-use the same fixture pattern.
-func TestBuildConnectionStackWithTarget_DeferredProtocols(t *testing.T) {
-	cases := []struct {
-		name      string
-		protocol  ForwardProtocol
-		wantIssue string
-	}{}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, clientPeer := pipePair(t)
-			_, upstreamPeer := pipePair(t)
+// TestBuildConnectionStackWithTarget_AllValidProtocolsHaveBuilderArm is an
+// exhaustiveness check: every ForwardProtocol that params.validate accepts
+// (validForwardProtocols) must be routed to a builder arm, never to the
+// switch's "unhandled protocol" default. The conns are closed up front so
+// each arm returns promptly; its success or its own wrap error are both
+// fine — only the default-arm error is a failure.
+func TestBuildConnectionStackWithTarget_AllValidProtocolsHaveBuilderArm(t *testing.T) {
+	if len(validForwardProtocols) == 0 {
+		t.Fatal("validForwardProtocols is empty")
+	}
+	for protocol := range validForwardProtocols {
+		t.Run(string(protocol), func(t *testing.T) {
+			clientLocal, clientPeer := net.Pipe()
+			upstreamLocal, upstreamPeer := net.Pipe()
+			for _, c := range []net.Conn{clientLocal, clientPeer, upstreamLocal, upstreamPeer} {
+				_ = c.Close()
+			}
 			cfg := newTestBuildConfig(t)
 			params := TargetOverrideParams{
 				Target:   "api.example.com:50051",
-				Protocol: tc.protocol,
+				Protocol: protocol,
 			}
-			_, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
-			if err == nil {
-				t.Fatalf("protocol %q: expected non-nil deferred error, got nil", tc.protocol)
+			stack, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
+			if stack != nil {
+				t.Cleanup(func() { _ = stack.Close() })
 			}
-			if !strings.Contains(err.Error(), tc.wantIssue) {
-				t.Errorf("protocol %q: error %q does not cite %q", tc.protocol, err.Error(), tc.wantIssue)
+			if err != nil && strings.Contains(err.Error(), "unhandled protocol") {
+				t.Errorf("protocol %q is accepted by validate but has no builder arm: %v", protocol, err)
 			}
 		})
 	}
@@ -246,8 +246,7 @@ func TestBuildConnectionStackWithTarget_H2CDispatch(t *testing.T) {
 			// reader goroutine sees EOF on the very next frame read. We only
 			// need the dispatcher to route into the h2c builder branch — the
 			// builder may then fail at either the upstream or client Layer
-			// construction; both outcomes indicate the dispatch reached the
-			// h2 branch (not the "not yet wired" error path).
+			// construction; both wrap errors cite the h2c builder.
 			clientLocal, clientPeer := net.Pipe()
 			t.Cleanup(func() { _ = clientLocal.Close(); _ = clientPeer.Close() })
 			upstreamLocal, upstreamPeer := net.Pipe()
@@ -286,16 +285,14 @@ func TestBuildConnectionStackWithTarget_H2CDispatch(t *testing.T) {
 				Protocol: tc.protocol,
 			}
 			_, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
-			// The interesting assertion is the error path — it must NOT
-			// be the "not yet wired" sentinel. Either the upstream or
-			// client h2 layer construction surfaces a wrap error citing
-			// "buildTargetOverrideH2CStack" or the connector's
-			// "BuildConnectionStackWithTarget" prefix.
+			// Both the upstream and the client h2 layer construction
+			// failures are wrapped with "buildTargetOverrideH2CStack:", so
+			// that prefix proves the dispatch reached the h2c builder.
 			if err == nil {
 				t.Fatalf("protocol %q: expected error from closed peer dispatch (no real h2 handshake), got success", tc.protocol)
 			}
-			if strings.Contains(err.Error(), "not yet wired") {
-				t.Errorf("protocol %q: dispatch returned 'not yet wired' (%q); h2c branch was not reached", tc.protocol, err.Error())
+			if !strings.Contains(err.Error(), "buildTargetOverrideH2CStack") {
+				t.Errorf("protocol %q: error %q does not cite buildTargetOverrideH2CStack; h2c branch was not reached", tc.protocol, err.Error())
 			}
 		})
 	}

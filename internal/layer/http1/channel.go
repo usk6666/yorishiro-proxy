@@ -204,6 +204,112 @@ type opaqueHTTP1 struct {
 	origKV         []envelope.KeyValue // header snapshot at Next() time
 	origBody       []byte              // body snapshot at Next() time (nil for buffer-backed)
 	origBodyBuffer *bodybuf.BodyBuffer // buffer-backed body snapshot (nil for memory-backed)
+
+	// USK-1148: start-line snapshot at Next() time — the Message values
+	// the Layer derived from the wire line. The opaque send path compares
+	// the outgoing Message against these to decide whether the request /
+	// status line must be rebuilt (RFC-001 §9.3 item 2). Comparing against
+	// the snapshot rather than rawReq.RequestURI matters: the Message form
+	// is not always a substring of the wire target (net/url fallback,
+	// bare trailing "?").
+	origMethod   string
+	origPath     string
+	origRawQuery string
+	// targetPrefix is the wire "scheme://authority" of an absolute-form
+	// request-target ("" for origin-form and asterisk-form).
+	// targetSpliceable reports whether targetPrefix + origPath
+	// [+ "?" + origRawQuery] reproduces rawReq.RequestURI, i.e. whether a
+	// rewritten path / query can be spliced behind the wire prefix.
+	targetPrefix     string
+	targetSpliceable bool
+	origStatus       int
+	origStatusReason string
+}
+
+// snapshotRequestLine records the request-line fields msg was built from.
+// Called once at parse time; msg must be the Message emitted with this
+// Opaque.
+func (o *opaqueHTTP1) snapshotRequestLine(msg *envelope.HTTPMessage) {
+	o.origMethod, o.origPath, o.origRawQuery = msg.Method, msg.Path, msg.RawQuery
+	uri := o.rawReq.RequestURI
+	o.targetPrefix = absoluteFormPrefix(uri)
+	base := o.targetPrefix + msg.Path
+	o.targetSpliceable = uri == base || uri == base+"?"+msg.RawQuery
+}
+
+// snapshotStatusLine records the status-line fields msg was built from.
+func (o *opaqueHTTP1) snapshotStatusLine(msg *envelope.HTTPMessage) {
+	o.origStatus, o.origStatusReason = msg.Status, msg.StatusReason
+}
+
+// requestLine returns the method and request-target to emit for msg.
+// Parts whose Message field still equals the parse-time snapshot are
+// taken from the wire verbatim: an unchanged target is rawReq.RequestURI
+// byte-for-byte even when only the method changed. A changed target is
+// msg.Path [+ "?" + msg.RawQuery], behind the wire absolute-form prefix
+// when the original target was spliceable. msg.Authority / msg.Scheme are
+// never written here: on HTTP/1.x the Host header carries the authority.
+//
+// Values are not validated (USK-1148 user decision): a plugin can already
+// put arbitrary bytes on the wire via msg["raw"], so CR / LF / SP in a
+// structured field go out verbatim.
+func (o *opaqueHTTP1) requestLine(msg *envelope.HTTPMessage) (method, target string, changed bool) {
+	rawReq := o.rawReq
+	methodChanged := msg.Method != o.origMethod
+	targetChanged := msg.Path != o.origPath || msg.RawQuery != o.origRawQuery
+	if !methodChanged && !targetChanged {
+		return rawReq.Method, rawReq.RequestURI, false
+	}
+	method = rawReq.Method
+	if methodChanged {
+		method = msg.Method
+	}
+	target = rawReq.RequestURI
+	if targetChanged {
+		target = msg.Path
+		if msg.RawQuery != "" {
+			target += "?" + msg.RawQuery
+		}
+		if o.targetSpliceable {
+			target = o.targetPrefix + target
+		}
+		if target == "" {
+			target = "/"
+		}
+	}
+	return method, target, true
+}
+
+// statusLine returns the status ("<code> <reason>") to emit for msg. An
+// unchanged status / reason pair keeps rawResp.Status verbatim. Otherwise
+// it is msg.Status followed by msg.StatusReason as written — a status-only
+// change keeps the Message's (wire) reason, and an empty reason emits no
+// reason phrase. Not validated, see requestLine.
+func (o *opaqueHTTP1) statusLine(msg *envelope.HTTPMessage) (status string, changed bool) {
+	if msg.Status == o.origStatus && msg.StatusReason == o.origStatusReason {
+		return o.rawResp.Status, false
+	}
+	status = strconv.Itoa(msg.Status)
+	if msg.StatusReason != "" {
+		status += " " + msg.StatusReason
+	}
+	return status, true
+}
+
+// absoluteFormPrefix returns the "scheme://authority" prefix of an
+// absolute-form request-target exactly as it appears on the wire, or ""
+// for any other form.
+func absoluteFormPrefix(requestURI string) string {
+	i := strings.Index(requestURI, "://")
+	if i <= 0 || !isURIScheme(requestURI[:i]) {
+		return ""
+	}
+	rest := requestURI[i+3:]
+	end := strings.IndexAny(rest, "/?")
+	if end < 0 {
+		end = len(rest)
+	}
+	return requestURI[:i+3+end]
 }
 
 // bodyOpts are the per-channel body assembly options inherited from the Layer.
@@ -318,6 +424,34 @@ type channel struct {
 	// appendPending and read by spawnLoopReceive, which then retires the
 	// Layer after this exchange's final response.
 	rawWinsSent atomic.Bool
+
+	// USK-1229 exchange-completion tracking.
+	//
+	// Send direction (client-facing): requestDelivered is set when Next
+	// returned the request to the consumer; finalResponseSent when Send
+	// wrote a final response (status >= 200, 101, or raw-authoritative);
+	// responseIncomplete when the response written carried the
+	// TruncatedBody anomaly (the upstream cut its body). All are written
+	// before the consumer's Close fires termDone and read by the Layer's
+	// spawn goroutine after it, which then ends the connection when the
+	// request was not answered completely (see exchangeUnanswered).
+	requestDelivered   atomic.Bool
+	finalResponseSent  atomic.Bool
+	responseIncomplete atomic.Bool
+
+	// Receive direction (upstream-facing): requestSent is set by
+	// sendRequest before appendPending, so the parser knows a peer close
+	// left a written request unanswered. postFinalErr is the terminal
+	// error Next returns after the final response was delivered — set when
+	// that response's body was cut by the upstream closing (USK-1229).
+	requestSent  atomic.Bool
+	postFinalErr atomic.Pointer[layer.StreamError]
+
+	// requestMethod is the method sendRequest wrote, read by the response
+	// parser once the response head is in (USK-1229 review F-1: HEAD
+	// responses are bodyless). Atomic because the parse can start before
+	// the Send (Next-before-Send registration).
+	requestMethod atomic.Pointer[string]
 
 	// USK-721: priorRespWasInformational tracks whether the previous response
 	// emitted on this Channel was 1xx, so the next response advances Sequence.
@@ -509,6 +643,7 @@ func (c *channel) nextSend(_ context.Context) (*envelope.Envelope, error) {
 		return nil, io.EOF
 	}
 	c.delivered = true
+	c.requestDelivered.Store(true)
 	return c.queuedEnv, nil
 }
 
@@ -552,6 +687,7 @@ func (c *channel) nextSendDeferred() (*envelope.Envelope, error) {
 		return nil, err
 	}
 	c.delivered = true
+	c.requestDelivered.Store(true)
 	return env, nil
 }
 
@@ -597,6 +733,10 @@ func (c *channel) nextReceive(ctx context.Context) (*envelope.Envelope, error) {
 	select {
 	case d, ok := <-c.responseReady:
 		if !ok {
+			if se := c.postFinalErr.Load(); se != nil {
+				c.markTerminated(se)
+				return nil, se
+			}
 			c.markTerminated(io.EOF)
 			return nil, io.EOF
 		}
@@ -991,6 +1131,11 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 	}
 	trailers, trailerAnomalies := extractTrailers(rawReq.Body)
 	anomalies = append(anomalies, trailerAnomalies...)
+	// USK-1229: a client that closed mid-body. The request is still
+	// forwarded exactly as received; the anomaly makes the cut visible.
+	if a, ok := bodyTruncationAnomaly(rawReq.Body); ok {
+		anomalies = append(anomalies, a)
+	}
 
 	msg := &envelope.HTTPMessage{
 		Method:      rawReq.Method,
@@ -1008,6 +1153,14 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 
 	envCtx := c.ctxTmpl
 	envCtx.ReceivedAt = time.Now()
+
+	opaque := &opaqueHTTP1{
+		rawReq:         rawReq,
+		origKV:         cloneKV(msg.Headers),
+		origBody:       cloneBytes(body),
+		origBodyBuffer: bb,
+	}
+	opaque.snapshotRequestLine(msg)
 
 	env := &envelope.Envelope{
 		StreamID:  streamID,
@@ -1028,12 +1181,7 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 		RawBuffer: rawReq.RawBodyBuffer,
 		Message:   msg,
 		Context:   envCtx,
-		Opaque: &opaqueHTTP1{
-			rawReq:         rawReq,
-			origKV:         cloneKV(msg.Headers),
-			origBody:       cloneBytes(body),
-			origBodyBuffer: bb,
-		},
+		Opaque:    opaque,
 	}
 
 	c.connClosed = rawReq.Close
@@ -1042,18 +1190,25 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 }
 
 // parseResponse reads one HTTP response from the parent Layer's bufio.Reader
-// and returns the envelope. The bool return value is true when the response
-// is a 1xx informational (the parent Layer must keep parsing on the same
-// channel for the final response).
-func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
+// and returns the envelope. isInformational is true when the response is a
+// 1xx informational (the parent Layer must keep parsing on the same channel
+// for the final response). truncated is true when the upstream closed the
+// connection before the response body was complete (USK-1229); the
+// envelope then carries the bytes received and AnomalyTruncatedBody.
+func (c *channel) parseResponse() (env *envelope.Envelope, isInformational, truncated bool, err error) {
 	rawResp, err := parser.ParseResponseWithOptions(c.layer.reader, parser.ParseOptions{
 		MaxRawCapture: c.bodyOpts.maxRawCapture,
+		// USK-1229 review F-1: the paired request's method makes a HEAD
+		// response bodyless. Read through an atomic after the response
+		// head arrived: on the Next-before-Send path the parse starts
+		// before sendRequest stored it.
+		RequestMethod: c.pairedRequestMethod,
 	})
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil, false, io.EOF
+			return nil, false, false, io.EOF
 		}
-		return nil, false, fmt.Errorf("http1: parse response: %w", err)
+		return nil, false, false, fmt.Errorf("http1: parse response: %w", err)
 	}
 
 	// Streaming-body bypass (USK-655): when the configured predicate matches
@@ -1062,12 +1217,16 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 	// orchestrator to claim via detachStreamingBody. Streaming responses
 	// are by definition final.
 	if c.streamingDetect != nil && c.streamingDetect(rawResp) {
-		return c.buildStreamingResponseEnvelope(rawResp), false, nil
+		return c.buildStreamingResponseEnvelope(rawResp), false, false, nil
 	}
 
 	bb, body, anomalies, trailers, err := c.assembleResponseBody(rawResp)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
+	}
+	truncAnomaly, truncated := bodyTruncationAnomaly(rawResp.Body)
+	if truncated {
+		anomalies = append(anomalies, truncAnomaly)
 	}
 	defer func() {
 		if err != nil && bb != nil {
@@ -1095,6 +1254,18 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 	envCtx.ReceivedAt = time.Now()
 
 	emitSeq, isInformational := c.advanceResponseSequence(rawResp.StatusCode)
+	if isInformational {
+		// 1xx responses have no body (RFC 9112 §6.3); never truncated.
+		truncated = false
+	}
+
+	opaque := &opaqueHTTP1{
+		rawResp:        rawResp,
+		origKV:         cloneKV(msg.Headers),
+		origBody:       cloneBytes(body),
+		origBodyBuffer: bb,
+	}
+	opaque.snapshotStatusLine(msg)
 
 	// Mint per-exchange StreamID on first response if Send direction never
 	// ran (Receive-direction Channel obtained via OpenExchange inherits the
@@ -1103,7 +1274,7 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 		c.currentStreamID = uuid.New().String()
 	}
 
-	env := &envelope.Envelope{
+	env = &envelope.Envelope{
 		StreamID:  c.currentStreamID,
 		FlowID:    uuid.New().String(),
 		Sequence:  emitSeq,
@@ -1118,16 +1289,11 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 		RawBuffer: rawResp.RawBodyBuffer,
 		Message:   msg,
 		Context:   envCtx,
-		Opaque: &opaqueHTTP1{
-			rawResp:        rawResp,
-			origKV:         cloneKV(msg.Headers),
-			origBody:       cloneBytes(body),
-			origBodyBuffer: bb,
-		},
+		Opaque:    opaque,
 	}
 
 	c.recordEmittedFlowID(env.FlowID)
-	return env, isInformational, nil
+	return env, isInformational, truncated, nil
 }
 
 // buildStreamingResponseEnvelope assembles the response Envelope for the
@@ -1177,6 +1343,12 @@ func (c *channel) buildStreamingResponseEnvelope(rawResp *parser.RawResponse) *e
 		c.currentStreamID = uuid.New().String()
 	}
 
+	opaque := &opaqueHTTP1{
+		rawResp: rawResp,
+		origKV:  cloneKV(msg.Headers),
+	}
+	opaque.snapshotStatusLine(msg)
+
 	env := &envelope.Envelope{
 		StreamID:  c.currentStreamID,
 		FlowID:    uuid.New().String(),
@@ -1186,10 +1358,7 @@ func (c *channel) buildStreamingResponseEnvelope(rawResp *parser.RawResponse) *e
 		Raw:       rawResp.RawBytes,
 		Message:   msg,
 		Context:   envCtx,
-		Opaque: &opaqueHTTP1{
-			rawResp: rawResp,
-			origKV:  cloneKV(msg.Headers),
-		},
+		Opaque:    opaque,
 	}
 	c.recordEmittedFlowID(env.FlowID)
 	return env
@@ -1272,6 +1441,8 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	// forwards one).
 	c.ctxTmpl.RequestPath = msg.Path
 	c.ctxTmpl.RequestMethod = msg.Method
+	method := msg.Method
+	c.requestMethod.Store(&method)
 	c.ctxTmpl.RequestRawQuery = msg.RawQuery
 	c.ctxTmpl.RequestAuthority = msg.Authority
 
@@ -1279,6 +1450,16 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	// unparsed response stream; nothing has been written for this
 	// request, so the retry wrapper may replay it on a fresh Layer
 	// (never a raw-authoritative one, see sendRawWins).
+	if c.layer.dead.Load() {
+		// USK-1229 review F-2: the receive loop ended; nothing would read
+		// this request's response. Nothing has been written, so the retry
+		// wrapper may replay it on a fresh Layer.
+		return fmt.Errorf("http1: send request: %w", &StaleUpstreamError{
+			Underlying: errUpstreamDead,
+			ReplaySafe: !env.RawWins() && isReplaySafe(msg, opaque, "header"),
+			Stage:      "header",
+		})
+	}
 	if c.layer.retired.Load() {
 		return fmt.Errorf("http1: send request: %w", &StaleUpstreamError{
 			Underlying: errUpstreamRetired,
@@ -1298,6 +1479,7 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	// atomically with the wire write so the response FIFO matches the
 	// on-wire request order. Caller (Send) holds writeMu, so this append
 	// is serialized with respect to other Channels' sendRequest invocations.
+	c.requestSent.Store(true)
 	if c.layer != nil {
 		c.layer.appendPending(c)
 	}
@@ -1314,13 +1496,77 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 func (c *channel) sendResponse(msg *envelope.HTTPMessage, env *envelope.Envelope) error {
 	opaque, _ := env.Opaque.(*opaqueHTTP1)
 
-	if env.RawWins() {
-		return c.sendRawWins(env.Raw, "response")
+	var err error
+	rawWins := env.RawWins()
+	switch {
+	case rawWins:
+		err = c.sendRawWins(env.Raw, "response")
+	case opaque != nil && opaque.rawResp != nil:
+		err = c.sendResponseOpaque(msg, opaque)
+	default:
+		err = c.sendResponseSynthetic(msg)
 	}
-	if opaque != nil && opaque.rawResp != nil {
-		return c.sendResponseOpaque(msg, opaque)
+	if err == nil {
+		c.noteResponseWritten(msg, rawWins)
 	}
-	return c.sendResponseSynthetic(msg)
+	return err
+}
+
+// pairedRequestMethod returns the method of the request this Receive
+// Channel sent, or "" when none was sent yet (USK-1229 review F-1).
+func (c *channel) pairedRequestMethod() string {
+	if p := c.requestMethod.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// noteResponseWritten records, for the USK-1229 keep-alive rule, what a
+// successfully written response did for this exchange. A raw-authoritative
+// response is treated as final: the plugin owns its bytes.
+func (c *channel) noteResponseWritten(msg *envelope.HTTPMessage, rawWins bool) {
+	if hasAnomalyType(msg.Anomalies, envelope.AnomalyTruncatedBody) {
+		c.responseIncomplete.Store(true)
+	}
+	if rawWins || msg.Status >= 200 || msg.Status == 101 {
+		c.finalResponseSent.Store(true)
+	}
+}
+
+// exchangeUnanswered reports whether this Send-direction exchange delivered
+// its request but did not write a complete final response (USK-1229). The
+// Layer must then not parse another request on the connection: HTTP/1.1
+// answers in request order (RFC 9112 §9.3), so a later response would be
+// taken as the answer to this request. Read only after termDone.
+func (c *channel) exchangeUnanswered() bool {
+	if !c.requestDelivered.Load() {
+		return false
+	}
+	return !c.finalResponseSent.Load() || c.responseIncomplete.Load()
+}
+
+func hasAnomalyType(anomalies []envelope.Anomaly, typ envelope.AnomalyType) bool {
+	for _, a := range anomalies {
+		if a.Type == typ {
+			return true
+		}
+	}
+	return false
+}
+
+// bodyTruncationAnomaly returns the AnomalyTruncatedBody anomaly when the
+// drained parser body reader reports the connection ended mid-body
+// (USK-1229).
+func bodyTruncationAnomaly(parserBody io.Reader) (envelope.Anomaly, bool) {
+	tp, ok := parserBody.(parser.BodyTruncationProvider)
+	if !ok {
+		return envelope.Anomaly{}, false
+	}
+	truncated, detail := tp.BodyTruncated()
+	if !truncated {
+		return envelope.Anomaly{}, false
+	}
+	return envelope.Anomaly{Type: envelope.AnomalyTruncatedBody, Detail: detail}, true
 }
 
 // --- Send Path 0: raw wins (RFC-001 §9.3 D4) ---
@@ -1368,6 +1614,11 @@ func (c *channel) sendRawWins(raw []byte, kind string) error {
 //     the envelope.
 //   - headersChanged / bodyChanged are also reported here so callers can
 //     skip the zero-copy fast path when either is set.
+//   - lineChanged: the Message's request line (method / path / raw_query)
+//     or status line (status / status_reason) differs from the parse-time
+//     snapshot, so the start line is rebuilt (USK-1148).
+//   - zeroCopy: none of the above forces a re-serialization, so the
+//     header section is the parser's RawBytes verbatim.
 //
 // USK-769.
 type opaqueSendDecision struct {
@@ -1375,6 +1626,123 @@ type opaqueSendDecision struct {
 	bodyChanged    bool
 	useRawBody     bool
 	rewriteTEToCL  bool
+	lineChanged    bool
+	zeroCopy       bool
+}
+
+// canZeroCopy reports whether the header section can be re-emitted as the
+// parser captured it.
+func (d opaqueSendDecision) canZeroCopy(rawBytes []byte) bool {
+	return !d.headersChanged && !d.bodyChanged && !d.rewriteTEToCL && !d.lineChanged && len(rawBytes) > 0
+}
+
+// lineOnly reports whether the start line is the only part of the head
+// that must change: no header patch and no framing rewrite. The header
+// section can then be re-emitted verbatim after the rebuilt start line
+// (USK-1148 review F-1).
+func (d opaqueSendDecision) lineOnly() bool {
+	return d.lineChanged && !d.headersChanged && !d.bodyChanged && !d.rewriteTEToCL
+}
+
+// headerSectionAfterStartLine returns the bytes of a captured head that
+// follow the start line: every header line and the terminating blank line
+// exactly as the wire carried them, including the forms parser.RawHeaders
+// cannot reproduce (obs-fold continuations, orphan continuation lines,
+// colon-less lines, bare-LF terminators). The parser reads the start line
+// with bufio.Reader.ReadSlice('\n'), so its terminator is the first LF in
+// raw. ok is false when raw was truncated at the capture cap or holds no
+// LF (a partial start line); the caller must then re-serialize.
+func headerSectionAfterStartLine(raw []byte, truncated bool) ([]byte, bool) {
+	if truncated {
+		return nil, false
+	}
+	i := bytes.IndexByte(raw, '\n')
+	if i < 0 {
+		return nil, false
+	}
+	return raw[i+1:], true
+}
+
+// opaqueRequestHead renders the header section (request line + headers +
+// CRLF) an opaque request is sent with, and the body decision. It is the
+// single source of truth for both channel.sendRequestOpaque and
+// EncodeWireBytes, so the recorded modified variant's Raw equals the wire
+// (RFC-001 §9.3 item 2).
+//
+// When nothing forces a re-serialization the head is rawReq.RawBytes
+// itself (d.zeroCopy); callers must not mutate it. When only the request
+// line changed (d.lineOnly) the head is the rebuilt line followed by the
+// wire header section verbatim. Otherwise the head is
+// freshly serialized from a clone of the wire headers patched toward
+// msg.Headers (OWS preserved on untouched headers), with the request line
+// from opaque.requestLine. opaque is never mutated, so a StaleUpstream
+// replay of the same envelope renders the same bytes.
+func opaqueRequestHead(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte, opaqueSendDecision) {
+	rawReq := opaque.rawReq
+	method, target, lineChanged := opaque.requestLine(msg)
+	d := classifyOpaqueSend(rawReq.Headers, rawReq.RawBody, rawReq.RawBodyBuffer != nil, rawReq.RawBodyTruncated,
+		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
+	d.lineChanged = lineChanged
+	if d.canZeroCopy(rawReq.RawBytes) {
+		d.zeroCopy = true
+		return rawReq.RawBytes, d
+	}
+	if d.lineOnly() {
+		if tail, ok := headerSectionAfterStartLine(rawReq.RawBytes, rawReq.Truncated); ok {
+			var buf bytes.Buffer
+			_ = serializeRequestLine(&buf, method, target, rawReq.Proto)
+			buf.Write(tail)
+			return buf.Bytes(), d
+		}
+	}
+	head := parser.RawRequest{
+		Method:     method,
+		RequestURI: target,
+		Proto:      rawReq.Proto,
+		Headers:    patchOpaqueHeaders(msg, opaque, rawReq.Headers, d),
+	}
+	return serializeRequestHeader(&head), d
+}
+
+// opaqueResponseHead is the response-side twin of opaqueRequestHead.
+func opaqueResponseHead(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte, opaqueSendDecision) {
+	rawResp := opaque.rawResp
+	status, lineChanged := opaque.statusLine(msg)
+	d := classifyOpaqueSend(rawResp.Headers, rawResp.RawBody, rawResp.RawBodyBuffer != nil, rawResp.RawBodyTruncated,
+		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
+	d.lineChanged = lineChanged
+	if d.canZeroCopy(rawResp.RawBytes) {
+		d.zeroCopy = true
+		return rawResp.RawBytes, d
+	}
+	if d.lineOnly() {
+		if tail, ok := headerSectionAfterStartLine(rawResp.RawBytes, rawResp.Truncated); ok {
+			var buf bytes.Buffer
+			_ = serializeStatusLine(&buf, rawResp.Proto, status, msg.Status)
+			buf.Write(tail)
+			return buf.Bytes(), d
+		}
+	}
+	head := parser.RawResponse{
+		Proto:      rawResp.Proto,
+		StatusCode: msg.Status,
+		Status:     status,
+		Headers:    patchOpaqueHeaders(msg, opaque, rawResp.Headers, d),
+	}
+	return serializeResponseHeader(&head), d
+}
+
+// patchOpaqueHeaders returns a copy of the wire headers with the header
+// patch and the TE→CL rewrite applied as d requires. wire is not mutated.
+func patchOpaqueHeaders(msg *envelope.HTTPMessage, opaque *opaqueHTTP1, wire parser.RawHeaders, d opaqueSendDecision) parser.RawHeaders {
+	headers := wire.Clone()
+	if d.headersChanged {
+		headers = applyHeaderPatch(opaque.origKV, msg.Headers, headers)
+	}
+	if d.bodyChanged || d.rewriteTEToCL {
+		applyTEToCLRewrite(&headers, msg)
+	}
+	return headers
 }
 
 // classifyOpaqueSend computes the decision for a request/response opaque send.
@@ -1417,35 +1785,19 @@ func applyTEToCLRewrite(rawHeaders *parser.RawHeaders, msg *envelope.HTTPMessage
 
 func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
 	rawReq := opaque.rawReq
-	d := classifyOpaqueSend(rawReq.Headers, rawReq.RawBody, rawReq.RawBodyBuffer != nil, rawReq.RawBodyTruncated,
-		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
+	head, d := opaqueRequestHead(msg, opaque)
 
-	// Zero-copy fast path: nothing changed and we don't need a TE→CL rewrite.
-	// rawReq.RawBytes is header-only; the body flows through writeOpaqueBody
+	// The head is header-only; the body flows through writeOpaqueBody
 	// separately. The header Write may hit EPIPE/ECONNRESET in the USK-999
 	// race window (server FIN between HealthCheck and Write) — wrapStaleErr
 	// converts the error into *StaleUpstreamError so the proxybuild retry
 	// wrapper can replay on a fresh upstream Layer.
-	if !d.headersChanged && !d.bodyChanged && !d.rewriteTEToCL && len(rawReq.RawBytes) > 0 {
-		if _, err := c.layer.conn.Write(rawReq.RawBytes); err != nil {
-			return fmt.Errorf("http1: send request raw: %w", wrapStaleErr(err, msg, opaque, "header"))
+	if _, err := c.layer.conn.Write(head); err != nil {
+		what := "send request"
+		if d.zeroCopy {
+			what = "send request raw"
 		}
-		if err := c.writeOpaqueBody(msg, rawReq.RawBody, rawReq.RawBodyBuffer, d.useRawBody, "request"); err != nil {
-			return wrapSendBodyStaleErr(err, msg, opaque)
-		}
-		return nil
-	}
-
-	if d.headersChanged {
-		rawReq.Headers = applyHeaderPatch(opaque.origKV, msg.Headers, rawReq.Headers)
-	}
-	if d.bodyChanged || d.rewriteTEToCL {
-		applyTEToCLRewrite(&rawReq.Headers, msg)
-	}
-
-	headerBytes := serializeRequestHeader(rawReq)
-	if _, err := c.layer.conn.Write(headerBytes); err != nil {
-		return fmt.Errorf("http1: send request: %w", wrapStaleErr(err, msg, opaque, "header"))
+		return fmt.Errorf("http1: %s: %w", what, wrapStaleErr(err, msg, opaque, "header"))
 	}
 	if err := c.writeOpaqueBody(msg, rawReq.RawBody, rawReq.RawBodyBuffer, d.useRawBody, "request"); err != nil {
 		return wrapSendBodyStaleErr(err, msg, opaque)
@@ -1455,26 +1807,13 @@ func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTT
 
 func (c *channel) sendResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
 	rawResp := opaque.rawResp
-	d := classifyOpaqueSend(rawResp.Headers, rawResp.RawBody, rawResp.RawBodyBuffer != nil, rawResp.RawBodyTruncated,
-		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
-
-	if !d.headersChanged && !d.bodyChanged && !d.rewriteTEToCL && len(rawResp.RawBytes) > 0 {
-		if _, err := c.layer.conn.Write(rawResp.RawBytes); err != nil {
-			return fmt.Errorf("http1: send response raw: %w", err)
+	head, d := opaqueResponseHead(msg, opaque)
+	if _, err := c.layer.conn.Write(head); err != nil {
+		what := "send response"
+		if d.zeroCopy {
+			what = "send response raw"
 		}
-		return c.writeOpaqueBody(msg, rawResp.RawBody, rawResp.RawBodyBuffer, d.useRawBody, "response")
-	}
-
-	if d.headersChanged {
-		rawResp.Headers = applyHeaderPatch(opaque.origKV, msg.Headers, rawResp.Headers)
-	}
-	if d.bodyChanged || d.rewriteTEToCL {
-		applyTEToCLRewrite(&rawResp.Headers, msg)
-	}
-
-	headerBytes := serializeResponseHeader(rawResp)
-	if _, err := c.layer.conn.Write(headerBytes); err != nil {
-		return fmt.Errorf("http1: send response: %w", err)
+		return fmt.Errorf("http1: %s: %w", what, err)
 	}
 	return c.writeOpaqueBody(msg, rawResp.RawBody, rawResp.RawBodyBuffer, d.useRawBody, "response")
 }

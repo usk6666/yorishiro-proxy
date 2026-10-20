@@ -44,7 +44,7 @@ If any required field is empty, ask the user.
 Notes:
 - `headers[]` **replaces** the recorded headers entirely. Copy every header you want to keep — anything you omit will not be sent.
 - To delete a header, just omit it from `headers[]`.
-- `body_patches` uses JSONPath. To replace the entire body, use `override_body` with a raw string.
+- `body_patches` uses JSONPath. To replace the entire body, use `body` (with `body_encoding: "base64"` for binary).
 
 ### 3. WebSocket frame replay
 

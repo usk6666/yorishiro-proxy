@@ -45,6 +45,18 @@ type options struct {
 	// for emission (per CLAUDE.md MITM Principle 3 — wire-record first,
 	// semantic-record second).
 	//
+	// Partial LPMs (USK-1254): when an LPM cannot be completed — its
+	// declared length exceeds the message-size cap, or END_STREAM arrives
+	// mid-LPM — the callback additionally receives one envelope whose Raw
+	// is the observed bytes of that LPM (verbatim prefix, or the 1-4
+	// prefix bytes seen) and whose Message is a GRPCDataMessage with
+	// Payload=nil, WireLength=the declared length (0 if the prefix was
+	// truncated) and Anomalies=[AnomalyGRPCLPMTooLarge |
+	// AnomalyGRPCLPMTruncated]. It fires after the rows of any LPMs
+	// completed earlier in the same DATA event and before absorbData
+	// returns the (unchanged) *layer.StreamError; it is never queued for
+	// Next, so it is never forwarded.
+	//
 	// nil = no-op (the channel skips the wire-record step entirely).
 	lpmFrameRecordCallback func(*envelope.Envelope)
 
@@ -133,8 +145,18 @@ func WithLifecycleEngine(e *pluginv2.Engine) Option {
 // callback on the Channel (USK-896 v2 wave #2 — defense-in-depth gRPC
 // LPM smuggling visibility). The callback fires once per fully reassembled
 // LPM, from grpcChannel.absorbData, BEFORE the corresponding semantic
-// GRPCDataMessage envelope is queued for emission. See the documentation
-// on options.lpmFrameRecordCallback for the envelope contract.
+// GRPCDataMessage envelope is queued for emission. Since USK-1254 it also
+// fires once for an LPM the channel could NOT complete (declared length
+// over the message-size cap, or END_STREAM mid-LPM): that envelope carries
+// the observed partial bytes on Raw and a GRPCDataMessage with a typed
+// anomaly, and fires just before the channel terminates with the same
+// *layer.StreamError as before. See the documentation on
+// options.lpmFrameRecordCallback for the envelope contract.
+//
+// Out of scope: a length prefix that disagrees with the sender's intent
+// but still parses into valid LPM boundaries (the bytes simply shift into
+// the next LPM) is indistinguishable from a legitimate stream and is not
+// flagged.
 //
 // Mirrors the per-Layer Option shape used by
 // http2.WithFrameRecordCallback (USK-889) and

@@ -609,7 +609,9 @@ func TestChannel_KeepAlive_MultipleRequests(t *testing.T) {
 		"GET /second HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
 	go func() {
 		client.Write([]byte(reqs))
-		client.Close()
+		// USK-1229: keep reading the responses (the first request must be
+		// answered for the second to be parsed).
+		_, _ = io.Copy(io.Discard, client)
 	}()
 
 	// USK-730: per-exchange Channel — each keep-alive request yields its
@@ -627,6 +629,7 @@ func TestChannel_KeepAlive_MultipleRequests(t *testing.T) {
 	if msg1.Path != "/first" {
 		t.Errorf("Path = %q, want /first", msg1.Path)
 	}
+	answerOK(t, ch1)
 	_ = ch1.Close()
 
 	ch2 := <-l.Channels()
@@ -753,6 +756,7 @@ func TestChannel_Send_ZeroCopyPath(t *testing.T) {
 			origBody: body,
 		},
 	}
+	snapLine(env)
 
 	// Create a channel that writes to the server side.
 	l := New(server, "conn-1", envelope.Receive) // Receive direction → Send() writes requests
@@ -819,6 +823,7 @@ func TestChannel_Send_HeaderPatchPath(t *testing.T) {
 			origBody: body,
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -1436,6 +1441,7 @@ func TestChannel_Send_BodyBufferUnchanged_ZeroCopy(t *testing.T) {
 			origBodyBuffer: bb,
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -1507,6 +1513,7 @@ func TestChannel_Send_BodyChangedToBytes(t *testing.T) {
 			origBodyBuffer: origBB,
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -1572,6 +1579,7 @@ func TestChannel_Send_BodyNilBothNoBodyBytes(t *testing.T) {
 			},
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -1721,14 +1729,16 @@ func TestHTTP1Layer_StateReleaserFiresPerTransaction(t *testing.T) {
 		WithStateReleaser(rec),
 	)
 
-	// Three keep-alive requests; client.Close at the end drains EOF on
-	// the fourth Next so markTerminated fires from the parse loop.
+	// Three keep-alive requests, each answered; l.Close at the end ends
+	// the fourth parse.
 	reqs := "GET /first HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n" +
 		"GET /second HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n" +
 		"GET /third HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
 	go func() {
 		_, _ = client.Write([]byte(reqs))
-		_ = client.Close()
+		// USK-1229: read the responses; each request is answered so the
+		// next keep-alive request is parsed.
+		_, _ = io.Copy(io.Discard, client)
 	}()
 
 	// USK-730: per-exchange Channel — each request gets its own Channel,
@@ -1752,6 +1762,7 @@ func TestHTTP1Layer_StateReleaserFiresPerTransaction(t *testing.T) {
 		if env.FlowID == "" {
 			t.Fatalf("Next #%d: empty FlowID", i+1)
 		}
+		answerOK(t, ch)
 		_ = ch.Close()
 	}
 
@@ -1944,7 +1955,9 @@ func TestHTTP1Layer_ReleaseStream_FiresOnConnectionClose(t *testing.T) {
 		"GET /third HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
 	go func() {
 		_, _ = client.Write([]byte(reqs))
-		_ = client.Close()
+		// USK-1229: read the responses; each request is answered so the
+		// next keep-alive request is parsed.
+		_, _ = io.Copy(io.Discard, client)
 	}()
 
 	streamIDs := make([]string, 0, 3)
@@ -1961,6 +1974,7 @@ func TestHTTP1Layer_ReleaseStream_FiresOnConnectionClose(t *testing.T) {
 		if env.StreamID == "" {
 			t.Fatalf("Next #%d: empty StreamID", i+1)
 		}
+		answerOK(t, ch)
 		_ = ch.Close()
 	}
 
@@ -2325,13 +2339,11 @@ func TestLayer_DetachStream_ReplaysCapturedAfterInterrupt(t *testing.T) {
 		if r.err == nil {
 			t.Fatalf("parser unexpectedly succeeded: env=%+v", r.env)
 		}
-		// The parser should have surfaced os.ErrDeadlineExceeded on its
-		// follow-up read (after consuming wsFrame on the first read).
+		// The parser must surface os.ErrDeadlineExceeded (wrapped) from
+		// its follow-up read after consuming wsFrame on the first read;
+		// the error chain must not be flattened to text.
 		if !errors.Is(r.err, os.ErrDeadlineExceeded) {
-			// Another classification (e.g. parse error wrapping a
-			// truncation) is also acceptable as long as DetachStream
-			// recovers the bytes.
-			t.Logf("parser exit err = %v (acceptable so long as bytes are replayed)", r.err)
+			t.Errorf("parser exit err = %v, want errors.Is(err, os.ErrDeadlineExceeded)", r.err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("parser did not exit within 3s")

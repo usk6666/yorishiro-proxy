@@ -22,9 +22,7 @@
 package mcptest_test
 
 import (
-	"bufio"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -39,9 +37,9 @@ import (
 
 // TestE2E_USK879_AgentScope_BlocksCONNECTRelayedTraffic exercises the
 // HTTPS-via-CONNECT path. Spec wire shape (help_security.md): the proxy
-// sends "HTTP/1.1 200 Connection Established" (the tunnel acknowledgement
-// is sent before the scope check) and then closes the tunnel; no upstream
-// dial occurs.
+// refuses the tunnel with "HTTP/1.1 403 Forbidden" and body
+// "yorishiro-proxy: target blocked by scope", then closes the connection;
+// no upstream dial occurs (USK-1246).
 func TestE2E_USK879_AgentScope_BlocksCONNECTRelayedTraffic(t *testing.T) {
 	// Sinkhole upstream: records every TCP connect attempt. The proxy must
 	// NOT reach this listener once the scope rejects the target.
@@ -86,10 +84,7 @@ func TestE2E_USK879_AgentScope_BlocksCONNECTRelayedTraffic(t *testing.T) {
 		t.Fatalf("test_target unexpectedly returned allowed=true: %s", testRes.Text)
 	}
 
-	// Issue an HTTPS request through the proxy via CONNECT. The client
-	// uses InsecureSkipVerify because it doesn't have the proxy's MITM CA
-	// — but the scope deny means the inner TLS handshake should EOF
-	// before any cert is presented.
+	// Issue a CONNECT through the proxy for the denied target.
 	rawConn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
@@ -104,36 +99,18 @@ func TestE2E_USK879_AgentScope_BlocksCONNECTRelayedTraffic(t *testing.T) {
 		t.Fatalf("write CONNECT: %v", err)
 	}
 
-	br := bufio.NewReader(rawConn)
-	statusLine, err := br.ReadString('\n')
+	// The proxy refuses the tunnel with 403 and closes the connection:
+	// reading to EOF must not hit the 10s deadline set above.
+	got, err := io.ReadAll(rawConn)
 	if err != nil {
-		t.Fatalf("read CONNECT response line: %v", err)
+		t.Fatalf("read CONNECT reply until EOF: %v (got %q)", err, got)
 	}
-	if !strings.HasPrefix(statusLine, "HTTP/1.1 200") {
-		t.Errorf("CONNECT response status = %q, want 200 prefix per help_security.md spec", strings.TrimSpace(statusLine))
+	reply := string(got)
+	if !strings.HasPrefix(reply, "HTTP/1.1 403 Forbidden\r\n") {
+		t.Errorf("CONNECT reply = %q, want 403 Forbidden per help_security.md spec", reply)
 	}
-	// Consume the rest of the response headers up to "\r\n\r\n".
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
-			t.Fatalf("read CONNECT response headers: %v", err)
-		}
-		if line == "\r\n" || line == "\n" {
-			break
-		}
-	}
-
-	// Attempt an inner TLS handshake over the tunnel. Per spec the
-	// handshake must fail with EOF because the proxy closed the
-	// connection after the 200.
-	tlsConn := tls.Client(rawConn, &tls.Config{
-		ServerName:         denyHost,
-		InsecureSkipVerify: true, //nolint:gosec — we're asserting the deny mechanism, not cert validity
-	})
-	hsErr := tlsConn.Handshake()
-	if hsErr == nil {
-		t.Error("inner TLS handshake completed; want EOF after 200 per help_security.md deny manifestation")
-		_ = tlsConn.Close()
+	if !strings.Contains(reply, "yorishiro-proxy: target blocked by scope") {
+		t.Errorf("CONNECT reply = %q, want body naming the scope gate", reply)
 	}
 
 	// Durable assertion: the sinkhole upstream MUST NOT have observed any

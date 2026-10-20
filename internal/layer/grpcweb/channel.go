@@ -374,6 +374,7 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		AcceptEncoding: acceptEnc,
 	}
 	applyRequestOverlay(start, msg, dir)
+	carryTruncatedBody(start, msg)
 	// Before DecodeBody: the malformed-body passthrough Start
 	// (emitAnomalyStart) must carry the status too.
 	applyResponseOverlay(start, msg, dir)
@@ -1117,6 +1118,29 @@ func hasMalformedBodyAnomaly(anomalies []envelope.Anomaly) bool {
 	return ok
 }
 
+// carryTruncatedBody copies a body-truncation anomaly (HTTP/1.x
+// TruncatedBody: the peer cut the body short) from msg onto start, so the
+// HTTPMessage re-assembled on the opposite side keeps it
+// (buildHTTPMessage) and the client-facing HTTP/1.x Layer ends the
+// connection instead of treating the exchange as answered completely
+// (USK-1229 review F-2).
+func carryTruncatedBody(start *envelope.GRPCStartMessage, msg *envelope.HTTPMessage) {
+	if a, ok := httpTruncatedBodyAnomaly(msg.Anomalies); ok {
+		start.Anomalies = append(start.Anomalies, a)
+	}
+}
+
+// httpTruncatedBodyAnomaly returns the envelope.AnomalyTruncatedBody entry
+// of anomalies, if any (USK-1229 review F-2).
+func httpTruncatedBodyAnomaly(anomalies []envelope.Anomaly) (envelope.Anomaly, bool) {
+	for _, a := range anomalies {
+		if a.Type == envelope.AnomalyTruncatedBody {
+			return a, true
+		}
+	}
+	return envelope.Anomaly{}, false
+}
+
 // hasAnomaly reports whether anomalies contains an entry of type t.
 func hasAnomaly(anomalies []envelope.Anomaly, t envelope.AnomalyType) bool {
 	for _, a := range anomalies {
@@ -1494,6 +1518,9 @@ func buildHTTPMessage(
 	msg := &envelope.HTTPMessage{
 		Body:    body,
 		Headers: reconcileBodyFraming(rebuildStartHeaders(start, layoutFromEnv(srcEnv)), len(body)),
+	}
+	if a, ok := httpTruncatedBodyAnomaly(start.Anomalies); ok {
+		msg.Anomalies = append(msg.Anomalies, a)
 	}
 
 	switch dir {

@@ -65,7 +65,7 @@ func (m *Manager) handleTCPForwardH2ConnWithOverride(
 ) {
 	defer clientConn.Close()
 
-	connID := connector.GenerateConnID()
+	connID := tcpForwardConnID(ctx)
 	clientAddr := clientConn.RemoteAddr().String()
 	connLogger := m.logger.With(
 		"conn_id", connID,

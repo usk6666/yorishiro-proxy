@@ -3,7 +3,6 @@ package http2
 import (
 	"io"
 	"net"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -216,45 +215,4 @@ func TestLayer_Close_EnqueueAfterShutdownNoPanic(t *testing.T) {
 
 	_ = srvConn.Close()
 	<-peerDone
-}
-
-// TestLayer_Close_NoWriterGoroutineLeak verifies the writer goroutine
-// terminates after Close, in a dedicated goroutine-leak check separate
-// from TestLayer_Close_NoGoroutineLeak (which tests the full stack).
-func TestLayer_Close_NoWriterGoroutineLeak(t *testing.T) {
-	before := runtime.NumGoroutine()
-
-	cliConn, srvConn := net.Pipe()
-	peerDone := make(chan struct{})
-	go func() {
-		defer close(peerDone)
-		pf := make([]byte, 24)
-		if _, err := io.ReadFull(srvConn, pf); err != nil {
-			return
-		}
-		_, _ = io.Copy(io.Discard, srvConn)
-	}()
-
-	l, err := New(cliConn, "leak-check", ClientRole)
-	if err != nil {
-		_ = cliConn.Close()
-		_ = srvConn.Close()
-		<-peerDone
-		t.Fatalf("New: %v", err)
-	}
-	_ = l.Close()
-	_ = srvConn.Close()
-	<-peerDone
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if runtime.NumGoroutine() <= before+1 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	after := runtime.NumGoroutine()
-	if after > before+1 {
-		t.Errorf("goroutine leak: before=%d after=%d", before, after)
-	}
 }

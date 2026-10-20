@@ -8,7 +8,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
-	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
 // EncodeWireBytes re-encodes env.Message into HTTP/1.x wire-form bytes for
@@ -68,6 +67,10 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 // preserving OWS on unmodified headers. Body handling mirrors
 // channel.sendRequestOpaque.
 //
+// USK-1148: the header section comes from opaqueRequestHead, the same
+// function the channel writes with, so a rewritten request line (and any
+// header / framing change) is recorded exactly as sent.
+//
 // USK-769: when the upstream wire used chunked Transfer-Encoding and the
 // captured RawBody fits in MaxRawCaptureSize, the encoder re-emits RawBody
 // (chunk framing intact) verbatim. When the body has been mutated — or the
@@ -79,42 +82,26 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 // runs in pipeline.RecordStep, where context.Background is acceptable for
 // the synchronous Bytes call (no incoming ctx flows here).
 func encodeRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte, error) {
-	rawReq := cloneRawRequest(opaque.rawReq)
-	d := classifyOpaqueSend(rawReq.Headers, rawReq.RawBody, rawReq.RawBodyBuffer != nil, rawReq.RawBodyTruncated,
-		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
-
-	if d.headersChanged {
-		rawReq.Headers = applyHeaderPatch(opaque.origKV, msg.Headers, rawReq.Headers)
+	head, d := opaqueRequestHead(msg, opaque)
+	if d.zeroCopy {
+		head = bytes.Clone(head)
 	}
-	if d.bodyChanged || d.rewriteTEToCL {
-		applyTEToCLRewrite(&rawReq.Headers, msg)
-	}
-
-	headerBytes := serializeRequestHeader(rawReq)
 	if d.useRawBody {
-		return appendRawBody(headerBytes, rawReq.RawBody, rawReq.RawBodyBuffer)
+		return appendRawBody(head, opaque.rawReq.RawBody, opaque.rawReq.RawBodyBuffer)
 	}
-	return assembleWithBody(headerBytes, msg)
+	return assembleWithBody(head, msg)
 }
 
 // encodeResponseOpaque is the response-side twin of encodeRequestOpaque.
 func encodeResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte, error) {
-	rawResp := cloneRawResponse(opaque.rawResp)
-	d := classifyOpaqueSend(rawResp.Headers, rawResp.RawBody, rawResp.RawBodyBuffer != nil, rawResp.RawBodyTruncated,
-		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
-
-	if d.headersChanged {
-		rawResp.Headers = applyHeaderPatch(opaque.origKV, msg.Headers, rawResp.Headers)
+	head, d := opaqueResponseHead(msg, opaque)
+	if d.zeroCopy {
+		head = bytes.Clone(head)
 	}
-	if d.bodyChanged || d.rewriteTEToCL {
-		applyTEToCLRewrite(&rawResp.Headers, msg)
-	}
-
-	headerBytes := serializeResponseHeader(rawResp)
 	if d.useRawBody {
-		return appendRawBody(headerBytes, rawResp.RawBody, rawResp.RawBodyBuffer)
+		return appendRawBody(head, opaque.rawResp.RawBody, opaque.rawResp.RawBodyBuffer)
 	}
-	return assembleWithBody(headerBytes, msg)
+	return assembleWithBody(head, msg)
 }
 
 // appendRawBody concatenates headerBytes and the wire body bytes. When
@@ -224,44 +211,4 @@ func appendBody(headerBytes []byte, msg *envelope.HTTPMessage) ([]byte, error) {
 	}
 	// No body (e.g. GET with no payload): header-only, no partial marker.
 	return headerBytes, nil
-}
-
-// cloneRawRequest returns a deep-enough copy of r so that header patching in
-// EncodeWireBytes does not mutate the opaque state stored on the envelope.
-// Body is intentionally not copied: it is an io.Reader owned elsewhere and
-// this encoder never consumes it. RawBytes / RawBody slices are aliased
-// (the encoder only reads them). RawBodyBuffer is shared by pointer; the
-// encoder never Releases.
-func cloneRawRequest(r *parser.RawRequest) *parser.RawRequest {
-	return &parser.RawRequest{
-		Method:           r.Method,
-		RequestURI:       r.RequestURI,
-		Proto:            r.Proto,
-		Headers:          r.Headers.Clone(),
-		Body:             r.Body,
-		RawBytes:         r.RawBytes,
-		RawBody:          r.RawBody,
-		RawBodyBuffer:    r.RawBodyBuffer,
-		RawBodyTruncated: r.RawBodyTruncated,
-		Anomalies:        r.Anomalies,
-		Close:            r.Close,
-		Truncated:        r.Truncated,
-	}
-}
-
-// cloneRawResponse is the response-side twin of cloneRawRequest.
-func cloneRawResponse(r *parser.RawResponse) *parser.RawResponse {
-	return &parser.RawResponse{
-		Proto:            r.Proto,
-		StatusCode:       r.StatusCode,
-		Status:           r.Status,
-		Headers:          r.Headers.Clone(),
-		Body:             r.Body,
-		RawBytes:         r.RawBytes,
-		RawBody:          r.RawBody,
-		RawBodyBuffer:    r.RawBodyBuffer,
-		RawBodyTruncated: r.RawBodyTruncated,
-		Anomalies:        r.Anomalies,
-		Truncated:        r.Truncated,
-	}
 }

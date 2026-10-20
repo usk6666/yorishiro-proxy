@@ -42,7 +42,7 @@ func parseReqFixture(t *testing.T, raw string) *envelope.Envelope {
 		Body:       body,
 		BodyBuffer: bb,
 	}
-	return &envelope.Envelope{
+	return snapLine(&envelope.Envelope{
 		Direction: envelope.Send,
 		Protocol:  envelope.ProtocolHTTP,
 		Raw:       rawReq.RawBytes,
@@ -53,7 +53,7 @@ func parseReqFixture(t *testing.T, raw string) *envelope.Envelope {
 			origBody:       cloneBytes(body),
 			origBodyBuffer: bb,
 		},
-	}
+	})
 }
 
 func parseRespFixture(t *testing.T, raw string) *envelope.Envelope {
@@ -78,7 +78,7 @@ func parseRespFixture(t *testing.T, raw string) *envelope.Envelope {
 		Body:         body,
 		BodyBuffer:   bb,
 	}
-	return &envelope.Envelope{
+	return snapLine(&envelope.Envelope{
 		Direction: envelope.Receive,
 		Protocol:  envelope.ProtocolHTTP,
 		Raw:       rawResp.RawBytes,
@@ -89,7 +89,7 @@ func parseRespFixture(t *testing.T, raw string) *envelope.Envelope {
 			origBody:       cloneBytes(body),
 			origBodyBuffer: bb,
 		},
-	}
+	})
 }
 
 // TestEncodeWireBytes_OpaqueRequest_HeaderAdd verifies that adding a header
@@ -233,6 +233,7 @@ func TestEncodeWireBytes_BufferBackedBodyMaterialized(t *testing.T) {
 			origBodyBuffer: bb,
 		},
 	}
+	snapLine(env)
 	// Mutate headers to force the opaque encode path (would otherwise take
 	// the zero-copy fast path and return rawReq.RawBytes unchanged).
 	msg.Headers = append(msg.Headers, envelope.KeyValue{Name: "X-Injected", Value: "y"})

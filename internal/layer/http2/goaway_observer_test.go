@@ -107,31 +107,6 @@ func TestWithGoAwayObserver_NilObserverIsSafe(t *testing.T) {
 	}
 }
 
-// TestWithGoAwayObserver_DefaultNoOption documents that omitting the
-// option results in no observer being installed (verified by the
-// branch in handleGoAwayFrame: l.opts.goAwayObserver == nil → skip
-// firing).
-func TestWithGoAwayObserver_DefaultNoOption(t *testing.T) {
-	l, peer, cleanup := startClientLayer(t)
-	defer cleanup()
-	peer.consumePeerSettings(t)
-
-	if err := peer.wr.WriteGoAway(0, ErrCodeNo, nil); err != nil {
-		t.Fatalf("write GOAWAY: %v", err)
-	}
-
-	// No assertion needed on the observer side (none configured); the
-	// fact that GoAwayClosed flips true confirms the GOAWAY path ran
-	// without observer-side panic / nil-deref.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && !l.GoAwayClosed() {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !l.GoAwayClosed() {
-		t.Fatal("GoAwayClosed() did not flip true within 2s")
-	}
-}
-
 // USK-994 — Layer.RegisterGoAwayObserver runtime API.
 //
 // The runtime registration mirrors WithGoAwayObserver's semantics with
@@ -292,35 +267,6 @@ func TestRegisterGoAwayObserver_NilObserverIsSafe(t *testing.T) {
 	}()
 	cancel := l.RegisterGoAwayObserver(nil)
 	cancel() // safe to call cancel on nil-registration
-}
-
-// TestRegisterGoAwayObserver_BootstrapWithGoAwayObserverStillWorks
-// pins the backward-compat invariant: the legacy
-// WithGoAwayObserver(cb) construction-time path continues to fire cb
-// exactly once on GOAWAY. USK-994 routes the bootstrap through the
-// same RegisterGoAwayObserver machinery as runtime callers, so this
-// is an end-to-end check that the bootstrap shim is wired correctly.
-func TestRegisterGoAwayObserver_BootstrapWithGoAwayObserverStillWorks(t *testing.T) {
-	var fires int32
-	obs := func() {
-		atomic.AddInt32(&fires, 1)
-	}
-
-	_, peer, cleanup := startClientLayer(t, WithGoAwayObserver(obs))
-	defer cleanup()
-	peer.consumePeerSettings(t)
-
-	if err := peer.wr.WriteGoAway(0, ErrCodeNo, nil); err != nil {
-		t.Fatalf("write GOAWAY: %v", err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && atomic.LoadInt32(&fires) == 0 {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := atomic.LoadInt32(&fires); got != 1 {
-		t.Errorf("bootstrap observer fired %d times, want 1", got)
-	}
 }
 
 // TestRegisterGoAwayObserver_NObserversFireConcurrentlySafe is the

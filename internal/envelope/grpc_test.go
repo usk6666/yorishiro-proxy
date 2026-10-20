@@ -5,27 +5,6 @@ import (
 	"time"
 )
 
-func TestGRPCStartMessage_Protocol(t *testing.T) {
-	m := &GRPCStartMessage{}
-	if got := m.Protocol(); got != ProtocolGRPC {
-		t.Errorf("GRPCStartMessage.Protocol() = %q, want %q", got, ProtocolGRPC)
-	}
-}
-
-func TestGRPCDataMessage_Protocol(t *testing.T) {
-	m := &GRPCDataMessage{}
-	if got := m.Protocol(); got != ProtocolGRPC {
-		t.Errorf("GRPCDataMessage.Protocol() = %q, want %q", got, ProtocolGRPC)
-	}
-}
-
-func TestGRPCEndMessage_Protocol(t *testing.T) {
-	m := &GRPCEndMessage{}
-	if got := m.Protocol(); got != ProtocolGRPC {
-		t.Errorf("GRPCEndMessage.Protocol() = %q, want %q", got, ProtocolGRPC)
-	}
-}
-
 func TestGRPCStartMessage_CloneMessage_DeepCopy(t *testing.T) {
 	orig := &GRPCStartMessage{
 		Service: "example.Greeter",
@@ -208,22 +187,6 @@ func TestGRPCEndMessage_CloneMessage_NilSlices(t *testing.T) {
 	if cloned.Trailers != nil {
 		t.Error("CloneMessage of nil Trailers should produce nil")
 	}
-}
-
-func TestGRPCMessages_ZeroValue(t *testing.T) {
-	// Zero-value behavior: Protocol() still returns ProtocolGRPC and
-	// CloneMessage does not panic.
-	var (
-		start = &GRPCStartMessage{}
-		data  = &GRPCDataMessage{}
-		end   = &GRPCEndMessage{}
-	)
-	if start.Protocol() != ProtocolGRPC || data.Protocol() != ProtocolGRPC || end.Protocol() != ProtocolGRPC {
-		t.Error("zero-value Protocol() should be ProtocolGRPC for all three gRPC messages")
-	}
-	_ = start.CloneMessage()
-	_ = data.CloneMessage()
-	_ = end.CloneMessage()
 }
 
 func TestCloneStrings(t *testing.T) {

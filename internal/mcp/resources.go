@@ -8,7 +8,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-//go:embed resources/*.md resources/*.json
+//go:embed resources/*.md
 var resourcesFS embed.FS
 
 // resourceDef defines a single MCP resource to register.
@@ -20,15 +20,10 @@ type resourceDef struct {
 	filename    string // path within the embedded FS (e.g. "resources/help_query.md")
 
 	// topic is the docs-tool topic name for this resource — the value an
-	// agent passes as docs(topic=...). Populated on helpResources only;
-	// schemaResources deliberately leave it empty because the hand-written
-	// JSON Schemas duplicate the InputSchema that tools/list already
-	// delivers, so exposing them through the docs tool would cost index
-	// tokens for zero new information (USK-1036).
+	// agent passes as docs(topic=...).
 	//
-	// Explicit rather than derived from name: a strings.TrimPrefix(name,
-	// "help_") rule would silently promote any future help-prefixed schema
-	// entry into the docs namespace.
+	// Explicit rather than derived from name, so the topic namespace is
+	// never a side effect of a file naming rule.
 	topic string
 }
 
@@ -215,136 +210,14 @@ var helpResources = []resourceDef{
 	},
 }
 
-// schemaResources lists all JSON Schema resources.
-var schemaResources = []resourceDef{
-	{
-		uri:         "yorishiro://schema/proxy_start",
-		name:        "schema_proxy_start",
-		description: "JSON Schema for the proxy_start tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_proxy_start.json",
-	},
-	{
-		uri:         "yorishiro://schema/query",
-		name:        "schema_query",
-		description: "JSON Schema for the query tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_query.json",
-	},
-	{
-		uri:         "yorishiro://schema/manage",
-		name:        "schema_manage",
-		description: "JSON Schema for the manage tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_manage.json",
-	},
-	{
-		uri:         "yorishiro://schema/macro",
-		name:        "schema_macro",
-		description: "JSON Schema for the macro tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_macro.json",
-	},
-	{
-		uri:         "yorishiro://schema/intercept",
-		name:        "schema_intercept",
-		description: "JSON Schema for the intercept tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_intercept.json",
-	},
-	{
-		uri:         "yorishiro://schema/configure",
-		name:        "schema_configure",
-		description: "JSON Schema for the configure tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_configure.json",
-	},
-	{
-		uri:         "yorishiro://schema/security",
-		name:        "schema_security",
-		description: "JSON Schema for the security tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_security.json",
-	},
-	{
-		uri:         "yorishiro://schema/resend_http",
-		name:        "schema_resend_http",
-		description: "JSON Schema for the resend_http tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_resend_http.json",
-	},
-	{
-		uri:         "yorishiro://schema/resend_ws",
-		name:        "schema_resend_ws",
-		description: "JSON Schema for the resend_ws tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_resend_ws.json",
-	},
-	{
-		uri:         "yorishiro://schema/resend_grpc",
-		name:        "schema_resend_grpc",
-		description: "JSON Schema for the resend_grpc tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_resend_grpc.json",
-	},
-	{
-		uri:         "yorishiro://schema/resend_raw",
-		name:        "schema_resend_raw",
-		description: "JSON Schema for the resend_raw tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_resend_raw.json",
-	},
-	{
-		uri:         "yorishiro://schema/fuzz_http",
-		name:        "schema_fuzz_http",
-		description: "JSON Schema for the fuzz_http tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_fuzz_http.json",
-	},
-	{
-		uri:         "yorishiro://schema/fuzz_ws",
-		name:        "schema_fuzz_ws",
-		description: "JSON Schema for the fuzz_ws tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_fuzz_ws.json",
-	},
-	{
-		uri:         "yorishiro://schema/fuzz_grpc",
-		name:        "schema_fuzz_grpc",
-		description: "JSON Schema for the fuzz_grpc tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_fuzz_grpc.json",
-	},
-	{
-		uri:         "yorishiro://schema/fuzz_raw",
-		name:        "schema_fuzz_raw",
-		description: "JSON Schema for the fuzz_raw tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_fuzz_raw.json",
-	},
-	{
-		uri:         "yorishiro://schema/plugin_introspect",
-		name:        "schema_plugin_introspect",
-		description: "JSON Schema for the plugin_introspect tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_plugin_introspect.json",
-	},
-	{
-		uri:         "yorishiro://schema/grpc_schema",
-		name:        "schema_grpc_schema",
-		description: "JSON Schema for the grpc_schema tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_grpc_schema.json",
-	},
-}
+// There are deliberately no hand-written JSON Schema resources: the only
+// tool input schema an agent can obtain is the InputSchema tools/list
+// returns, which is what the go-sdk validates calls against. The former
+// yorishiro://schema/* copies drifted from it (USK-1153).
 
-// registerResources registers all help and schema MCP resources on the server.
+// registerResources registers all help MCP resources on the server.
 func (s *Server) registerResources() {
-	allResources := make([]resourceDef, 0, len(helpResources)+len(schemaResources))
-	allResources = append(allResources, helpResources...)
-	allResources = append(allResources, schemaResources...)
-
-	for _, rd := range allResources {
+	for _, rd := range helpResources {
 		s.server.AddResource(
 			&gomcp.Resource{
 				URI:         rd.uri,

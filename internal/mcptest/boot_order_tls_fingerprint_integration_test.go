@@ -17,8 +17,7 @@
 // What this test asserts:
 //
 //   - The proxy server boots with -tls-fingerprint=chrome.
-//   - resend_http is invoked DIRECTLY, with no proxy_start call (and
-//     PreStartTools left empty so the harness does not auto-fire one).
+//   - resend_http is invoked DIRECTLY, with no proxy_start call.
 //   - The upstream test server, observing the ClientHello via
 //     GetConfigForClient, reports a uTLS-flavored ClientHello (presence
 //     of GREASE values per RFC 8701 — Go's crypto/tls does not emit
@@ -39,8 +38,8 @@ import (
 // USK-719 regression: starting the server with -tls-fingerprint=chrome
 // must honor the profile when resend_http is invoked before proxy_start.
 //
-// The test deliberately does not invoke proxy_start (no direct call,
-// empty PreStartTools) so the resetSettingsToDefaults short-circuit
+// The test deliberately does not invoke proxy_start so the
+// resetSettingsToDefaults short-circuit
 // that the original bug relied on never runs. If TLSFingerprint had to
 // transit through proxy_start to take effect, the upstream would
 // observe a vanilla Go ClientHello (no GREASE) and the assertion would
@@ -49,9 +48,9 @@ func TestE2E_BootOrder_ResendBeforeProxyStart_AppliesTLSFingerprint(t *testing.T
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{
 		TLSFingerprint: "chrome",
 		UpstreamProto:  "http/1.1",
-		// PreStartTools intentionally empty — the regression hinges on
+		// No tool may run before resend_http — the regression hinges on
 		// the server NOT having gone through proxy_start before resend
-		// runs. Adding any tool here would mask the bug class.
+		// runs. Calling proxy_start first would mask the bug class.
 	})
 
 	if h.UpstreamFingerprint == nil {

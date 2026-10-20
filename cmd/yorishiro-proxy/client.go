@@ -130,30 +130,68 @@ TLS passthrough (dot-notation):
 
 Examples:
   yorishiro-proxy client configure upstream_proxy=http://proxy:8888
-  yorishiro-proxy client configure tls_passthrough.add=example.com,*.internal
+  yorishiro-proxy client configure tls_passthrough.add='example.com,*.internal'
   yorishiro-proxy client configure tls_fingerprint=chrome
 
 Full reference (no server required): yorishiro-proxy docs configure`,
 
-	"intercept": `intercept: Act on intercepted requests in the intercept queue.
+	"intercept": `intercept: Act on an item held in the intercept queue (list held items and
+their ids with: query resource=intercept_queue).
 
-Parameters (key=value):
+Parameters (key=value or --key=value):
   action=<action>                   Action to take (required)
-    release                         Forward the request/response unmodified
-    modify_and_forward              Modify and forward
-    drop                            Drop the request/response
-  params.intercept_id=<id>          Intercept item ID (required)
-  params.override_method=<method>   HTTP method override (request phase)
-  params.override_url=<url>         URL override (request phase)
-  params.override_body=<body>       Body override (request phase)
-  params.override_status=<code>     Status code override (response phase)
-  params.override_response_body=<b> Response body override (response phase)
-  params.mode=structured|raw        Forwarding mode (default: structured)
+    release                         Forward the held item unmodified
+    modify_and_forward              Apply a typed payload (below) and forward
+    drop                            Drop the item (an HTTP client gets 403)
+  params.intercept_id=<id>          Held item id (required for every action)
+  params.mode=structured|raw        raw: forward params.raw_override_base64 (raw TCP holds only)
+  params.raw_override_base64=<b64>  Replacement bytes for params.mode=raw
+
+  Modifications go in the typed payload matching the held item, not in params:
+  http (HTTP request or response), ws, grpc_start, grpc_data, sse, raw.
+  Omitted fields keep the held value.
+
+  http.method=<method>              Request method
+  http.scheme=<scheme>              Request scheme
+  http.authority=<host[:port]>      Request authority
+  http.path=<path>                  Request path
+  http.raw_query=<query>            Raw query without the leading '?'
+  http.status=<code>                Response status code
+  http.status_reason=<text>         Response reason phrase (HTTP/1.x)
+  http.headers=<json>               Ordered [{name, value}] JSON array. A FULL replacement of the held
+                                    headers (copy them from intercept_queue and edit), not a merge
+  http.trailers=<json>              Ordered [{name, value}] trailers; full replacement
+  http.body=<text|base64>           Body replacement, per http.body_encoding
+  http.body_encoding=<enc>          text|base64; default text
+  http.body_patches=<json>          JSON array of {json_path, value} or {regex, replace}, applied after body
+  ws.opcode=<name>                  text|binary|close|ping|pong|continuation (a number: ws.opcode:=1)
+  ws.fin=<bool>                     FIN bit
+  ws.payload=<text|base64>          Frame payload, per ws.body_encoding
+  ws.body_encoding=<enc>            text|base64; default text
+  ws.close_code=<n>                 Close frames: status code
+  ws.close_reason=<text>            Close frames: reason
+  grpc_start.service=<name>         gRPC service (:path is rebuilt from service/method)
+  grpc_start.method=<name>          gRPC method
+  grpc_start.encoding=<enc>         grpc-encoding
+  grpc_start.metadata=<json>        Ordered [{name, value}] metadata; full replacement
+  grpc_data.payload=<text|base64>   Decompressed message, per grpc_data.payload_encoding
+  grpc_data.payload_encoding=<enc>  text|base64; default text
+  grpc_data.compressed=<bool>       Compressed flag in the length prefix
+  grpc_data.end_stream=<bool>       END_STREAM on the carrying DATA frame
+  sse.event=<name>                  SSE event: line
+  sse.id=<id>                       SSE id: line
+  sse.data=<text>                   SSE data (\n splits it into several data: lines)
+  sse.retry_ms=<n>                  SSE retry: line; 0 removes it
+  raw.bytes_override=<text|base64>  Raw TCP replacement bytes, per raw.bytes_encoding
+  raw.bytes_encoding=<enc>          text|base64; default text
+  raw.patches=<json>                Byte patches ({offset, data_base64} or find/replace); not with bytes_override
 
 Examples:
+  yorishiro-proxy client query resource=intercept_queue
   yorishiro-proxy client intercept action=release params.intercept_id=abc123
   yorishiro-proxy client intercept action=drop params.intercept_id=abc123
-  yorishiro-proxy client intercept action=modify_and_forward params.intercept_id=abc123 params.override_body='{"new":"data"}'
+  yorishiro-proxy client intercept action=modify_and_forward params.intercept_id=abc123 http.method=POST http.path=/api/admin http.body='{"role":"admin"}'
+  yorishiro-proxy client intercept action=modify_and_forward params.intercept_id=abc123 http.headers='[{"name":"Host","value":"example.com"},{"name":"Authorization","value":"Bearer injected"}]'
 
 Full reference (no server required): yorishiro-proxy docs intercept`,
 
@@ -230,13 +268,14 @@ Parameters (key=value or --key=value):
   tls_fingerprint=<prof>   Informational v1; per-call selection deferred
   tag=<tag>                Tag stored on the new flow's Tags map
 
-  messages=<json>          JSON array of {payload, body_encoding, compressed}; at least one element
+  messages=<json>          REQUIRED JSON array of {payload, body_encoding, compressed}; at least one
+                           element, even with flow_id (recorded messages are not inherited)
   metadata=<json>          JSON array of {name, value} (also trailer_metadata=<json>)
 
 Examples:
-  yorishiro-proxy client resend_grpc flow_id=abc123
+  yorishiro-proxy client resend_grpc flow_id=abc123 messages='[{"payload":"hello"}]'
   yorishiro-proxy client resend_grpc flow_id=abc123 messages='[{"payload":"hello"}]' metadata='[{"name":"authorization","value":"Bearer X"}]'
-  yorishiro-proxy client resend_grpc target_addr=127.0.0.1:50051 service=pkg.Greeter method=SayHello
+  yorishiro-proxy client resend_grpc target_addr=127.0.0.1:50051 service=pkg.Greeter method=SayHello messages='[{"payload":"hello"}]'
 
 Full reference (no server required): yorishiro-proxy docs resend_grpc`,
 
@@ -295,7 +334,7 @@ Examples:
   yorishiro-proxy client manage action=delete_flows params.flow_id=abc123
   yorishiro-proxy client manage action=delete_flows params.older_than_days=7 params.confirm=true
   yorishiro-proxy client manage action=export_flows params.format=har params.output_path=export.har
-  yorishiro-proxy client manage action=regenerate_ca_cert
+  yorishiro-proxy client manage action=regenerate_ca_cert params:='{}'
 
 Full reference (no server required): yorishiro-proxy docs manage`,
 
@@ -319,7 +358,7 @@ Parameters (key=value):
   params.max_duration=<dur>                Max duration e.g. 30m (for set_budget)
 
 Examples:
-  yorishiro-proxy client security action=get_target_scope
+  yorishiro-proxy client security action=get_target_scope params:='{}'
   yorishiro-proxy client security action=test_target params.url=https://example.com
   yorishiro-proxy client security action=set_rate_limits params.max_requests_per_second=100
 
@@ -374,7 +413,7 @@ Parameters (key=value or --key=value):
 Examples:
   yorishiro-proxy client fuzz_http flow_id=abc123 positions='[{"path":"raw_query","payloads":["test1","test2"]}]'
   yorishiro-proxy client fuzz_http flow_id=abc123 stop_on_5xx=true tag=path-fuzz positions='[{"path":"path","payloads":["/admin","/debug"]}]'
-  yorishiro-proxy client fuzz_http flow_id=abc123 positions='[{"path":"body","payloads":["'\''"]}]'  (a lone ' payload)
+  yorishiro-proxy client fuzz_http flow_id=abc123 positions='[{"path":"body","payloads":["'\''"]}]'  # a lone ' payload
 
 Full reference (no server required): yorishiro-proxy docs fuzz_http`,
 
@@ -426,7 +465,7 @@ Parameters (key=value or --key=value):
 
   positions=<json>         REQUIRED JSON array of {path, payloads[], encoding}. Supported paths:
                            service | method | metadata[N].name | metadata[N].value | messages[N].payload
-  messages=<json>          Base JSON array of {payload, body_encoding, compressed} (at least one element);
+  messages=<json>          REQUIRED base JSON array of {payload, body_encoding, compressed} (at least one element);
                            metadata=<json> / trailer_metadata=<json> are [{name, value}] arrays
 
 Examples:
@@ -504,7 +543,7 @@ Parameters (key=value):
 
 Examples:
   yorishiro-proxy client grpc_schema action=list
-  yorishiro-proxy client grpc_schema action=register params.source=descriptor_set params.descriptor_set_b64=<base64>
+  yorishiro-proxy client grpc_schema action=register params.source=descriptor_set params.descriptor_set_b64=DESCRIPTOR_SET_B64
   yorishiro-proxy client grpc_schema action=register params.source=file params.proto_paths=/srv/protos/hello.proto
   yorishiro-proxy client grpc_schema action=unregister params.service=pkg.Greeter
   yorishiro-proxy client grpc_schema action=clear

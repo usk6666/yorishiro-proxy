@@ -197,6 +197,12 @@ func (b *BodyBuffer) IsFileBacked() bool {
 // file and reads it in 32 KiB chunks, honoring ctx cancellation between
 // chunks.
 func (b *BodyBuffer) Bytes(ctx context.Context) ([]byte, error) {
+	// Entry ctx check (ctx.Err() call #1). TestBytesContextCancel and
+	// TestBytesContextDeadline depend on the exact ctx.Err() call order in
+	// Bytes: the deadline test's flipCtx passes the first two calls (this
+	// one plus the first in-loop check below) and fails from call #3 on.
+	// Adding, removing, or reordering ctx.Err() calls here requires
+	// updating flipCtx.okCalls in bodybuf_test.go.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -232,6 +238,9 @@ func (b *BodyBuffer) Bytes(ctx context.Context) ([]byte, error) {
 	out := make([]byte, 0, b.size)
 	chunk := make([]byte, readChunkSize)
 	for {
+		// In-loop ctx check (ctx.Err() call #2, #3, ... — one per chunk).
+		// TestBytesContextDeadline targets this check specifically; see the
+		// call-count note on the entry check above.
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

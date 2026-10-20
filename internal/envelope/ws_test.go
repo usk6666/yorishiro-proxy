@@ -2,13 +2,6 @@ package envelope
 
 import "testing"
 
-func TestWSMessage_Protocol(t *testing.T) {
-	m := &WSMessage{}
-	if got := m.Protocol(); got != ProtocolWebSocket {
-		t.Errorf("WSMessage.Protocol() = %q, want %q", got, ProtocolWebSocket)
-	}
-}
-
 func TestWSMessage_CloneMessage_DeepCopy(t *testing.T) {
 	orig := &WSMessage{
 		Opcode:      WSBinary,

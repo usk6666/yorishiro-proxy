@@ -607,6 +607,7 @@ var flowMetadataAnomalyKeyToType = map[string]string{
 	"http_anomaly_trailer_forbidden":       string(envelope.AnomalyTrailerForbidden),
 	"http_anomaly_trailers_in_passthrough": string(envelope.AnomalyTrailersInPassthrough),
 	"http_anomaly_raw_body_truncated":      string(envelope.AnomalyRawBodyTruncated),
+	"http_anomaly_truncated_body":          string(envelope.AnomalyTruncatedBody),
 	// HTTP/2 receive-side anomalies.
 	"http_anomaly_h2_duplicate_pseudo_header":      string(envelope.H2DuplicatePseudoHeader),
 	"http_anomaly_h2_pseudo_header_after_regular":  string(envelope.H2PseudoHeaderAfterRegular),
@@ -624,6 +625,10 @@ var flowMetadataAnomalyKeyToType = map[string]string{
 	"grpc_anomaly_malformed_trailer":          string(envelope.AnomalyMalformedGRPCWebTrailer),
 	"grpc_anomaly_missing_trailer":            string(envelope.AnomalyMissingGRPCWebTrailer),
 	"grpc_anomaly_unexpected_request_trailer": string(envelope.AnomalyUnexpectedGRPCWebRequestTrailer),
+	// Native gRPC partial-LPM anomalies (USK-1254); recorded only on
+	// wire_level=grpc-lpm-frame overlay rows.
+	"grpc_anomaly_lpm_too_large": string(envelope.AnomalyGRPCLPMTooLarge),
+	"grpc_anomaly_lpm_truncated": string(envelope.AnomalyGRPCLPMTruncated),
 	// SSE anomalies (USK-656).
 	"sse_anomaly_missing_data": string(envelope.AnomalySSEMissingData),
 	"sse_anomaly_truncated":    string(envelope.AnomalySSETruncated),

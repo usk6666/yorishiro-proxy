@@ -82,6 +82,12 @@ func TestLayer_Send_RequestLineTooLong_Writes414(t *testing.T) {
 						nextCh <- nextResult{env, errors.New("first keep-alive request not parsed as /first")}
 						return
 					}
+					// USK-1229: answer /first, or the Layer ends the
+					// connection instead of parsing the next request.
+					if err := ch.Send(context.Background(), response(200)); err != nil {
+						nextCh <- nextResult{nil, err}
+						return
+					}
 					_ = ch.Close()
 					ch = <-l.Channels()
 					if ch == nil {
@@ -97,6 +103,12 @@ func TestLayer_Send_RequestLineTooLong_Writes414(t *testing.T) {
 			resp, readErr := io.ReadAll(client)
 			if readErr != nil {
 				t.Errorf("reading the response: %v (want the 414 followed by a clean EOF)", readErr)
+			}
+			if tc.keepAlive {
+				if !strings.HasPrefix(string(resp), answerOKWire) {
+					t.Fatalf("response = %q, want /first's response %q first", truncateForLog(resp), answerOKWire)
+				}
+				resp = resp[len(answerOKWire):]
 			}
 			if !strings.HasPrefix(string(resp), "HTTP/1.1 414 URI Too Long\r\n") {
 				t.Fatalf("response = %q, want an HTTP/1.1 414 URI Too Long status line", truncateForLog(resp))

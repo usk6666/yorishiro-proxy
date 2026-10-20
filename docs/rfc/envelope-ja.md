@@ -408,6 +408,8 @@ func New(conn net.Conn, role Role) layer.Layer
 func (l *Layer) DetachStream() (io.Reader, io.Writer, io.Closer, error)
 ```
 
+**HTTP/1.x keep-alive ルール (USK-1229)。** HTTP/1.1 は request の順に応答する (RFC 9112 §9.3) ため、client 側の HTTP/1.x Layer は、request を渡したのに完全な final response (status ≥ 200、`101`、または raw-authoritative response) を書かなかった exchange の後、その connection で次の request を parse しない。upstream が応答前または応答途中で close した場合や、Pipeline が request を drop した場合がこれにあたる。代わりに connection を close して upstream の FIN を写す。response は合成しない。upstream 側では、request 送信後・response head 完成前の close は aborted `StreamError` になり、途中で切れた body (Content-Length 不足、終端 chunk のない chunked body) は受信したとおりに `TruncatedBody` anomaly 付きで渡し、その後 aborted `StreamError` を返す。
+
 ```go
 package http2layer
 // New は net.Conn を HTTP/2 layer で wrap する。HTTP/2 stream ごとに
@@ -511,6 +513,8 @@ type Pipeline struct { steps []Step }
 func (p *Pipeline) Run(ctx, *Envelope) (*Envelope, Action, *Envelope)  // 変更なし
 ```
 
+**Step → RecordStep の annotations (USK-1109)。** envelope を通しつつ観測結果を記録 Stream に残したい Step は `Result.Annotations` (`map[string]string`) を設定する。`Pipeline.Run` は Continue した全 Step の annotations を `ctx` 内の Run ごとの bag にマージし (キー衝突時は後の Step が勝つ。後続 Step が envelope を差し替えても残る)、`RecordStep` が Stream 行の存在後に `flow.StreamUpdate.AppendTags` で Stream に追記する — stream の最初の Send に付いた annotation も記録される。annotations はメタデータであって wire データではない: `env` / `env.Raw` / `env.Message` を変更せず、variant 記録も起こさない。Drop / Respond を返した Step 自身の annotations は無視される。それより前に Continue した Step の annotations は `Pipeline.RunDetailed` が `RunOutcome.Annotations` として返し、session が `pipeline.WithBlockAnnotations(ctx, …)` で block 記録側 (`OnPipelineDrop`) に渡して監査 Stream の tags に載せる — 先行する `log_only` の観測は後段の intercept drop や scope 再チェックでも失われない。`RecordStep` は (Stream, キー, 値) ごとにプロセス内で 1 回だけ書く: ストリーミングプロトコルで frame ごとに一致しても追加の store 書き込みは発生しない。現在の producer は `log_only` モードの `SafetyStep` (§3.7)。
+
 変わるのは、Step が明示的に 2 種類に *分類* されること。
 
 #### 3.5.1 Envelope-Only Step (protocol-agnostic)
@@ -578,6 +582,7 @@ SafetyFilter は **目的・層・保護対象が完全に異なる 2 つのフ�
 - **目的**: AI Agent が破壊的な脆弱性診断ペイロード (SQL injection / OS command injection / 上流データ破壊) を upstream server に送信するのを防ぐ。
 - **層**: ライブデータパス — `internal/pipeline/safety_step.go` がプロトコル別の `internal/rules/{http,ws,grpc}/safety.go` エンジンに dispatch する。Send 方向のみ評価 (`safety_step.go` で `env.Direction != envelope.Send` のとき早期 `Result{}`)。
 - **挙動**: wire 上で block。HTTPMessage 違反は synthetic 403 (`Action=Respond`)。native gRPC の Start/Data 違反は Receive 方向の synthetic `GRPCEndMessage` (grpc-status 7 PERMISSION_DENIED、`grpc-message: blocked by safety_filter`、`server: yorishiro-proxy`、`x-yorishiro-matched-rules`) で `Action=Respond` し、`internal/layer/grpc` が Trailers-Only 応答 (レスポンス HEADERS 中継済みなら trailers) として描画、session はその RPC を終了して dial 済みの upstream stream を閉じる (USK-1202)。保留中の Send 方向 native gRPC Start/Data への intercept `drop` も同じ終端を `BlockedBy=intercept_drop` で返す。WS フレームと gRPC-Web メッセージは引き続き `Action=Drop` (gRPC-Web の終端は USK-1220)。記録された flow には `BlockedBy=safety_filter` がスタンプされる。
+- **`log_only` モード (USK-1109)**: `safety_filter.input.action` はセクション単位 (既定 `block`、または `log_only`)。`log_only` では一致してもどちらの経路でも block しない。ライブの `SafetyStep` (`WithLogOnly`、`PerProtocolSafetyEngines.LogOnly` → `proxybuild.Deps.SafetyInputLogOnly` で配線) は Info で `safety: match observed (log_only, not blocked)` を出力し (`filter=safety_filter`、`rule_id`、`rule_name`、`target`、`match` は `hmac:… len=N` のダイジェストで生の断片は出さない。プロセスごとのランダム鍵による HMAC-SHA256 なので低エントロピーな一致もログから総当たりできない。同一プロセス内では安定して相関に使えるが、再起動をまたいでは一致しない)、envelope を無改変で転送し (ライブ経路はプロトコル別の `CheckInputAll` で全ルールを評価するため、一致したルールごとに 1 エントリ。先頭のうるさいルールが後続を隠さない。block モードは従来どおり最初の一致のみ)、`Result.Annotations{"safety_log_only:<rule_id>": <target>}` を返す。`RecordStep` はこれを Stream の tags に追記する (`query` の `flows` / `flow` の `tags` で見える)。MCP plane (`safety.Engine.CheckInput`、resend / fuzz / macro が使用) も同じメッセージをログに出してリクエストを通す。リスト後方の block ルールは引き続き block する。intercept の modify_and_forward 再チェックは同じ `*SafetyStep` を使うためモードを継承する。block モードのログも同じ redact 済みダイジェストを出す。
 - **保護対象**: **upstream server**。
 - **modify_and_forward 再チェック (USK-702)**: `InterceptStep.holdAndDispatch` の Send 方向 modify_and_forward 経路は、operator が書き換えた envelope に対して同じ `SafetyStep.Process` を再実行する。これにより「AI Agent が SafetyFilter を通る無害なリクエストを送らせ → hold 中に destructive payload に書き換えて release」という迂回経路を塞ぐ。
 
@@ -587,7 +592,7 @@ SafetyFilter は **目的・層・保護対象が完全に異なる 2 つのフ�
   1. **LLM 学習データ流出防止** — AI Agent の context window に流れ込んだ機微情報は、上流 LLM 事業者側で保持される可能性がある。
   2. **企業の LLM Input Security Policy コンプライアンス** — 多くの組織で「AI ツールに取り込んでよい情報カテゴリ」が規定されている。
 - **層**: MCP control plane — `internal/safety.Engine` が `FilterOutput` / `FilterOutputHeaders` を公開し、`internal/mcp/safety_helper.go` から query / resend / fuzz / replay 等の MCP tool が AI クライアントへレスポンスを serialize する瞬間に呼ばれる。
-- **挙動**: 一致したバイトをマスク (redact)。block / log_only アクションもサポート。wire 上で記録された元バイト (`flow.Store` 内) は **mutate しない** — Output Filter は MCP transport 境界で コピーに対してのみ作用する。
+- **挙動**: 一致したバイトをマスク (redact)。`log_only` もサポート (output セクションの `block` は config 検証で拒否される)。wire 上で記録された元バイト (`flow.Store` 内) は **mutate しない** — Output Filter は MCP transport 境界で コピーに対してのみ作用する。
 - **保護対象**: **AI Agent 自身**。
 
 #### 重要な帰結: wire ≠ MCP plane

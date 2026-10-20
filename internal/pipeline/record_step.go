@@ -144,6 +144,17 @@ type RecordStep struct {
 	// the same bounded-by-stream-count rationale as streamCreated.
 	schemeBackfillPending sync.Map
 
+	// annotationWritten records which (streamID, tag key, tag value)
+	// triples appendAnnotations has already written (USK-1109 review
+	// F-3 / CWE-400). A log_only match on every frame of a WS / gRPC
+	// flood would otherwise issue one synchronous read-merge-write
+	// UpdateStream per frame on the single SQLite writer, even after the
+	// per-Stream record cap. Only unseen triples are written; a failed
+	// write forgets its triples so a later envelope retries. Same
+	// no-eviction, bounded-by-stream-count rationale as protocolRetagged
+	// (a Stream contributes at most one entry per matching rule).
+	annotationWritten sync.Map
+
 	// scope filters which envelopes are recorded. nil = capture all
 	// (current behaviour). When non-nil, ShouldRecord is consulted for
 	// every envelope and the result is cached per StreamID in
@@ -623,6 +634,14 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	// LoadOrStore so subsequent WS frames are write-free.
 	s.maybeRetagProtocol(ctx, env)
 
+	// USK-1109: append the Run's Result.Annotations (e.g. SafetyStep
+	// log_only observations) to the Stream's tags. Runs after the
+	// ensureStream block above so the row exists even when the annotated
+	// envelope is the stream's first Send, and before the per-Stream
+	// record cap gate so a capped streaming envelope still leaves its
+	// observation on the Stream.
+	s.appendAnnotations(ctx, env)
+
 	// On Receive, project upstream TLS snapshot (if present) onto
 	// Stream.ConnInfo. The Send side carries the synthetic MITM cert we
 	// presented to the client; Receive carries the real upstream TLS
@@ -782,6 +801,48 @@ func (s *RecordStep) markStreamTruncated(ctx context.Context, env *envelope.Enve
 			"error", err,
 		)
 	}
+}
+
+// appendAnnotations writes the Run's merged Result.Annotations onto env's
+// Stream via AppendTags, so tags written earlier (TLS metadata, cap
+// markers, other annotations) are preserved. No-op without annotations or
+// without a StreamID, and when every (key, value) was already written for
+// this Stream (annotationWritten).
+func (s *RecordStep) appendAnnotations(ctx context.Context, env *envelope.Envelope) {
+	tags := annotationsFromContext(ctx)
+	if len(tags) == 0 || env.StreamID == "" {
+		return
+	}
+	var appendTags map[string]string
+	var claimed []annotationWriteKey
+	for k, v := range tags {
+		key := annotationWriteKey{streamID: env.StreamID, tag: k, value: v}
+		if _, seen := s.annotationWritten.LoadOrStore(key, struct{}{}); seen {
+			continue
+		}
+		if appendTags == nil {
+			appendTags = make(map[string]string, len(tags))
+		}
+		appendTags[k] = v
+		claimed = append(claimed, key)
+	}
+	if len(appendTags) == 0 {
+		return
+	}
+	if err := s.store.UpdateStream(ctx, env.StreamID, flow.StreamUpdate{AppendTags: appendTags}); err != nil {
+		for _, key := range claimed {
+			s.annotationWritten.Delete(key)
+		}
+		s.logger.Error("record step: annotation tag update failed",
+			"stream_id", env.StreamID,
+			"error", err,
+		)
+	}
+}
+
+// annotationWriteKey is the RecordStep.annotationWritten dedupe key.
+type annotationWriteKey struct {
+	streamID, tag, value string
 }
 
 // updateStreamTLS projects env.Context.TLS into Stream.ConnInfo via
@@ -1429,6 +1490,10 @@ func grpcAnomalyMetadataKey(t envelope.AnomalyType) string {
 		return "grpc_anomaly_missing_trailer"
 	case envelope.AnomalyUnexpectedGRPCWebRequestTrailer:
 		return "grpc_anomaly_unexpected_request_trailer"
+	case envelope.AnomalyGRPCLPMTooLarge:
+		return "grpc_anomaly_lpm_too_large"
+	case envelope.AnomalyGRPCLPMTruncated:
+		return "grpc_anomaly_lpm_truncated"
 	default:
 		return ""
 	}
@@ -1437,14 +1502,45 @@ func grpcAnomalyMetadataKey(t envelope.AnomalyType) string {
 // projectGRPCData projects a GRPCDataMessage. Body holds the decompressed
 // payload; RawBytes (set by envelopeToFlow) holds the wire form (5-byte
 // LPM prefix + compressed payload).
+//
+// USK-1254: the partial-LPM overlay row (wire_level=grpc-lpm-frame, an LPM
+// the gRPC Layer could not complete) carries Anomalies, projected into
+// grpc_anomaly_* keys. When its prefix itself was truncated (fewer than 5
+// observed bytes) the flag and length were never on the wire, so
+// grpc_compressed / grpc_wire_length are omitted instead of recording
+// fabricated zeros.
 func projectGRPCData(m *envelope.GRPCDataMessage, fl *flow.Flow) {
 	fl.Body = m.Payload
 	fl.Metadata["grpc_event"] = "data"
 	fl.Metadata["grpc_service"] = m.Service
 	fl.Metadata["grpc_method"] = m.Method
-	fl.Metadata["grpc_compressed"] = strconv.FormatBool(m.Compressed)
-	fl.Metadata["grpc_wire_length"] = strconv.FormatUint(uint64(m.WireLength), 10)
+	if !grpcLPMPrefixTruncated(m, fl.RawBytes) {
+		fl.Metadata["grpc_compressed"] = strconv.FormatBool(m.Compressed)
+		fl.Metadata["grpc_wire_length"] = strconv.FormatUint(uint64(m.WireLength), 10)
+	}
 	fl.Metadata["grpc_end_stream"] = strconv.FormatBool(m.EndStream)
+	for _, a := range m.Anomalies {
+		key := grpcAnomalyMetadataKey(a.Type)
+		if key == "" {
+			continue
+		}
+		fl.Metadata[key] = a.Detail
+	}
+}
+
+// grpcLPMPrefixTruncated reports whether m is a partial-LPM row whose
+// 5-byte prefix was cut short (USK-1254): it carries
+// AnomalyGRPCLPMTruncated and fewer than 5 raw bytes were observed.
+func grpcLPMPrefixTruncated(m *envelope.GRPCDataMessage, raw []byte) bool {
+	if len(raw) >= 5 {
+		return false
+	}
+	for _, a := range m.Anomalies {
+		if a.Type == envelope.AnomalyGRPCLPMTruncated {
+			return true
+		}
+	}
+	return false
 }
 
 // projectGRPCEnd projects a GRPCEndMessage. grpc_status is always present
@@ -1537,6 +1633,7 @@ var httpAnomalyKeys = map[envelope.AnomalyType]string{
 	envelope.AnomalyTrailerForbidden:      "http_anomaly_trailer_forbidden",
 	envelope.AnomalyTrailersInPassthrough: "http_anomaly_trailers_in_passthrough",
 	envelope.AnomalyRawBodyTruncated:      "http_anomaly_raw_body_truncated",
+	envelope.AnomalyTruncatedBody:         "http_anomaly_truncated_body",
 	// HTTP/2 receive-side anomalies emitted by the aggregator on parse.
 	envelope.H2DuplicatePseudoHeader:    "http_anomaly_h2_duplicate_pseudo_header",
 	envelope.H2PseudoHeaderAfterRegular: "http_anomaly_h2_pseudo_header_after_regular",
@@ -1548,6 +1645,19 @@ var httpAnomalyKeys = map[envelope.AnomalyType]string{
 	envelope.H2TrailersAfterPassthrough:               "http_anomaly_h2_trailers_after_passthrough",
 	envelope.H2PushPromise:                            "http_anomaly_h2_push_promise",
 	envelope.H2UnsupportedConnectProtocol:             "http_anomaly_h2_unsupported_connect_protocol",
+}
+
+// HTTPAnomalyMetadataKeys returns a copy of the closed HTTP AnomalyType →
+// flow Metadata key table RecordStep projects with. The MCP query tool
+// decodes those keys with its own reverse table
+// (internal/mcp flowMetadataAnomalyKeyToType); this accessor lets a test
+// there fail when the two diverge (USK-1229 review F-3).
+func HTTPAnomalyMetadataKeys() map[envelope.AnomalyType]string {
+	out := make(map[envelope.AnomalyType]string, len(httpAnomalyKeys))
+	for k, v := range httpAnomalyKeys {
+		out[k] = v
+	}
+	return out
 }
 
 // httpAnomalyMetadataKey returns the stable Metadata key under which an
@@ -1691,10 +1801,12 @@ func appMessageModified(a, b envelope.Message) bool {
 // Follows the USK-631 `isBodyChanged` precedent in
 // internal/layer/http1/channel.go.
 func httpMessageModified(a, b *envelope.HTTPMessage) bool {
-	if a.Method != b.Method || a.Status != b.Status {
+	if a.Method != b.Method || a.Status != b.Status || a.StatusReason != b.StatusReason {
 		return true
 	}
-	if a.Path != b.Path || a.Authority != b.Authority || a.Scheme != b.Scheme {
+	// USK-1148: RawQuery is part of the request line a plugin can rewrite
+	// on its own; without it a query-only rewrite records no variant.
+	if a.Path != b.Path || a.RawQuery != b.RawQuery || a.Authority != b.Authority || a.Scheme != b.Scheme {
 		return true
 	}
 	if !keyValuesEqual(a.Headers, b.Headers) {

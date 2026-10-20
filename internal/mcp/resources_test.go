@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -84,36 +83,9 @@ func TestListResources_AllRegistered(t *testing.T) {
 		}
 	}
 
-	// Verify all expected schema resources are present.
-	expectedSchemaURIs := []string{
-		"yorishiro://schema/proxy_start",
-		"yorishiro://schema/query",
-		"yorishiro://schema/manage",
-		"yorishiro://schema/macro",
-		"yorishiro://schema/intercept",
-		"yorishiro://schema/configure",
-		"yorishiro://schema/security",
-		"yorishiro://schema/resend_http",
-		"yorishiro://schema/resend_ws",
-		"yorishiro://schema/resend_grpc",
-		"yorishiro://schema/resend_raw",
-		"yorishiro://schema/fuzz_http",
-		"yorishiro://schema/fuzz_ws",
-		"yorishiro://schema/fuzz_grpc",
-		"yorishiro://schema/fuzz_raw",
-		"yorishiro://schema/plugin_introspect",
-		"yorishiro://schema/grpc_schema",
-	}
-	for _, uri := range expectedSchemaURIs {
-		if !gotURIs[uri] {
-			t.Errorf("missing schema resource: %s", uri)
-		}
-	}
-
-	// Total expected count = 22 help + 17 schema = 39.
-	expectedCount := len(expectedHelpURIs) + len(expectedSchemaURIs)
-	if len(result.Resources) != expectedCount {
-		t.Errorf("resource count = %d, want %d", len(result.Resources), expectedCount)
+	// Help resources are the only resources (no yorishiro://schema/*).
+	if len(result.Resources) != len(expectedHelpURIs) {
+		t.Errorf("resource count = %d, want %d", len(result.Resources), len(expectedHelpURIs))
 	}
 }
 
@@ -198,86 +170,6 @@ func TestReadResource_HelpResources(t *testing.T) {
 	}
 }
 
-func TestReadResource_SchemaResources(t *testing.T) {
-	cs := setupResourceTestSession(t)
-
-	tests := []struct {
-		name         string
-		uri          string
-		wantMIMEType string
-		wantTitle    string // expected title field in JSON
-	}{
-		{
-			name:         "schema/proxy_start",
-			uri:          "yorishiro://schema/proxy_start",
-			wantMIMEType: "application/json",
-			wantTitle:    "proxy_start input",
-		},
-		{
-			name:         "schema/query",
-			uri:          "yorishiro://schema/query",
-			wantMIMEType: "application/json",
-			wantTitle:    "query input",
-		},
-		{
-			name:         "schema/configure",
-			uri:          "yorishiro://schema/configure",
-			wantMIMEType: "application/json",
-			wantTitle:    "configure input",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-				URI: tt.uri,
-			})
-			if err != nil {
-				t.Fatalf("ReadResource(%s): %v", tt.uri, err)
-			}
-
-			if len(result.Contents) == 0 {
-				t.Fatal("result has no contents")
-			}
-
-			content := result.Contents[0]
-			if content.URI != tt.uri {
-				t.Errorf("content URI = %q, want %q", content.URI, tt.uri)
-			}
-			if content.MIMEType != tt.wantMIMEType {
-				t.Errorf("content MIMEType = %q, want %q", content.MIMEType, tt.wantMIMEType)
-			}
-
-			// Verify the JSON is valid.
-			var parsed map[string]any
-			if err := json.Unmarshal([]byte(content.Text), &parsed); err != nil {
-				t.Fatalf("content is not valid JSON: %v", err)
-			}
-
-			// Verify the title field.
-			title, ok := parsed["title"].(string)
-			if !ok {
-				t.Fatal("schema missing title field")
-			}
-			if title != tt.wantTitle {
-				t.Errorf("schema title = %q, want %q", title, tt.wantTitle)
-			}
-
-			// Verify it declares itself as a JSON Schema.
-			schema, ok := parsed["$schema"].(string)
-			if !ok || schema == "" {
-				t.Error("schema missing $schema field")
-			}
-
-			// Verify the type is "object".
-			typ, ok := parsed["type"].(string)
-			if !ok || typ != "object" {
-				t.Errorf("schema type = %q, want %q", typ, "object")
-			}
-		})
-	}
-}
-
 func TestReadResource_ContentAccuracy(t *testing.T) {
 	cs := setupResourceTestSession(t)
 
@@ -293,40 +185,6 @@ func TestReadResource_ContentAccuracy(t *testing.T) {
 	for _, resource := range availableResources {
 		if !strings.Contains(text, resource) {
 			t.Errorf("help/query does not mention resource %q", resource)
-		}
-	}
-
-}
-
-func TestReadResource_SchemaFieldConsistency(t *testing.T) {
-	cs := setupResourceTestSession(t)
-
-	// Verify schema/query lists the correct resource enum values.
-	result, err := cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "yorishiro://schema/query",
-	})
-	if err != nil {
-		t.Fatalf("ReadResource: %v", err)
-	}
-
-	var schema struct {
-		Properties struct {
-			Resource struct {
-				Enum []string `json:"enum"`
-			} `json:"resource"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal([]byte(result.Contents[0].Text), &schema); err != nil {
-		t.Fatalf("unmarshal schema: %v", err)
-	}
-
-	gotResources := make(map[string]bool)
-	for _, r := range schema.Properties.Resource.Enum {
-		gotResources[r] = true
-	}
-	for _, r := range availableResources {
-		if !gotResources[r] {
-			t.Errorf("schema/query enum missing resource %q", r)
 		}
 	}
 
@@ -361,17 +219,14 @@ func TestResourceMetadata(t *testing.T) {
 			}
 
 			// Verify MIME type is valid.
-			validMIME := r.MIMEType == "text/markdown" || r.MIMEType == "application/json" || r.MIMEType == "text/plain"
+			validMIME := r.MIMEType == "text/markdown" || r.MIMEType == "text/plain"
 			if !validMIME {
 				t.Errorf("unexpected MIME type: %s", r.MIMEType)
 			}
 
-			// Help resources should be markdown, schema resources should be JSON, info resources should be plain text.
+			// Help resources should be markdown, info resources should be plain text.
 			if strings.Contains(r.URI, "/help/") && r.MIMEType != "text/markdown" {
 				t.Errorf("help resource has MIME type %s, want text/markdown", r.MIMEType)
-			}
-			if strings.Contains(r.URI, "/schema/") && r.MIMEType != "application/json" {
-				t.Errorf("schema resource has MIME type %s, want application/json", r.MIMEType)
 			}
 			if strings.Contains(r.URI, "/info/") && r.MIMEType != "text/plain" {
 				t.Errorf("info resource has MIME type %s, want text/plain", r.MIMEType)
@@ -420,9 +275,7 @@ func TestMakeResourceHandler_InvalidFilename(t *testing.T) {
 
 func TestResourceDefinitions_NoDuplicates(t *testing.T) {
 	// Verify no duplicate URIs or names across all resource definitions.
-	allDefs := make([]resourceDef, 0, len(helpResources)+len(schemaResources))
-	allDefs = append(allDefs, helpResources...)
-	allDefs = append(allDefs, schemaResources...)
+	allDefs := helpResources
 
 	uris := make(map[string]bool)
 	names := make(map[string]bool)
@@ -442,9 +295,7 @@ func TestResourceDefinitions_NoDuplicates(t *testing.T) {
 
 func TestResourceDefinitions_AllFilesExist(t *testing.T) {
 	// Verify that all referenced embedded files actually exist.
-	allDefs := make([]resourceDef, 0, len(helpResources)+len(schemaResources))
-	allDefs = append(allDefs, helpResources...)
-	allDefs = append(allDefs, schemaResources...)
+	allDefs := helpResources
 
 	for _, rd := range allDefs {
 		t.Run(rd.name, func(t *testing.T) {
@@ -454,30 +305,6 @@ func TestResourceDefinitions_AllFilesExist(t *testing.T) {
 			}
 			if len(data) == 0 {
 				t.Errorf("embedded file %s is empty", rd.filename)
-			}
-		})
-	}
-}
-
-func TestSchemaResources_ValidJSON(t *testing.T) {
-	// Verify all schema files are valid JSON independently of the MCP server.
-	for _, rd := range schemaResources {
-		t.Run(rd.name, func(t *testing.T) {
-			data, err := resourcesFS.ReadFile(rd.filename)
-			if err != nil {
-				t.Fatalf("read file: %v", err)
-			}
-
-			var parsed map[string]any
-			if err := json.Unmarshal(data, &parsed); err != nil {
-				t.Fatalf("invalid JSON in %s: %v", rd.filename, err)
-			}
-
-			// Must have $schema, title, type.
-			for _, key := range []string{"$schema", "title", "type"} {
-				if _, ok := parsed[key]; !ok {
-					t.Errorf("schema %s missing required field %q", rd.filename, key)
-				}
 			}
 		})
 	}
@@ -522,15 +349,7 @@ func TestResourceDefinitions_EveryEmbeddedFileIsRegistered(t *testing.T) {
 		}
 		helpByFile[rd.filename] = rd
 	}
-	schemaByFile := make(map[string]resourceDef, len(schemaResources))
-	for _, rd := range schemaResources {
-		if prev, dup := schemaByFile[rd.filename]; dup {
-			t.Errorf("file %s is registered twice (%s and %s)", rd.filename, prev.name, rd.name)
-		}
-		schemaByFile[rd.filename] = rd
-	}
-
-	seenMD, seenJSON := 0, 0
+	seenMD := 0
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -547,28 +366,19 @@ func TestResourceDefinitions_EveryEmbeddedFileIsRegistered(t *testing.T) {
 			if rd.topic == "" {
 				t.Errorf("help resource %s has an empty topic; it would be unreachable via the docs tool", rd.name)
 			}
-		case strings.HasSuffix(e.Name(), ".json"):
-			seenJSON++
-			if _, ok := schemaByFile[name]; !ok {
-				t.Errorf("embedded file %s has no schemaResources entry", name)
-			}
 		default:
-			t.Errorf("unexpected embedded resource %s: only *.md and *.json are registered", name)
+			t.Errorf("unexpected embedded resource %s: only *.md is registered", name)
 		}
 	}
 
 	if seenMD != len(helpResources) {
 		t.Errorf("embedded *.md count = %d, helpResources = %d", seenMD, len(helpResources))
 	}
-	if seenJSON != len(schemaResources) {
-		t.Errorf("embedded *.json count = %d, schemaResources = %d", seenJSON, len(schemaResources))
-	}
 }
 
 // TestResourceDefinitions_TopicFieldPopulation asserts the topic namespace
-// invariant: every help resource is a docs topic, no schema resource is.
-// The topic field is set explicitly rather than derived from the name so a
-// future schema entry cannot drift into the docs namespace by accident.
+// invariant: every help resource is a docs topic, and its URI and filename
+// agree with the topic.
 func TestResourceDefinitions_TopicFieldPopulation(t *testing.T) {
 	seen := make(map[string]string, len(helpResources))
 	for _, rd := range helpResources {
@@ -588,12 +398,6 @@ func TestResourceDefinitions_TopicFieldPopulation(t *testing.T) {
 		}
 		if want := "resources/help_" + rd.topic + ".md"; rd.filename != want {
 			t.Errorf("resource %s: filename = %q, want %q to match topic %q", rd.name, rd.filename, want, rd.topic)
-		}
-	}
-
-	for _, rd := range schemaResources {
-		if rd.topic != "" {
-			t.Errorf("schema resource %s has topic %q; schema resources are deliberately not docs topics", rd.name, rd.topic)
 		}
 	}
 }

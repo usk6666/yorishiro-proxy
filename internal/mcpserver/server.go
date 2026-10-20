@@ -126,27 +126,34 @@ type PolicyReloadTrigger struct {
 	Stop func()
 }
 
-// Run parses CLI flags from args using fs, then performs the full server
-// assembly and blocks on the MCP server until ctx is cancelled. It is the
-// production entry point relocated from cmd/yorishiro-proxy/main.go's
-// runWithFlags so the same wiring is reachable from tests.
-//
-// Run owns the registration of every CLI flag on fs; callers must pass a
-// fresh *flag.FlagSet that has not had any other flags registered.
-func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) error {
-	cfg := config.Default()
+// serverFlags holds the values of the server-mode CLI flags that do not
+// live on config.Config. registerFlags fills it in when fs is parsed.
+type serverFlags struct {
+	configFile           string
+	targetPolicyFile     string
+	tlsFingerprint       string
+	openBrowser          bool
+	stdioMCP             bool
+	noHTTPMCP            bool
+	safetyFilterEnabled  bool
+	maxConcurrentStreams uint
+}
+
+// registerFlags registers every server-mode CLI flag on fs. Flags backed
+// by config.Config write into cfg; the rest write into the returned
+// *serverFlags. It has no side effects beyond the registration, so tests
+// can inspect the exact flag set Run parses.
+func registerFlags(fs *flag.FlagSet, cfg *config.Config) *serverFlags {
+	f := &serverFlags{}
 
 	// Config file path — loaded early to provide defaults for proxy_start.
-	var configFile string
-	fs.StringVar(&configFile, "config", "", "JSON config file path for proxy defaults (env: YP_CONFIG)")
+	fs.StringVar(&f.configFile, "config", "", "JSON config file path for proxy defaults (env: YP_CONFIG)")
 
 	// Target scope policy file path.
-	var targetPolicyFile string
-	fs.StringVar(&targetPolicyFile, "target-policy-file", "", "target scope policy JSON file path (env: YP_TARGET_POLICY_FILE)")
+	fs.StringVar(&f.targetPolicyFile, "target-policy-file", "", "target scope policy JSON file path (env: YP_TARGET_POLICY_FILE)")
 
 	// TLS fingerprint profile override. Applied as a proxy default when set.
-	var tlsFingerprint string
-	fs.StringVar(&tlsFingerprint, "tls-fingerprint", "", "TLS fingerprint profile: chrome, firefox, safari, edge, random, none (env: YP_TLS_FINGERPRINT)")
+	fs.StringVar(&f.tlsFingerprint, "tls-fingerprint", "", "TLS fingerprint profile: chrome, firefox, safari, edge, random, none (env: YP_TLS_FINGERPRINT)")
 
 	// Define flags — only those requiring startup-time decisions.
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath,
@@ -177,36 +184,52 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 			"    can overwrite any file in it (default ~/.yorishiro-proxy/exports) (env: YP_EXPORT_DIR)")
 
 	// -open-browser enables auto-opening the WebUI; default is disabled.
-	var openBrowser bool
-	fs.BoolVar(&openBrowser, "open-browser", false, "open WebUI in browser when HTTP MCP starts (env: YP_OPEN_BROWSER)")
+	fs.BoolVar(&f.openBrowser, "open-browser", false, "open WebUI in browser when HTTP MCP starts (env: YP_OPEN_BROWSER)")
 
 	// -stdio-mcp enables stdio MCP transport (opt-in).
-	var stdioMCP bool
-	fs.BoolVar(&stdioMCP, "stdio-mcp", false, "start stdio MCP transport in addition to HTTP MCP (env: YP_STDIO_MCP)")
+	fs.BoolVar(&f.stdioMCP, "stdio-mcp", false, "start stdio MCP transport in addition to HTTP MCP (env: YP_STDIO_MCP)")
 
 	// -no-http-mcp disables HTTP MCP transport (opt-out).
-	var noHTTPMCP bool
-	fs.BoolVar(&noHTTPMCP, "no-http-mcp", false, "disable HTTP MCP transport (env: YP_NO_HTTP_MCP)")
+	fs.BoolVar(&f.noHTTPMCP, "no-http-mcp", false, "disable HTTP MCP transport (env: YP_NO_HTTP_MCP)")
 
 	// SafetyFilter enable/disable override. When set via flag or env var,
 	// it overrides the config file's safety_filter.enabled value.
-	var safetyFilterEnabled bool
-	fs.BoolVar(&safetyFilterEnabled, "safety-filter", false, "enable SafetyFilter engine (env: YP_SAFETY_FILTER_ENABLED)")
+	fs.BoolVar(&f.safetyFilterEnabled, "safety-filter", false, "enable SafetyFilter engine (env: YP_SAFETY_FILTER_ENABLED)")
 
 	// USK-862: HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients
 	// on the inbound (client-facing) Layer. Zero means "use the H2 layer's
 	// compile-time default" (currently 500). Stored as uint via flag.UintVar
 	// because flag has no UintVar32, then narrowed to uint32 below.
-	var maxConcurrentStreams uint
-	fs.UintVar(&maxConcurrentStreams, "max-concurrent-streams", 0,
+	fs.UintVar(&f.maxConcurrentStreams, "max-concurrent-streams", 0,
 		"HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients; 0 = use H2 default (500) (env: YP_MAX_CONCURRENT_STREAMS)")
 
-	if err := fs.Parse(args); err != nil {
+	return f
+}
+
+// Run parses CLI flags from args using fs, then performs the full server
+// assembly and blocks on the MCP server until ctx is cancelled. It is the
+// production entry point relocated from cmd/yorishiro-proxy/main.go's
+// runWithFlags so the same wiring is reachable from tests.
+//
+// Run owns the registration of every CLI flag on fs; callers must pass a
+// fresh *flag.FlagSet that has not had any other flags registered.
+func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) error {
+	cfg := config.Default()
+
+	flags := registerFlags(fs, cfg)
+
+	if err := parseFlagsOnly(fs, args); err != nil {
 		return err
 	}
 
 	// Apply environment variable fallback for flags not explicitly set.
 	ApplyEnvFallback(fs)
+
+	// Read the parsed values only after the env fallback has been applied.
+	configFile, targetPolicyFile := flags.configFile, flags.targetPolicyFile
+	tlsFingerprint := flags.tlsFingerprint
+	openBrowser, stdioMCP, noHTTPMCP := flags.openBrowser, flags.stdioMCP, flags.noHTTPMCP
+	maxConcurrentStreams := flags.maxConcurrentStreams
 
 	// Track whether safety-filter was explicitly set (flag or env var).
 	safetyFilterExplicit := false
@@ -216,7 +239,7 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 		}
 	})
 	if safetyFilterExplicit {
-		cfg.SafetyFilterEnabled = &safetyFilterEnabled
+		cfg.SafetyFilterEnabled = &flags.safetyFilterEnabled
 	}
 
 	// USK-862: thread the parsed -max-concurrent-streams value into the
@@ -344,6 +367,22 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		sseInterceptEngine, httpTransformEngine, sseTransformEngine, passthrough,
 		targetScopePolicy, targetScopePolicySource, reload, openBrowser, stdioMCP, versionStr, opts, logger)
+}
+
+// parseFlagsOnly parses args into fs and refuses any positional argument.
+// The flag package stops at the first non-flag token and leaves the rest
+// unparsed, so `-insecure true -db proj` would otherwise boot with -db
+// silently dropped. The server takes flags only, and the refusal happens
+// before any side effect (USK-1047).
+func parseFlagsOnly(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q: the server takes flags only "+
+			"(boolean flags take -flag=value, e.g. -insecure=false)", fs.Arg(0))
+	}
+	return nil
 }
 
 // applyMCPTransportFlags clears the HTTP MCP address when -no-http-mcp is
