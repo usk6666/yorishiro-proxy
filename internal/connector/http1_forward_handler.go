@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -279,16 +278,17 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 // "http", the forward target's host and port, path "". It is both the
 // admission check and the live-connection predicate (USK-1160). A nil or
 // rule-less scope allows everything. err is non-nil only for a target that
-// is not host:port (then allowed is false).
+// SplitTargetHostPort rejects (then allowed is false): peekForwardTarget
+// already refuses such a target, so this fail-closed branch is
+// defense-in-depth (USK-1249).
 func forwardScopeCheck(scope *TargetScope, target string) (allowed bool, reason string, err error) {
 	if scope == nil || !scope.HasRules() {
 		return true, "", nil
 	}
-	host, portStr, err := net.SplitHostPort(target)
+	host, port, err := SplitTargetHostPort(target)
 	if err != nil {
 		return false, "invalid forward-proxy target", err
 	}
-	port, _ := strconv.Atoi(portStr)
 	allowed, reason = scope.CheckTarget("http", host, port, "")
 	return allowed, reason, nil
 }
@@ -302,7 +302,12 @@ func forwardScopeCheck(scope *TargetScope, target string) (allowed bool, reason 
 //  1. Absolute-form Request-URI (e.g. "GET http://host/path HTTP/1.1") wins.
 //  2. Otherwise, Host header from the request.
 //
-// Default port is 80 when the URL or Host omits one. CONNECT method is
+// Default port is 80 when the URL or Host omits one. Whichever form names
+// it, the resulting target must pass SplitTargetHostPort: a port the
+// dialer would read differently from TargetScope (a service name such as
+// "postgresql", a 10-digit value net.Dial wraps modulo 2^32, a leading
+// space, an empty port) is an error, so the handler answers 400 and never
+// dials it (USK-1249). The target is never rewritten. CONNECT method is
 // rejected — CONNECT detection is owned by FullListener and CONNECT requests
 // should reach the OnCONNECT handler instead.
 //
@@ -373,7 +378,7 @@ func peekForwardTarget(pc *PeekConn) (string, error) {
 		if host == "" {
 			return "", fmt.Errorf("connector: absolute URI missing authority")
 		}
-		return ensurePort(host, "80"), nil
+		return validForwardTarget(ensurePort(host, "80"))
 	}
 
 	// Origin-form: Host header is mandatory in HTTP/1.1.
@@ -381,7 +386,16 @@ func peekForwardTarget(pc *PeekConn) (string, error) {
 	if host == "" {
 		return "", fmt.Errorf("connector: missing Host header in origin-form request")
 	}
-	return ensurePort(host, "80"), nil
+	return validForwardTarget(ensurePort(host, "80"))
+}
+
+// validForwardTarget returns target when its port passes
+// SplitTargetHostPort, and an error otherwise.
+func validForwardTarget(target string) (string, error) {
+	if _, _, err := SplitTargetHostPort(target); err != nil {
+		return "", fmt.Errorf("connector: forward target: %w", err)
+	}
+	return target, nil
 }
 
 // peekUntilHeadersEnd peeks bytes from pc until "\r\n\r\n" is found or max

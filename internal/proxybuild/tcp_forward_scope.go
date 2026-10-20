@@ -2,12 +2,9 @@ package proxybuild
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -90,22 +87,11 @@ func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamT
 }
 
 // tcpForwardTargetHostPort splits a forward target into host and a port
-// that must be a decimal integer in 1..65535. Service names ("https",
-// "postgresql"), signs and out-of-range values are rejected, so the port
-// the scope checks is the port the dialer connects to.
+// that must be a decimal integer in 1..65535 (connector.SplitTargetHostPort).
+// Service names ("https", "postgresql"), signs and out-of-range values are
+// rejected, so the port the scope checks is the port the dialer connects to.
 func tcpForwardTargetHostPort(target string) (string, int, error) {
-	host, portStr, err := net.SplitHostPort(target)
-	if err != nil {
-		return "", 0, fmt.Errorf("invalid target %q: %w", target, err)
-	}
-	if portStr == "" || strings.Trim(portStr, "0123456789") != "" {
-		return "", 0, fmt.Errorf("invalid target %q: port %q is not a decimal port number", target, portStr)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1 || port > 65535 {
-		return "", 0, fmt.Errorf("invalid target %q: port %q is out of range 1-65535", target, portStr)
-	}
-	return host, port, nil
+	return connector.SplitTargetHostPort(target)
 }
 
 // tcpForwardUpstreamTLS reports the forward's upstream_tls axis.
