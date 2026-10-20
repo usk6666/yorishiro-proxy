@@ -43,7 +43,7 @@ Execute a stored macro for testing. The macro is loaded from DB and run with the
 - **name** (string, required): Name of the macro to run.
 - **vars** (object, optional): Runtime variable overrides for the KV Store.
 
-Returns: macro_name, status ("completed"/"error"/"timeout"), steps_executed, kv_store, step_results[], error. Each step_results entry includes `id`, `status` ("completed"/"warning"/"skipped"/"error"), `status_code`, `duration_ms`, `error`, and `warnings[]` (populated when a template detector matches — either a foreign syntax that was not substituted, or a `§name§` the KV Store could not resolve; see "Variable substitution syntax" below).
+Returns: macro_name, status ("completed"/"error"/"timeout"), steps_executed, kv_store, step_results[], error. `kv_store` values (not keys) are masked by SafetyFilter Output Filter when active; only the returned copy is masked, and later steps of the run receive the original values. Each step_results entry includes `id`, `status` ("completed"/"warning"/"skipped"/"error"), `status_code`, `duration_ms`, `error`, and `warnings[]` (populated when a template detector matches — either a foreign syntax that was not substituted, or a `§name§` the KV Store could not resolve; see "Variable substitution syntax" below).
 
 ### delete_macro
 Remove a stored macro definition.

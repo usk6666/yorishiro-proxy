@@ -528,14 +528,17 @@ Output Filter rules are **immutable at runtime** -- they are defined in the conf
    - `query` -- flow details (request/response headers, bodies, decoded bodies, raw bytes), `messages` entries, and `intercept_queue` entries (headers / trailers / gRPC metadata, bodies and payloads, and raw bytes; URL components, HTTP status reasons, WebSocket close reasons and `grpc-message` are not masked)
    - `resend_http` -- response headers and body
    - `resend_ws` -- the response frame payload
-   - `resend_grpc` -- response DATA message payloads only; the response start metadata, trailers and `grpc-message` are **not** masked
+   - `resend_grpc` -- response DATA message payloads, the response start metadata (`start_metadata`) and the trailers (`end.trailers`), as `query` masks gRPC metadata (header-target rules; names, order and casing preserved); `grpc-message` (`end.message`) is **not** masked
+   - `resend_raw` -- `response_bytes`: the concatenated response bytes exactly as received (not decompressed or dechunked), masked before base64 encoding. `response_size` still reports the wire (pre-mask) length
+   - `macro` `run_macro` -- `kv_store` values (extracted values, `initial_vars` and `vars` alike; keys are not masked). Only the returned copy is masked: later steps of the macro receive the original values
    - `manage` `export_flows` -- inline export only, and only partially: `body`-target rules scan the serialized JSONL text, so plain-text fields (URL, header values, metadata) can be masked, but bodies and raw bytes are base64-encoded before masking and are effectively **not** masked; `header`-target rules are not applied. Exports written to a file are not masked at all. Use `query` for masked bodies.
 3. **Raw Data Preserved**: The Flow Store always contains the original unmasked data for human review via the Web UI
 
 **Coverage notes**:
 
 - Patterns match the bytes exactly as the tool returns them. Content-Encoded (e.g. gzip, br, zstd) bodies are not decoded before masking, so a compressed body is effectively not masked. The exception is `query`'s decoded-body view (`body_decoded` / `request_body_decoded` / `response_body_decoded`), which is decoded first and then masked.
-- Tools not listed above return their data unmasked -- for example `resend_raw` (`response_bytes`) and `macro` `run_macro` (`kv_store`).
+- Tools and fields not listed above return their data unmasked -- for example `manage` `export_flows` written to a file.
+- `resend_raw` truncates `response_bytes` at its response cap before masking, so a match that straddles the cap is cut off and may be returned partially unmasked.
 
 ### Output Rule Configuration
 
@@ -613,7 +616,7 @@ Output rules typically use `body` as the target. Header-level masking is also su
 | gRPC | Supported | Supported | Via HTTP/2 |
 | WebSocket | Partial | Supported | Input: only custom rules with target `payload` (or `opcode`) are evaluated, per frame (all opcodes) -- the built-in presets and `body` / `url` / `query` rules never match WebSocket frames; fragment bypass possible. Output: masks frame payloads in `query` / `resend_ws` results |
 | SOCKS5 | N/A | N/A | Transport layer only (filters apply after HTTP delegation) |
-| Raw TCP | N/A | N/A | Binary stream |
+| Raw TCP | N/A | Supported | Binary stream. Output: masks raw bytes in `query` results and `response_bytes` in `resend_raw` results, as received (no decoding) |
 
 ## WebSocket Safety Filter
 
