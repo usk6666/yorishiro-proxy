@@ -270,3 +270,172 @@ func TestSafetyEngine_CheckInput_DoesNotMutateMessage_OnMatch(t *testing.T) {
 		t.Errorf("underlying payload slice mutated after match: got %q, want %q", string(payloadOriginal), string(payloadSnapshot))
 	}
 }
+
+// TestSafetyEngine_LoadPreset_MatchesPayload pins USK-1275: the built-in
+// presets (destructive-sql / destructive-os-command) target the
+// HTTP-canonical {body, url, query} triple. The WS engine maps
+// common.TargetBody onto the frame payload (mirroring the gRPC engine's
+// TargetBody → payload alias), so a preset loaded into the WS engine must
+// gate WS frames. Before the fix every preset rule was silently skipped.
+func TestSafetyEngine_LoadPreset_MatchesPayload(t *testing.T) {
+	tests := []struct {
+		name       string
+		preset     string
+		msg        *envelope.WSMessage
+		wantRuleID string
+	}{
+		{
+			name:       "destructive-sql text frame",
+			preset:     "destructive-sql",
+			msg:        &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte("DROP TABLE users")},
+			wantRuleID: "destructive-sql:drop",
+		},
+		{
+			name:       "destructive-sql comment-obfuscated",
+			preset:     "destructive-sql",
+			msg:        &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte(`{"q":"DROP/**/TABLE/**/x"}`)},
+			wantRuleID: "destructive-sql:drop",
+		},
+		{
+			name:       "destructive-sql binary frame",
+			preset:     "destructive-sql",
+			msg:        &envelope.WSMessage{Opcode: envelope.WSBinary, Fin: true, Payload: []byte("DROP TABLE users")},
+			wantRuleID: "destructive-sql:drop",
+		},
+		{
+			// layer/ws decompresses permessage-deflate before the
+			// envelope reaches the pipeline; Payload holds plaintext.
+			name:       "destructive-sql compressed message (decompressed payload)",
+			preset:     "destructive-sql",
+			msg:        &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Compressed: true, Payload: []byte("DROP TABLE users")},
+			wantRuleID: "destructive-sql:drop",
+		},
+		{
+			name:       "destructive-os-command rm -rf",
+			preset:     "destructive-os-command",
+			msg:        &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte("rm -rf /")},
+			wantRuleID: "destructive-os:rm-rf",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := NewSafetyEngine()
+			if err := e.LoadPreset(tc.preset); err != nil {
+				t.Fatalf("LoadPreset(%q): %v", tc.preset, err)
+			}
+
+			v := e.CheckInput(context.Background(), tc.msg)
+			if v == nil {
+				t.Fatalf("CheckInput: no violation for %q under preset %q", tc.msg.Payload, tc.preset)
+			}
+			if v.RuleID != tc.wantRuleID {
+				t.Errorf("RuleID = %q, want %q", v.RuleID, tc.wantRuleID)
+			}
+			if v.Target != string(TargetPayload) {
+				t.Errorf("Target = %q, want %q", v.Target, TargetPayload)
+			}
+
+			all := e.CheckInputAll(context.Background(), tc.msg)
+			found := false
+			for _, av := range all {
+				if av.RuleID == tc.wantRuleID {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("CheckInputAll: rule %q not among %d violations", tc.wantRuleID, len(all))
+			}
+		})
+	}
+}
+
+// TestSafetyEngine_LoadPreset_BenignPayload is the reverse guard for
+// TestSafetyEngine_LoadPreset_MatchesPayload: a benign frame passes.
+func TestSafetyEngine_LoadPreset_BenignPayload(t *testing.T) {
+	e := NewSafetyEngine()
+	for _, p := range []string{"destructive-sql", "destructive-os-command"} {
+		if err := e.LoadPreset(p); err != nil {
+			t.Fatalf("LoadPreset(%q): %v", p, err)
+		}
+	}
+	msg := &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte(`{"op":"select","table":"users"}`)}
+	if v := e.CheckInput(context.Background(), msg); v != nil {
+		t.Errorf("benign payload produced violation: %+v", v)
+	}
+}
+
+// TestSafetyEngine_TargetBody_CustomRule pins that a custom rule with
+// targets: ["body"] gates WS frame payloads (same alias as the preset
+// path; the same CompiledRule is fed to every per-protocol engine).
+func TestSafetyEngine_TargetBody_CustomRule(t *testing.T) {
+	e := NewSafetyEngine()
+	pat, err := common.CompilePattern(`(?i)password=`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.AddRule(common.CompiledRule{
+		ID:      "body-leak",
+		Pattern: pat,
+		Targets: []common.Target{common.TargetBody},
+	})
+	msg := &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte("password=hunter2")}
+	v := e.CheckInput(context.Background(), msg)
+	if v == nil {
+		t.Fatal("expected violation for body-targeted rule on WS payload")
+	}
+	if v.RuleID != "body-leak" || v.Target != string(TargetPayload) {
+		t.Errorf("violation = %+v, want RuleID=body-leak Target=payload", v)
+	}
+}
+
+// TestSafetyEngine_TargetBody_EmptyPayload pins that the body alias
+// treats an empty payload exactly like TargetPayload: the pattern still
+// runs, so an empty-matching pattern fires.
+func TestSafetyEngine_TargetBody_EmptyPayload(t *testing.T) {
+	e := NewSafetyEngine()
+	pat, err := common.CompilePattern(`^$`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.AddRule(common.CompiledRule{ID: "empty", Pattern: pat, Targets: []common.Target{common.TargetBody}})
+	msg := &envelope.WSMessage{Opcode: envelope.WSText, Fin: true}
+	if v := e.CheckInput(context.Background(), msg); v == nil {
+		t.Error("expected empty-pattern violation on empty payload via body alias")
+	}
+}
+
+// TestSafetyEngine_URLQueryTargets_SkippedAtFrameLevel pins the boundary:
+// url / query have no frame-level meaning (they are screened on the
+// Upgrade request by the HTTP engine), so a rule with only those targets
+// never fires on a WS frame.
+func TestSafetyEngine_URLQueryTargets_SkippedAtFrameLevel(t *testing.T) {
+	e := NewSafetyEngine()
+	pat, err := common.CompilePattern(`.*`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.AddRule(common.CompiledRule{ID: "uq", Pattern: pat, Targets: []common.Target{common.TargetURL, common.TargetQuery}})
+	msg := &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte("DROP TABLE users")}
+	if v := e.CheckInput(context.Background(), msg); v != nil {
+		t.Errorf("url/query-only rule fired at frame level: %+v", v)
+	}
+}
+
+// TestSafetyEngine_LoadPreset_DoesNotMutateMessage extends the
+// wire-fidelity invariant to the preset path.
+func TestSafetyEngine_LoadPreset_DoesNotMutateMessage(t *testing.T) {
+	e := NewSafetyEngine()
+	if err := e.LoadPreset("destructive-sql"); err != nil {
+		t.Fatal(err)
+	}
+	payloadOriginal := []byte("DROP TABLE users")
+	msg := &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: payloadOriginal}
+	snapshot := append([]byte(nil), payloadOriginal...)
+	if v := e.CheckInput(context.Background(), msg); v == nil {
+		t.Fatal("expected violation; precondition failed")
+	}
+	_ = e.CheckInputAll(context.Background(), msg)
+	if !bytes.Equal(msg.Payload, snapshot) || !bytes.Equal(payloadOriginal, snapshot) {
+		t.Errorf("payload mutated: got %q, want %q", msg.Payload, snapshot)
+	}
+}

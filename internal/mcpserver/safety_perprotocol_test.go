@@ -1,10 +1,12 @@
 package mcpserver
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // TestInitPerProtocolSafetyEngines covers the safety.Config →
@@ -319,6 +321,55 @@ func TestInitPerProtocolSafetyEngines_LogOnly(t *testing.T) {
 			}
 			if got.LogOnly != tc.want {
 				t.Errorf("LogOnly = %v, want %v", got.LogOnly, tc.want)
+			}
+		})
+	}
+}
+
+// TestInitPerProtocolSafetyEngines_PresetGatesWSFrames pins USK-1275 on
+// the real config → engine loader: with ONLY a preset configured, the WS
+// engine built by InitPerProtocolSafetyEngines must flag a destructive
+// frame payload and pass a benign one. Before the fix the preset was
+// loaded into the WS engine (rule count 6) but every rule was skipped at
+// evaluation because its targets were {body, url, query}.
+func TestInitPerProtocolSafetyEngines_PresetGatesWSFrames(t *testing.T) {
+	tests := []struct {
+		preset  string
+		payload string
+		wantID  string
+	}{
+		{preset: "destructive-sql", payload: "DROP TABLE users", wantID: "destructive-sql:drop"},
+		{preset: "destructive-os-command", payload: "rm -rf /", wantID: "destructive-os:rm-rf"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.preset, func(t *testing.T) {
+			proxyCfg := &config.ProxyConfig{
+				SafetyFilter: &config.SafetyFilterConfig{
+					Enabled: true,
+					Input: &config.SafetyFilterInputConfig{
+						Rules: []config.SafetyFilterRuleConfig{{Preset: tc.preset}},
+					},
+				},
+			}
+			engines, err := InitPerProtocolSafetyEngines(config.Default(), proxyCfg)
+			if err != nil {
+				t.Fatalf("InitPerProtocolSafetyEngines: %v", err)
+			}
+			if engines.WS == nil {
+				t.Fatal("WS engine not built")
+			}
+			ctx := context.Background()
+			bad := &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte(tc.payload)}
+			v := engines.WS.CheckInput(ctx, bad)
+			if v == nil {
+				t.Fatalf("WS CheckInput(%q): no violation under preset %q", tc.payload, tc.preset)
+			}
+			if v.RuleID != tc.wantID {
+				t.Errorf("RuleID = %q, want %q", v.RuleID, tc.wantID)
+			}
+			benign := &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte("hello world")}
+			if v := engines.WS.CheckInput(ctx, benign); v != nil {
+				t.Errorf("benign frame produced violation: %+v", v)
 			}
 		})
 	}
