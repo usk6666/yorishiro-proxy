@@ -229,3 +229,70 @@ func TestE2E_PathScopeAllow_TCPForwards(t *testing.T) {
 		}
 	})
 }
+
+// serverFirstStreamUpstream accepts connections and, without reading,
+// writes chunks copies of payload spaced by gap, then closes.
+func serverFirstStreamUpstream(t *testing.T, payload string, chunks int, gap time.Duration) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				for i := 0; i < chunks; i++ {
+					if _, err := c.Write([]byte(payload)); err != nil {
+						return
+					}
+					time.Sleep(gap)
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// S-1 (USK-1130 review): tcp_forwards auto is admitted provisionally by a
+// path-scoped allow. With a silent client the auto peek times out and the
+// connection falls back to a raw relay, which never yields a path — so no
+// upstream byte may reach the client, and none may be recorded.
+func TestE2E_PathScopeAllow_TCPForwardAutoServerFirstRawRefused(t *testing.T) {
+	const payload = "220 server-first stream chunk\r\n"
+	target := serverFirstStreamUpstream(t, payload, 30, 250*time.Millisecond)
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: pathAllowPolicyConfig})
+	fwd := startForwards(t, h, nil, map[string]any{"target": target, "protocol": "auto"})[0]
+
+	c, err := net.DialTimeout("tcp", fwd, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial forward: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Stay silent past the 5 s auto peek and well into the stream.
+	_ = c.SetReadDeadline(time.Now().Add(9 * time.Second))
+	got, _ := io.ReadAll(c)
+	if len(got) != 0 {
+		t.Errorf("client received %d upstream bytes over a raw fallback admitted only by a path-scoped allow, want 0 (first bytes %q)",
+			len(got), got[:min(len(got), 64)])
+	}
+
+	// The refusal is audited; no recorded raw Stream carries upstream payload.
+	waitBlockedRawStream(t, h)
+	for _, f := range queryRawFlows(t, h, nil) {
+		if n, _ := f["message_count"].(float64); n != 0 {
+			t.Errorf("raw Stream %v recorded %v messages, want 0", f["id"], n)
+		}
+		if ps, _ := f["protocol_summary"].(map[string]any); ps != nil {
+			if rb, _ := ps["receive_bytes"].(string); rb != "" && rb != "0" {
+				t.Errorf("raw Stream %v recorded receive_bytes=%s, want 0", f["id"], rb)
+			}
+		}
+	}
+}
