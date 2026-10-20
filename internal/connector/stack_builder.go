@@ -727,8 +727,15 @@ type ClientHelloPeek struct {
 	ClientJA4 string
 }
 
-// BuildConnectionStack constructs a ConnectionStack for the given CONNECT
+// BuildConnectionStack constructs a ConnectionStack for the given upstream
 // target and client connection, based on per-host configuration policy.
+//
+// ut separates the upstream dial target from the TLS authority (USK-1315);
+// see UpstreamTarget for which decision reads which field. CONNECT / SOCKS5
+// pass SameUpstreamTarget(authority). The builder never substitutes
+// peeked.SNI for ut.TLS — the caller decides the TLS name. The built stack
+// records ut (ConnectionStack.UpstreamTarget) so post-build consumers such
+// as the h1 / h2 redial helpers keep the same split.
 //
 // Three modes are supported:
 //   - raw_passthrough: client [TLS MITM → ByteChunk], upstream [TLS → ByteChunk]
@@ -757,7 +764,7 @@ type ClientHelloPeek struct {
 func BuildConnectionStack(
 	ctx context.Context,
 	clientConn net.Conn,
-	target string,
+	ut UpstreamTarget,
 	cfg *BuildConfig,
 	peeked ClientHelloPeek,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
@@ -768,8 +775,9 @@ func BuildConnectionStack(
 	// rotation resolver (consulted inside dialUpstreamWithALPN via
 	// EffectiveUpstreamProxyForCtxErr) can scope state by upstream
 	// host. Idempotent — re-stamping the same key on a child ctx is
-	// harmless.
-	ctx = ContextWithDialTarget(ctx, target)
+	// harmless. USK-1315: the stamp is the dial target — the value the
+	// rotation resolver's per_target_host slot is keyed on.
+	ctx = ContextWithDialTarget(ctx, ut.Dial)
 	if cfg.Issuer == nil {
 		return nil, nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil issuer")
 	}
@@ -777,11 +785,22 @@ func BuildConnectionStack(
 	connID := uuid.New().String()
 
 	// Raw passthrough mode bypasses ALPN routing entirely — always ByteChunk.
-	if cfg.ProxyConfig.IsRawPassthrough(target) {
-		return buildRawPassthroughStack(ctx, clientConn, target, connID, cfg)
+	// raw_passthrough_hosts names a TLS authority (USK-1315).
+	var (
+		stack                    *ConnectionStack
+		clientSnap, upstreamSnap *envelope.TLSSnapshot
+		err                      error
+	)
+	if ut.isRawPassthrough(cfg) {
+		stack, clientSnap, upstreamSnap, err = buildRawPassthroughStack(ctx, clientConn, ut, connID, cfg)
+	} else {
+		stack, clientSnap, upstreamSnap, err = buildALPNRoutedStack(ctx, clientConn, ut, connID, cfg, peeked)
 	}
-
-	return buildALPNRoutedStack(ctx, clientConn, target, connID, cfg, peeked)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	stack.setUpstreamTarget(ut)
+	return stack, clientSnap, upstreamSnap, nil
 }
 
 // buildALPNRoutedStack dials upstream first to learn the negotiated ALPN,
@@ -914,6 +933,11 @@ func (c *BuildConfig) SetRequestHeaderTimeout(d time.Duration) {
 // Each layer overrides only the fields it provides, so a runtime registry
 // entry that sets only ClientCert leaves InsecureSkipVerify / RootCAs from
 // earlier layers untouched.
+//
+// target is the TLS authority ("host:port", UpstreamTarget.TLS — USK-1315):
+// per-host TLS settings describe the name the proxy authenticates, not the
+// address it dials. Both lookups strip the port (extractHost), so the port
+// part plays no role.
 func resolvePerHostTLS(target string, cfg *BuildConfig) (*resolvedTLS, error) {
 	r := &resolvedTLS{
 		insecureSkip: cfg.InsecureSkipVerify,
@@ -1005,7 +1029,8 @@ func applyHostTLSRegistry(r *resolvedTLS, target string, reg *transport.HostTLSR
 func tryH2PoolFastPath(
 	ctx context.Context,
 	clientConn net.Conn,
-	target, host, connID string,
+	ut UpstreamTarget,
+	host, connID string,
 	peeked ClientHelloPeek,
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
@@ -1013,7 +1038,8 @@ func tryH2PoolFastPath(
 	if cfg.HTTP2Pool == nil {
 		return nil, nil, nil, false, nil
 	}
-	poolKey := poolKeyForH2(ctx, target, cfg, hostTLS)
+	target := ut.Dial
+	poolKey := poolKeyForH2(ctx, ut, cfg, hostTLS)
 	pooled, perr := cfg.HTTP2Pool.Get(poolKey)
 	if perr != nil || pooled == nil {
 		return nil, nil, nil, false, nil
@@ -1028,29 +1054,32 @@ func tryH2PoolFastPath(
 		)
 		return nil, nil, nil, false, nil
 	}
-	stack, cs, us, ferr := buildPoolHitFastPath(ctx, clientConn, target, host, connID, pooled, poolKey, cfg, peeked)
+	stack, cs, us, ferr := buildPoolHitFastPath(ctx, clientConn, ut, host, connID, pooled, poolKey, cfg, peeked)
 	return stack, cs, us, true, ferr
 }
 
 func buildALPNRoutedStack(
 	ctx context.Context,
 	clientConn net.Conn,
-	target string,
+	ut UpstreamTarget,
 	connID string,
 	cfg *BuildConfig,
 	peeked ClientHelloPeek,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
-	host, _, err := net.SplitHostPort(target)
+	// host is the TLS host (MITM cert + upstream ServerName); target is
+	// the dial target (USK-1315).
+	host, err := ut.validate()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("connector: invalid target %q: %w", target, err)
+		return nil, nil, nil, err
 	}
+	target := ut.Dial
 
-	hostTLS, err := resolvePerHostTLS(target, cfg)
+	hostTLS, err := resolvePerHostTLS(ut.tlsAuthority(), cfg)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	if stack, cs, us, handled, ferr := tryH2PoolFastPath(ctx, clientConn, target, host, connID, peeked, hostTLS, cfg); handled {
+	if stack, cs, us, handled, ferr := tryH2PoolFastPath(ctx, clientConn, ut, host, connID, peeked, hostTLS, cfg); handled {
 		return stack, cs, us, ferr
 	}
 
@@ -1060,14 +1089,14 @@ func buildALPNRoutedStack(
 	// legacy mismatch-redial logic stays reachable only for the fallback
 	// path (peeked.ALPN == nil).
 	if peeked.ALPN != nil {
-		return buildSniffFirstStack(ctx, clientConn, target, host, connID, peeked, hostTLS, cfg)
+		return buildSniffFirstStack(ctx, clientConn, ut, host, connID, peeked, hostTLS, cfg)
 	}
 
 	// Check ALPN cache.
 	var cacheKey ALPNCacheKey
 	cachedALPN, cacheHit := "", false
 	if cfg.ALPNCache != nil {
-		cacheKey = ALPNCacheKeyFromConfig(target, cfg)
+		cacheKey = ALPNCacheKeyFromConfig(ut, cfg)
 		if entry, ok := cfg.ALPNCache.Get(cacheKey); ok {
 			cachedALPN = entry.Protocol
 			cacheHit = true
@@ -1118,7 +1147,7 @@ func buildALPNRoutedStack(
 		"route", route, "cache_hit", cacheHit,
 	)
 
-	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, upstreamSnap, hostTLS, cfg)
+	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, ut, connID, route, clientSnap, upstreamSnap, hostTLS, cfg)
 }
 
 // buildCacheHitPath handles the ALPN cache hit: client MITM first offering
@@ -1328,11 +1357,13 @@ func buildCacheMissPath(
 func buildSniffFirstStack(
 	ctx context.Context,
 	clientConn net.Conn,
-	target, host, connID string,
+	ut UpstreamTarget,
+	host, connID string,
 	peeked ClientHelloPeek,
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
+	target := ut.Dial
 	// Step 1: dial upstream with the client's offered list verbatim.
 	upstreamConn, upstreamSnap, err := dialUpstreamWithALPN(ctx, target, host,
 		peeked.ALPN, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
@@ -1402,7 +1433,7 @@ func buildSniffFirstStack(
 	// Step 5: cache the learned upstream pick. Single string per Resolved
 	// Decision #13 / User-Confirmed Decision #U2 — schema unchanged.
 	if cfg.ALPNCache != nil {
-		cacheKey := ALPNCacheKeyFromConfig(target, cfg)
+		cacheKey := ALPNCacheKeyFromConfig(ut, cfg)
 		cfg.ALPNCache.Set(cacheKey, upstreamALPN)
 	}
 
@@ -1423,7 +1454,7 @@ func buildSniffFirstStack(
 		"route", route,
 	)
 
-	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, upstreamSnap, hostTLS, cfg)
+	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, ut, connID, route, clientSnap, upstreamSnap, hostTLS, cfg)
 }
 
 // buildPoolHitFastPath constructs the ConnectionStack without dialing
@@ -1455,12 +1486,14 @@ func buildSniffFirstStack(
 func buildPoolHitFastPath(
 	ctx context.Context,
 	clientConn net.Conn,
-	target, host, connID string,
+	ut UpstreamTarget,
+	host, connID string,
 	pooled *http2.Layer,
 	poolKey pool.PoolKey,
 	cfg *BuildConfig,
 	peeked ClientHelloPeek,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
+	target := ut.Dial
 	clientOffers := clientALPNOffersForUpstream(ALPNProtocolH2)
 	// USK-997: when the client's offer list is in hand and includes h2,
 	// narrow to [h2] only — the sniff already confirmed h2 is acceptable
@@ -1494,7 +1527,7 @@ func buildPoolHitFastPath(
 		slog.Debug("connector: pool hit but client picked non-h2 ALPN; falling back to fresh dial",
 			"target", target, "conn_id", connID, "client_alpn", clientALPN,
 		)
-		return fallbackPoolHitToFreshDial(ctx, clientTLSConn, clientSnap, target, host, connID, cfg)
+		return fallbackPoolHitToFreshDial(ctx, clientTLSConn, clientSnap, ut, host, connID, cfg)
 	}
 
 	upstreamSnap := pooled.EnvelopeContextTemplate().TLS
@@ -1559,10 +1592,12 @@ func fallbackPoolHitToFreshDial(
 	ctx context.Context,
 	clientTLSConn net.Conn,
 	clientSnap *envelope.TLSSnapshot,
-	target, host, connID string,
+	ut UpstreamTarget,
+	host, connID string,
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
-	hostTLS, err := resolvePerHostTLS(target, cfg)
+	target := ut.Dial
+	hostTLS, err := resolvePerHostTLS(ut.tlsAuthority(), cfg)
 	if err != nil {
 		_ = clientTLSConn.Close()
 		return nil, nil, nil, err
@@ -1593,7 +1628,7 @@ func fallbackPoolHitToFreshDial(
 		"client_alpn", clientALPN, "route", route,
 	)
 
-	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, upstreamSnap, hostTLS, cfg)
+	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, ut, connID, route, clientSnap, upstreamSnap, hostTLS, cfg)
 }
 
 // performClientMITM performs the client-side TLS MITM handshake, issuing a
@@ -1674,6 +1709,10 @@ func performClientMITM(
 // connection, the full upstream TLS snapshot (authoritative upstream reality
 // for downstream EnvelopeContext stamping and ConnInfo recording), and any
 // error. Callers extract the negotiated ALPN from snap.ALPN.
+//
+// target is the dial target (also the upstream-proxy CONNECT authority when
+// an upstream proxy is configured); host is the TLS host sent as ServerName
+// (USK-1315).
 func dialUpstreamWithALPN(
 	ctx context.Context,
 	target, host string,
@@ -1747,11 +1786,16 @@ func fireTLSHandshakeHook(ctx context.Context, cfg *BuildConfig, side string, sn
 func buildStackFromRoute(
 	ctx context.Context,
 	clientConn, upstreamConn net.Conn,
-	target, connID, route string,
+	ut UpstreamTarget,
+	connID, route string,
 	clientSnap, upstreamSnap *envelope.TLSSnapshot,
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
+	// USK-1315: TargetHost is the dial target — the host the upstream leg
+	// is bound to (RFC-001 §3.4). The TLS name stays visible on
+	// Context.TLS.SNI.
+	target := ut.Dial
 	clientEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
 		TargetHost: target,
@@ -1799,7 +1843,7 @@ func buildStackFromRoute(
 		stack.PushUpstream(upstreamLayer)
 
 	case "h2":
-		return buildH2Stack(ctx, stack, clientConn, upstreamConn, target, connID, clientEnvCtx, upstreamEnvCtx, clientSnap, upstreamSnap, hostTLS, cfg)
+		return buildH2Stack(ctx, stack, clientConn, upstreamConn, ut, connID, clientEnvCtx, upstreamEnvCtx, clientSnap, upstreamSnap, hostTLS, cfg)
 
 	case "bytechunk":
 		// USK-1083: stamp the per-leg context like the http1 / h2 routes
@@ -1848,7 +1892,8 @@ func buildH2Stack(
 	ctx context.Context,
 	stack *ConnectionStack,
 	clientConn, upstreamConn net.Conn,
-	target, connID string,
+	ut UpstreamTarget,
+	connID string,
 	clientEnvCtx, upstreamEnvCtx envelope.EnvelopeContext,
 	clientSnap, upstreamSnap *envelope.TLSSnapshot,
 	hostTLS *resolvedTLS,
@@ -1860,7 +1905,8 @@ func buildH2Stack(
 	// (ServerRole-then-ClientRole) emitted ENABLE_CONNECT_PROTOCOL=1
 	// unconditionally, which misled browsers into using Extended CONNECT
 	// (RFC 8441) for WS on h1.1-only upstreams.
-	poolKey := poolKeyForH2(ctx, target, cfg, hostTLS)
+	target := ut.Dial
+	poolKey := poolKeyForH2(ctx, ut, cfg, hostTLS)
 
 	// consumed tracks whether dialFn ran (true = upstreamConn is owned by
 	// http2.New and must not be closed by the caller). On pool hit, remains
@@ -2049,14 +2095,17 @@ func resolveEnableConnectProtocol(ctx context.Context, upstream *http2.Layer, po
 func buildRawPassthroughStack(
 	ctx context.Context,
 	clientConn net.Conn,
-	target string,
+	ut UpstreamTarget,
 	connID string,
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
-	host, _, err := net.SplitHostPort(target)
+	// host is the TLS host (MITM cert + upstream ServerName); target is
+	// the dial target (USK-1315), the same split buildALPNRoutedStack uses.
+	host, err := ut.validate()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("connector: invalid target %q: %w", target, err)
+		return nil, nil, nil, err
 	}
+	target := ut.Dial
 
 	// --- Client-side TLS MITM ---
 
@@ -2095,7 +2144,7 @@ func buildRawPassthroughStack(
 
 	// Apply per-host TLS overrides. Resolution order (USK-733):
 	// HostTLSResolver (startup-time) → HostTLSRegistry (runtime-mutable).
-	hostTLS, resolveErr := resolvePerHostTLS(target, cfg)
+	hostTLS, resolveErr := resolvePerHostTLS(ut.tlsAuthority(), cfg)
 	if resolveErr != nil {
 		clientTLSConn.Close()
 		return nil, nil, nil, resolveErr

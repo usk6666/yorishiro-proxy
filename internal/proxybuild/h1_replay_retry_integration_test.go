@@ -167,7 +167,7 @@ func buildFlakyChainWithMetrics(
 	// match production CONNECT-MITM shape.
 	cfg := &connector.BuildConfig{InsecureSkipVerify: true}
 
-	chain := newH1Chain(initial, s.addr, cfg, nil, metrics)
+	chain := newH1Chain(initial, connector.SameUpstreamTarget(s.addr), cfg, nil, metrics)
 	t.Cleanup(func() { chain.closeAll() })
 
 	return chain, initial, flaky

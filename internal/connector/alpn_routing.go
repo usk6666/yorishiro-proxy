@@ -215,8 +215,8 @@ func canonicalRedialALPNOffer(clientALPN string) []string {
 	return []string{clientALPN}
 }
 
-// ALPNCacheKeyFromConfig constructs an ALPNCacheKey for the given target
-// using the TLS configuration from BuildConfig. The fingerprint
+// ALPNCacheKeyFromConfig constructs an ALPNCacheKey for the given upstream
+// target using the TLS configuration from BuildConfig. The fingerprint
 // component reads via EffectiveUTLSProfile so a runtime
 // proxy_start / configure fingerprint switch produces a distinct cache
 // key — ALPN learned under the previous fingerprint is not reused for
@@ -224,9 +224,14 @@ func canonicalRedialALPNOffer(clientALPN string) []string {
 // resolved (dial-identity) form is used so a boot-time "none" and a
 // runtime "none" share one keyspace, matching the handshakes they
 // actually key (USK-1021).
-func ALPNCacheKeyFromConfig(target string, cfg *BuildConfig) ALPNCacheKey {
+//
+// USK-1315: HostPort is the dial target and ServerName the TLS authority's
+// host, so two virtual hosts behind one IP:port learn their ALPN
+// independently.
+func ALPNCacheKeyFromConfig(ut UpstreamTarget, cfg *BuildConfig) ALPNCacheKey {
 	key := ALPNCacheKey{
-		HostPort:    target,
+		HostPort:    ut.Dial,
+		ServerName:  ut.tlsHost(),
 		Fingerprint: cfg.EffectiveUTLSProfile(),
 	}
 	if cfg.ClientCert != nil {

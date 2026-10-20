@@ -219,8 +219,10 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		// USK-1130: classify the route once, from host-keyed config, so
 		// the admission check, the live-connection predicate and the
 		// passthrough decision below agree even if the passthrough list
-		// changes meanwhile.
-		route := classifyTunnelRoute(cfg.PassthroughList, cfg.BuildCfg, target)
+		// changes meanwhile. A CONNECT authority is both the dial target
+		// and the TLS authority (USK-1315).
+		ut := SameUpstreamTarget(target)
+		route := classifyTunnelRoute(cfg.PassthroughList, cfg.BuildCfg, ut)
 
 		// Step 2-3: scope and rate-limit policy checks. A denial is
 		// answered with 403 / 429 and the connection closes (USK-1246).
@@ -259,12 +261,12 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		// Step 5: inner-byte peek + dispatch (USK-762). Returns true when
 		// the peek classified the inner stream as TLS and the caller should
 		// drive the existing BuildConnectionStack path.
-		if !connectShouldRunTLSMITM(ctx, cfg, pc, target, connLogger) {
+		if !connectShouldRunTLSMITM(ctx, cfg, pc, ut, connLogger) {
 			return nil
 		}
 
 		// Step 6: TLS MITM path (existing behaviour).
-		runTLSMITM(ctx, cfg.BuildCfg, pc, target, cfg.OnStack, cfg.OnHTTP2Stack, cfg.OnUpstreamTLSError, connLogger)
+		runTLSMITM(ctx, cfg.BuildCfg, pc, ut, cfg.OnStack, cfg.OnHTTP2Stack, cfg.OnUpstreamTLSError, connLogger)
 		return nil
 	}
 }
@@ -374,17 +376,18 @@ type tunnelRoute struct {
 // opaque reports that no HTTP request path is ever observed on the route.
 func (r tunnelRoute) opaque() bool { return r.passthrough || r.rawPassthrough }
 
-// classifyTunnelRoute classifies target against the TLS passthrough list
-// and raw_passthrough_hosts. Nil arguments contribute nothing.
-func classifyTunnelRoute(pl *PassthroughList, buildCfg *BuildConfig, target string) tunnelRoute {
+// classifyTunnelRoute classifies ut against the TLS passthrough list and
+// raw_passthrough_hosts. Both lists name TLS hosts, so both are matched
+// against the TLS authority (USK-1315); CONNECT / SOCKS5 pass
+// SameUpstreamTarget, so the decision is unchanged for them. Nil arguments
+// contribute nothing.
+func classifyTunnelRoute(pl *PassthroughList, buildCfg *BuildConfig, ut UpstreamTarget) tunnelRoute {
 	var r tunnelRoute
 	if pl != nil {
-		host, _, _ := net.SplitHostPort(target)
+		host, _, _ := net.SplitHostPort(ut.tlsAuthority())
 		r.passthrough = pl.Contains(host)
 	}
-	if buildCfg != nil && buildCfg.ProxyConfig != nil {
-		r.rawPassthrough = buildCfg.ProxyConfig.IsRawPassthrough(target)
-	}
+	r.rawPassthrough = ut.isRawPassthrough(buildCfg)
 	return r
 }
 
@@ -393,7 +396,7 @@ func classifyTunnelRoute(pl *PassthroughList, buildCfg *BuildConfig, target stri
 // passthrough relay or a raw_passthrough_hosts target (USK-1130). It is
 // the SOCKS5Negotiator.OpaqueRoute production wiring.
 func TunnelRouteOpaque(pl *PassthroughList, buildCfg *BuildConfig, target string) bool {
-	return classifyTunnelRoute(pl, buildCfg, target).opaque()
+	return classifyTunnelRoute(pl, buildCfg, SameUpstreamTarget(target)).opaque()
 }
 
 // connectPassthrough handles the TLS passthrough relay. relay is the
@@ -452,12 +455,11 @@ func runPassthroughRelay(ctx context.Context, pc *PeekConn, target string, opts 
 //
 // Raw passthrough hosts (config-level) skip the inner peek entirely so the
 // IsRawPassthrough override remains identical to its pre-USK-762 behaviour.
-func connectShouldRunTLSMITM(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekConn, target string, logger *slog.Logger) bool {
-	if cfg.BuildCfg != nil && cfg.BuildCfg.ProxyConfig != nil &&
-		cfg.BuildCfg.ProxyConfig.IsRawPassthrough(target) {
+func connectShouldRunTLSMITM(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekConn, ut UpstreamTarget, logger *slog.Logger) bool {
+	if ut.isRawPassthrough(cfg.BuildCfg) {
 		return true
 	}
-	return dispatchInnerProtocol(ctx, pc, target, innerDispatchConfig{
+	return dispatchInnerProtocol(ctx, pc, ut.Dial, innerDispatchConfig{
 		PeekTimeout:         cfg.InnerPeekTimeout,
 		PeekTimeoutProvider: cfg.InnerPeekTimeoutProvider,
 		BuildCfg:            cfg.BuildCfg,
@@ -484,8 +486,13 @@ func connectShouldRunTLSMITM(ctx context.Context, cfg CONNECTHandlerConfig, pc *
 // BuildConfig.DisableClientHelloPeek (test-only) skips the peek entirely
 // so integration tests can exercise the fallback path.
 //
+// ut is the dial target / TLS authority split handed to BuildConnectionStack
+// (USK-1315). The callbacks below receive ut.Dial as their target — the
+// value stamped as EnvelopeContext.TargetHost; post-build consumers that
+// need the TLS name read it back with UpstreamTargetOf(stack, target).
+//
 // On stack-build failure, onUpstreamTLSError (when non-nil) is invoked with
-// the CONNECT/SOCKS5 authority and the underlying error so callers
+// the CONNECT/SOCKS5 authority (ut.Dial) and the underlying error so callers
 // (proxybuild) can persist a state="error" flow.Stream — the USK-784 parity
 // fix for HTTP/1.x HTTPS upstream-TLS-handshake errors. Nil disables the
 // callback path; the failure is then logged and dropped silently, matching
@@ -494,7 +501,7 @@ func runTLSMITM(
 	ctx context.Context,
 	buildCfg *BuildConfig,
 	pc *PeekConn,
-	target string,
+	ut UpstreamTarget,
 	onStack OnStackFunc,
 	onHTTP2Stack OnHTTP2StackFunc,
 	onUpstreamTLSError OnUpstreamTLSErrorFunc,
@@ -506,7 +513,7 @@ func runTLSMITM(
 		peeked = peekClientHelloSNIAndALPN(pc)
 	}
 
-	stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, buildCfg, peeked)
+	stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, ut, buildCfg, peeked)
 	if err != nil {
 		// Upstream-side / stack-build failures land here. Clients see a
 		// closed tunnel; without a recorded Stream the failure is invisible
@@ -515,7 +522,7 @@ func runTLSMITM(
 		// and the error reason (USK-784 parity with USK-188).
 		logger.Warn("stack build failed", "error", err)
 		if onUpstreamTLSError != nil {
-			onUpstreamTLSError(ctx, target, err)
+			onUpstreamTLSError(ctx, ut.Dial, err)
 		}
 		return
 	}
@@ -523,7 +530,7 @@ func runTLSMITM(
 	// release per-connection rotation state when the client disconnects.
 	stack.SetBuildConfig(buildCfg)
 	logger.Debug("connection stack built")
-	dispatchStack(ctx, stack, clientSnap, upstreamSnap, target, buildCfg, onStack, onHTTP2Stack)
+	dispatchStack(ctx, stack, clientSnap, upstreamSnap, ut.Dial, buildCfg, onStack, onHTTP2Stack)
 }
 
 // dispatchStack picks between OnHTTP2Stack (when the stack has a pooled

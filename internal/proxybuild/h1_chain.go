@@ -42,8 +42,13 @@ type h1Chain struct {
 	mu      sync.Mutex
 	current *http1.Layer
 	layers  []*http1.Layer
-	target  string
+	target  string // dial target (upstream.Dial), for logs
 	cfg     *connector.BuildConfig
+
+	// upstream is the stack's dial target / TLS authority split
+	// (USK-1315); every redial dials upstream.Dial under the TLS name
+	// upstream.TLS.
+	upstream connector.UpstreamTarget
 
 	// logger is used for stale-detect / redial-success / redial-failure
 	// observability per CLAUDE.md Log Level Guidelines. Debug for normal
@@ -73,18 +78,19 @@ type h1Chain struct {
 // identically minus the observability emit.
 func newH1Chain(
 	initial *http1.Layer,
-	target string,
+	upstream connector.UpstreamTarget,
 	cfg *connector.BuildConfig,
 	logger *slog.Logger,
 	metrics *H1UpstreamMetrics,
 ) *h1Chain {
 	return &h1Chain{
-		current: initial,
-		layers:  []*http1.Layer{initial},
-		target:  target,
-		cfg:     cfg,
-		logger:  logger,
-		metrics: metrics,
+		current:  initial,
+		layers:   []*http1.Layer{initial},
+		target:   upstream.Dial,
+		cfg:      cfg,
+		upstream: upstream,
+		logger:   logger,
+		metrics:  metrics,
 	}
 }
 
@@ -115,7 +121,7 @@ func (c *h1Chain) EnsureFresh(ctx context.Context) (*http1.Layer, error) {
 		c.logger.Debug("proxybuild: http1 stale detected, redialing",
 			"target", c.target, "trigger", "healthcheck", "generation", len(c.layers))
 	}
-	fresh, err := connector.RedialUpstreamH1(ctx, c.target, c.current, c.cfg, len(c.layers))
+	fresh, err := connector.RedialUpstreamH1(ctx, c.upstream, c.current, c.cfg, len(c.layers))
 	if err != nil {
 		c.metrics.incRedialFailedHealthcheck()
 		if c.logger != nil {
@@ -162,7 +168,7 @@ func (c *h1Chain) EnsureFresh(ctx context.Context) (*http1.Layer, error) {
 func (c *h1Chain) Redial(ctx context.Context) (*http1.Layer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	fresh, err := connector.RedialUpstreamH1(ctx, c.target, c.current, c.cfg, len(c.layers))
+	fresh, err := connector.RedialUpstreamH1(ctx, c.upstream, c.current, c.cfg, len(c.layers))
 	if err != nil {
 		c.metrics.incRedialFailedWriteEpipe()
 		if c.logger != nil {

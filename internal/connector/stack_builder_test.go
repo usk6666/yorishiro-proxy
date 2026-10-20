@@ -107,7 +107,7 @@ func runRawPassthroughStack(t *testing.T, tlsFingerprint string) {
 			resultCh <- buildResult{nil, err}
 			return
 		}
-		stack, _, _, err := BuildConnectionStack(context.Background(), serverConn, target, buildCfg, ClientHelloPeek{})
+		stack, _, _, err := BuildConnectionStack(context.Background(), serverConn, SameUpstreamTarget(target), buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack, err}
 	}()
 
@@ -230,7 +230,7 @@ func TestBuildConnectionStack_HTTPMITMStack(t *testing.T) {
 			resultCh <- buildResult{err: err}
 			return
 		}
-		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(context.Background(), serverConn, target, buildCfg, ClientHelloPeek{})
+		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(context.Background(), serverConn, SameUpstreamTarget(target), buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack, clientSnap, upstreamSnap, err}
 	}()
 
@@ -317,7 +317,7 @@ func TestBuildConnectionStack_NilConfig(t *testing.T) {
 	defer clientConn.Close()
 	defer proxyConn.Close()
 
-	_, _, _, err := BuildConnectionStack(context.Background(), proxyConn, "example.com:443", nil, ClientHelloPeek{})
+	_, _, _, err := BuildConnectionStack(context.Background(), proxyConn, SameUpstreamTarget("example.com:443"), nil, ClientHelloPeek{})
 	if err == nil {
 		t.Error("expected error for nil config")
 	}
@@ -410,7 +410,7 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 			resultCh <- buildResult{err: acceptErr}
 			return
 		}
-		stack, clientSnap, upstreamSnap, buildErr := BuildConnectionStack(context.Background(), serverConn, target, buildCfg, ClientHelloPeek{})
+		stack, clientSnap, upstreamSnap, buildErr := BuildConnectionStack(context.Background(), serverConn, SameUpstreamTarget(target), buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack, clientSnap, upstreamSnap, buildErr}
 	}()
 
@@ -484,7 +484,7 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 		if hostTLSErr != nil {
 			t.Fatalf("resolvePerHostTLS: %v", hostTLSErr)
 		}
-		wantKey := poolKeyForH2(context.Background(), target, buildCfg, wantHostTLS)
+		wantKey := poolKeyForH2(context.Background(), SameUpstreamTarget(target), buildCfg, wantHostTLS)
 		if gotKey := stack.PoolKey(); gotKey != wantKey {
 			t.Errorf("PoolKey = %+v, want %+v", gotKey, wantKey)
 		}
@@ -633,7 +633,7 @@ func TestBuildConnectionStack_H2PoolFastPath_ClientMITMFailReleasesReservation(t
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS: %v", err)
 	}
-	poolKey := poolKeyForH2(context.Background(), target, buildCfg, hostTLSForKey)
+	poolKey := poolKeyForH2(context.Background(), SameUpstreamTarget(target), buildCfg, hostTLSForKey)
 	h2Pool.Put(poolKey, cached)
 
 	// Sanity: pool returns the cached Layer on first Get (and increments
@@ -664,7 +664,7 @@ func TestBuildConnectionStack_H2PoolFastPath_ClientMITMFailReleasesReservation(t
 			resultCh <- buildResult{err: acceptErr}
 			return
 		}
-		stack, _, _, buildErr := BuildConnectionStack(context.Background(), serverConn, target, buildCfg, ClientHelloPeek{})
+		stack, _, _, buildErr := BuildConnectionStack(context.Background(), serverConn, SameUpstreamTarget(target), buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack: stack, err: buildErr}
 	}()
 
@@ -735,7 +735,7 @@ func TestBuildPoolHitFastPath_TakesFastPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS: %v", err)
 	}
-	poolKey := poolKeyForH2(context.Background(), target, buildCfg, hostTLSForKey)
+	poolKey := poolKeyForH2(context.Background(), SameUpstreamTarget(target), buildCfg, hostTLSForKey)
 	h2Pool.Put(poolKey, cached)
 
 	pooled, err := h2Pool.Get(poolKey)
@@ -752,7 +752,7 @@ func TestBuildPoolHitFastPath_TakesFastPath(t *testing.T) {
 	buildCfg.ResetClientMITMHandshakeCount()
 
 	_, _, _, ferr := buildPoolHitFastPath(
-		context.Background(), clientConn, target, "127.0.0.1", "test-conn",
+		context.Background(), clientConn, SameUpstreamTarget(target), "127.0.0.1", "test-conn",
 		pooled, poolKey, buildCfg, ClientHelloPeek{},
 	)
 
@@ -779,8 +779,8 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 	}
 	target := "example.com:443"
 
-	k1 := poolKeyForH2(context.Background(), target, baseCfg, nil)
-	k2 := poolKeyForH2(context.Background(), target, baseCfg, nil)
+	k1 := poolKeyForH2(context.Background(), SameUpstreamTarget(target), baseCfg, nil)
+	k2 := poolKeyForH2(context.Background(), SameUpstreamTarget(target), baseCfg, nil)
 	if k1 != k2 {
 		t.Errorf("stable: k1=%+v k2=%+v", k1, k2)
 	}
@@ -798,7 +798,7 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 		InsecureSkipVerify: true,
 		TLSFingerprint:     "chrome",
 	}
-	kAlt := poolKeyForH2(context.Background(), target, altCfg, nil)
+	kAlt := poolKeyForH2(context.Background(), SameUpstreamTarget(target), altCfg, nil)
 	if kAlt.TLSConfigHash == k1.TLSConfigHash {
 		t.Error("InsecureSkipVerify change did not affect hash")
 	}
@@ -808,14 +808,14 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 		InsecureSkipVerify: false,
 		TLSFingerprint:     "firefox",
 	}
-	kAlt2 := poolKeyForH2(context.Background(), target, altCfg2, nil)
+	kAlt2 := poolKeyForH2(context.Background(), SameUpstreamTarget(target), altCfg2, nil)
 	if kAlt2.TLSConfigHash == k1.TLSConfigHash {
 		t.Error("TLSFingerprint change did not affect hash")
 	}
 
 	// Different target -> different HostPort (hash may collide if canonical
 	// bytes happen to match, but HostPort differs which is part of the key).
-	kOther := poolKeyForH2(context.Background(), "other.example.com:443", baseCfg, nil)
+	kOther := poolKeyForH2(context.Background(), SameUpstreamTarget("other.example.com:443"), baseCfg, nil)
 	if kOther == k1 {
 		t.Error("different target produced identical PoolKey")
 	}
@@ -824,7 +824,7 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 // TestPoolKeyForH2_NilCfg ensures the helper survives a nil BuildConfig
 // (used by some tunnel paths that only carry an UpstreamProxy).
 func TestPoolKeyForH2_NilCfg(t *testing.T) {
-	k := poolKeyForH2(context.Background(), "example.com:443", nil, nil)
+	k := poolKeyForH2(context.Background(), SameUpstreamTarget("example.com:443"), nil, nil)
 	if k.HostPort != "example.com:443" {
 		t.Errorf("HostPort = %q, want %q", k.HostPort, "example.com:443")
 	}
@@ -859,7 +859,7 @@ func TestPoolKeyForH2_RegistryClientCertReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS A: %v", err)
 	}
-	keyUnderA := poolKeyForH2(context.Background(), target, cfg, hostTLSA)
+	keyUnderA := poolKeyForH2(context.Background(), SameUpstreamTarget(target), cfg, hostTLSA)
 
 	// Step 2: replace with cert B. Resolve and mint the pool key under B.
 	reg.SetGlobal(&transport.HostTLSConfig{
@@ -870,7 +870,7 @@ func TestPoolKeyForH2_RegistryClientCertReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS B: %v", err)
 	}
-	keyUnderB := poolKeyForH2(context.Background(), target, cfg, hostTLSB)
+	keyUnderB := poolKeyForH2(context.Background(), SameUpstreamTarget(target), cfg, hostTLSB)
 
 	if keyUnderA == keyUnderB {
 		t.Fatalf("pool key did not change after registry cert replacement: %+v", keyUnderA)
@@ -883,7 +883,7 @@ func TestPoolKeyForH2_RegistryClientCertReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS none: %v", err)
 	}
-	keyNoCert := poolKeyForH2(context.Background(), target, cfg, hostTLSNone)
+	keyNoCert := poolKeyForH2(context.Background(), SameUpstreamTarget(target), cfg, hostTLSNone)
 	if keyNoCert == keyUnderA || keyNoCert == keyUnderB {
 		t.Fatalf("clearing registry did not change pool key: noCert=%+v A=%+v B=%+v", keyNoCert, keyUnderA, keyUnderB)
 	}
@@ -907,14 +907,14 @@ func TestPoolKeyForH2_RegistryInsecureSkipVerifyToggle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS verify=true: %v", err)
 	}
-	keyVerify := poolKeyForH2(context.Background(), target, cfg, hostTLSVerify)
+	keyVerify := poolKeyForH2(context.Background(), SameUpstreamTarget(target), cfg, hostTLSVerify)
 
 	reg.SetGlobal(&transport.HostTLSConfig{TLSVerify: &verifyFalse})
 	hostTLSInsecure, err := resolvePerHostTLS(target, cfg)
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS verify=false: %v", err)
 	}
-	keyInsecure := poolKeyForH2(context.Background(), target, cfg, hostTLSInsecure)
+	keyInsecure := poolKeyForH2(context.Background(), SameUpstreamTarget(target), cfg, hostTLSInsecure)
 
 	if keyVerify == keyInsecure {
 		t.Fatalf("pool key did not change after TLSVerify toggle: %+v", keyVerify)
@@ -950,7 +950,7 @@ func TestPoolKeyForH2_RegistryCABundleReplacement(t *testing.T) {
 	if hostTLSA.caBundleHash == "" {
 		t.Fatal("caBundleHash empty after CA bundle install (USK-737)")
 	}
-	keyUnderA := poolKeyForH2(context.Background(), target, cfg, hostTLSA)
+	keyUnderA := poolKeyForH2(context.Background(), SameUpstreamTarget(target), cfg, hostTLSA)
 
 	// Bundle B.
 	reg.SetGlobal(&transport.HostTLSConfig{CABundlePath: caB})
@@ -961,7 +961,7 @@ func TestPoolKeyForH2_RegistryCABundleReplacement(t *testing.T) {
 	if hostTLSB.caBundleHash == hostTLSA.caBundleHash {
 		t.Fatal("caBundleHash did not change after CA bundle replacement")
 	}
-	keyUnderB := poolKeyForH2(context.Background(), target, cfg, hostTLSB)
+	keyUnderB := poolKeyForH2(context.Background(), SameUpstreamTarget(target), cfg, hostTLSB)
 
 	if keyUnderA == keyUnderB {
 		t.Fatalf("pool key did not change after CA bundle replacement: %+v", keyUnderA)
@@ -1297,8 +1297,8 @@ func TestALPNCacheKeyFromConfig_NoneResolvesToDialIdentity(t *testing.T) {
 	runtimeNone := &BuildConfig{TLSFingerprint: "firefox"}
 	runtimeNone.SetTLSFingerprint("none")
 
-	bootKey := ALPNCacheKeyFromConfig(target, bootNone)
-	runtimeKey := ALPNCacheKeyFromConfig(target, runtimeNone)
+	bootKey := ALPNCacheKeyFromConfig(SameUpstreamTarget(target), bootNone)
+	runtimeKey := ALPNCacheKeyFromConfig(SameUpstreamTarget(target), runtimeNone)
 
 	if bootKey.Fingerprint != "" {
 		t.Errorf("boot none Fingerprint = %q, want %q (resolved dial identity)", bootKey.Fingerprint, "")
@@ -1309,7 +1309,7 @@ func TestALPNCacheKeyFromConfig_NoneResolvesToDialIdentity(t *testing.T) {
 
 	// A real profile must still key distinctly from the opt-out.
 	firefox := &BuildConfig{TLSFingerprint: "firefox"}
-	if ALPNCacheKeyFromConfig(target, firefox) == bootKey {
+	if ALPNCacheKeyFromConfig(SameUpstreamTarget(target), firefox) == bootKey {
 		t.Error("firefox and none produced identical ALPN cache keys; ALPN learned under a uTLS parrot must not be reused for a standard-TLS dial")
 	}
 }
@@ -1324,13 +1324,13 @@ func TestPoolKeyForH2_NoneResolvesToDialIdentity(t *testing.T) {
 	runtimeNone := &BuildConfig{TLSFingerprint: "firefox"}
 	runtimeNone.SetTLSFingerprint("none")
 
-	bootKey := poolKeyForH2(ctx, target, bootNone, nil)
-	if bootKey != poolKeyForH2(ctx, target, runtimeNone, nil) {
+	bootKey := poolKeyForH2(ctx, SameUpstreamTarget(target), bootNone, nil)
+	if bootKey != poolKeyForH2(ctx, SameUpstreamTarget(target), runtimeNone, nil) {
 		t.Error("boot none and runtime none produced different h2 pool keys; identical dials must share one keyspace")
 	}
 
 	firefox := &BuildConfig{TLSFingerprint: "firefox"}
-	if poolKeyForH2(ctx, target, firefox, nil) == bootKey {
+	if poolKeyForH2(ctx, SameUpstreamTarget(target), firefox, nil) == bootKey {
 		t.Error("firefox and none produced identical h2 pool keys; a pooled uTLS-parrot connection must not be reused for a standard-TLS dial")
 	}
 }

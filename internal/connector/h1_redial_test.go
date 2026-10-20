@@ -12,7 +12,7 @@ import (
 // TestRedialUpstreamH1_NilCfg locks the defensive guard so callers never
 // silently dial with a half-built BuildConfig.
 func TestRedialUpstreamH1_NilCfg(t *testing.T) {
-	_, err := RedialUpstreamH1(context.Background(), "example.com:443", nil, nil, 1)
+	_, err := RedialUpstreamH1(context.Background(), SameUpstreamTarget("example.com:443"), nil, nil, 1)
 	if err == nil {
 		t.Fatal("RedialUpstreamH1(nil cfg, nil stale): got nil err, want guard message")
 	}
@@ -28,7 +28,7 @@ func TestRedialUpstreamH1_NilCfg(t *testing.T) {
 // stale would otherwise nil-dereference inside the helper.
 func TestRedialUpstreamH1_NilStale(t *testing.T) {
 	cfg := &BuildConfig{}
-	_, err := RedialUpstreamH1(context.Background(), "example.com:443", nil, cfg, 1)
+	_, err := RedialUpstreamH1(context.Background(), SameUpstreamTarget("example.com:443"), nil, cfg, 1)
 	if err == nil {
 		t.Fatal("RedialUpstreamH1(non-nil cfg, nil stale): got nil err, want guard message")
 	}

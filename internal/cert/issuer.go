@@ -218,9 +218,11 @@ func (iss *Issuer) MITMServerConfig(hostname string, alpnOffers []string) *tls.C
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			// Use the hostname captured in the closure rather than the
 			// SNI from the ClientHelloInfo: BuildConnectionStack already
-			// resolved the cert hostname from the CONNECT target, and we
-			// must not let a divergent SNI silently route to a different
-			// host's cert. host is already lowercased.
+			// resolved the cert hostname from the caller-supplied TLS
+			// authority (connector.UpstreamTarget.TLS — the CONNECT /
+			// SOCKS5 target today), and we must not let a divergent SNI
+			// silently route to a different host's cert. host is already
+			// lowercased.
 			return iss.GetCertificate(host)
 		},
 	}

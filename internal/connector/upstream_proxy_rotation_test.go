@@ -307,8 +307,8 @@ func TestRotationH2PoolKeyInvalidation_PerRequestProducesDistinctKeys(t *testing
 	ctx := ContextWithListenerName(context.Background(), "L1")
 	hostTLS := &resolvedTLS{}
 
-	keyA := poolKeyForH2(ctx, "example.com:443", cfg, hostTLS)
-	keyB := poolKeyForH2(ctx, "example.com:443", cfg, hostTLS)
+	keyA := poolKeyForH2(ctx, SameUpstreamTarget("example.com:443"), cfg, hostTLS)
+	keyB := poolKeyForH2(ctx, SameUpstreamTarget("example.com:443"), cfg, hostTLS)
 	if keyA == keyB {
 		t.Errorf("per_request rotation: expected distinct pool keys, got identical %v", keyA)
 	}
@@ -326,8 +326,8 @@ func TestRotationH2PoolKeyInvalidation_StickyProducesStableKey(t *testing.T) {
 	ctx := ContextWithListenerName(context.Background(), "L1")
 	hostTLS := &resolvedTLS{}
 
-	keyA := poolKeyForH2(ctx, "example.com:443", cfg, hostTLS)
-	keyB := poolKeyForH2(ctx, "example.com:443", cfg, hostTLS)
+	keyA := poolKeyForH2(ctx, SameUpstreamTarget("example.com:443"), cfg, hostTLS)
+	keyB := poolKeyForH2(ctx, SameUpstreamTarget("example.com:443"), cfg, hostTLS)
 	if keyA != keyB {
 		t.Errorf("sticky rotation: expected identical pool keys, got %v vs %v", keyA, keyB)
 	}

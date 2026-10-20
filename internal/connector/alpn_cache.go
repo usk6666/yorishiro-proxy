@@ -3,8 +3,8 @@
 // cache on every tunnel so that a cache hit can offer the right ALPN to the
 // client without having to dial upstream first just to learn it.
 //
-// The cache key is a triple (host:port, uTLS fingerprint, mTLS cert hash)
-// because real-world anti-bot deployments change their ALPN response based on
+// The cache key is (dialled host:port, TLS server name, uTLS fingerprint,
+// mTLS cert hash) because real-world anti-bot deployments change their ALPN response based on
 // the client fingerprint. Two connections to the same host with different
 // client profiles are therefore stored independently.
 //
@@ -26,11 +26,19 @@ const DefaultALPNCacheSize = 1024
 const DefaultALPNCacheTTL = time.Hour
 
 // ALPNCacheKey identifies a cache entry. The zero value is a valid key
-// (all three fields empty), representing the standard TLS profile with no
+// (all fields empty), representing the standard TLS profile with no
 // client certificate.
 type ALPNCacheKey struct {
-	// HostPort is the "host:port" string that was dialled.
+	// HostPort is the "host:port" string that was dialled (the dial
+	// target).
 	HostPort string
+
+	// ServerName is the TLS host sent as SNI — the host part of the TLS
+	// authority (USK-1315). It equals HostPort's host for CONNECT / SOCKS5;
+	// a transparent listener dials an IP while the name comes from the
+	// ClientHello, and one IP:port can front several virtual hosts whose
+	// ALPN answers differ.
+	ServerName string
 
 	// Fingerprint is the uTLS profile name. Empty string means the standard
 	// crypto/tls library was used.

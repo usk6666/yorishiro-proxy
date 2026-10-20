@@ -50,7 +50,7 @@ func TestALPNCacheKeyFromConfig_NoClientCert(t *testing.T) {
 	cfg := &BuildConfig{
 		TLSFingerprint: "chrome",
 	}
-	key := ALPNCacheKeyFromConfig("example.com:443", cfg)
+	key := ALPNCacheKeyFromConfig(SameUpstreamTarget("example.com:443"), cfg)
 	if key.HostPort != "example.com:443" {
 		t.Errorf("HostPort = %q, want %q", key.HostPort, "example.com:443")
 	}
@@ -70,7 +70,7 @@ func TestALPNCacheKeyFromConfig_WithClientCert(t *testing.T) {
 			Certificate: [][]byte{{0x30, 0x82, 0x01, 0x00}},
 		},
 	}
-	key := ALPNCacheKeyFromConfig("api.example.com:443", cfg)
+	key := ALPNCacheKeyFromConfig(SameUpstreamTarget("api.example.com:443"), cfg)
 	if key.ClientCertHash == "" {
 		t.Error("expected non-empty ClientCertHash when cert is present")
 	}
@@ -82,8 +82,8 @@ func TestALPNCacheKeyFromConfig_StableHash(t *testing.T) {
 	}
 	cfg := &BuildConfig{ClientCert: cert}
 
-	key1 := ALPNCacheKeyFromConfig("host:443", cfg)
-	key2 := ALPNCacheKeyFromConfig("host:443", cfg)
+	key1 := ALPNCacheKeyFromConfig(SameUpstreamTarget("host:443"), cfg)
+	key2 := ALPNCacheKeyFromConfig(SameUpstreamTarget("host:443"), cfg)
 
 	if key1.ClientCertHash != key2.ClientCertHash {
 		t.Error("expected stable hash for same cert")

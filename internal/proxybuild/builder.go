@@ -946,7 +946,7 @@ func runHTTP1ExchangeLoop(
 	// per-exchange dial closure can detect a stale keep-alive conn
 	// (server idle FIN / RST) and transparently redial. closeAll on
 	// CONNECT exit tears down every redial step (original + successors).
-	chain := newH1Chain(upstreamH1, target, deps.BuildConfig, logger, deps.H1UpstreamMetrics)
+	chain := newH1Chain(upstreamH1, connector.UpstreamTargetOf(stack, target), deps.BuildConfig, logger, deps.H1UpstreamMetrics)
 	defer chain.closeAll()
 	var wg sync.WaitGroup
 	for {
@@ -1141,8 +1141,11 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 		// stops the worker and unregisters the chain[0] observer — it runs
 		// after wg.Wait() so in-flight streams drain first.
 		chain := newRedialChain(deps.H2UpstreamMetrics)
-		mint := func(dctx context.Context, t string, stale *http2.Layer, generation int, onGoAway func()) (*http2.Layer, error) {
-			return connector.RedialUpstreamH2(dctx, t, stale, deps.BuildConfig, generation, onGoAway)
+		// USK-1315: redial with the stack's dial target / TLS authority
+		// split, not the callback's single target.
+		upstreamTarget := connector.UpstreamTargetOf(stack, target)
+		mint := func(dctx context.Context, _ string, stale *http2.Layer, generation int, onGoAway func()) (*http2.Layer, error) {
+			return connector.RedialUpstreamH2(dctx, upstreamTarget, stale, deps.BuildConfig, generation, onGoAway)
 		}
 		redialFn, stopRedial := startH2UpstreamRedial(ctx, target, upstreamH2, chain, mint, logger)
 		defer stopRedial()
