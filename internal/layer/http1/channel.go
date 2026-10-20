@@ -325,6 +325,30 @@ func absoluteFormAuthority(requestURI string) string {
 	return prefix[strings.Index(prefix, "://")+3:]
 }
 
+// syntheticRequestTarget is the request-target sendRequestSynthetic writes
+// for msg: Path, then "?" RawQuery when RawQuery is non-empty, "/" when
+// both are empty. Neither part is validated or re-encoded.
+func syntheticRequestTarget(msg *envelope.HTTPMessage) string {
+	requestURI := msg.Path
+	if msg.RawQuery != "" {
+		requestURI += "?" + msg.RawQuery
+	}
+	if requestURI == "" {
+		requestURI = "/"
+	}
+	return requestURI
+}
+
+// SyntheticAbsoluteFormAuthority returns the URI authority (verbatim,
+// userinfo included) of the request-target a synthetic send of msg
+// writes, when that target is absolute-form, or "" otherwise. It reads
+// the target exactly as sendRequestSynthetic builds it and splits it with
+// the parser's absoluteFormPrefix, so MCP resend / fuzz scope checks judge
+// the authority that reaches the wire (USK-1274).
+func SyntheticAbsoluteFormAuthority(msg *envelope.HTTPMessage) string {
+	return absoluteFormAuthority(syntheticRequestTarget(msg))
+}
+
 // bodyOpts are the per-channel body assembly options inherited from the Layer.
 type bodyOpts struct {
 	spillDir       string
@@ -1871,13 +1895,7 @@ func (c *channel) writeOpaqueBody(msg *envelope.HTTPMessage, rawBody []byte, raw
 func (c *channel) sendRequestSynthetic(msg *envelope.HTTPMessage) error {
 	var buf bytes.Buffer
 
-	requestURI := msg.Path
-	if msg.RawQuery != "" {
-		requestURI += "?" + msg.RawQuery
-	}
-	if requestURI == "" {
-		requestURI = "/"
-	}
+	requestURI := syntheticRequestTarget(msg)
 	if err := serializeRequestLine(&buf, msg.Method, requestURI, "HTTP/1.1"); err != nil {
 		return fmt.Errorf("http1: send synthetic request line: %w", err)
 	}
