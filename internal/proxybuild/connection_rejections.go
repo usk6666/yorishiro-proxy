@@ -115,7 +115,6 @@ type ConnectionRejections struct {
 type rejectionRecord struct {
 	info      connector.RejectInfo
 	kindLabel string
-	authority string
 }
 
 // NewConnectionRejections constructs the aggregator. Call Close to stop
@@ -211,7 +210,7 @@ func (c *ConnectionRejections) submit(info connector.RejectInfo, label string) (
 		return false, false, true
 	case !c.limiter.Allow():
 		return false, true, false
-	case c.enqueue(rejectionRecord{info: info, kindLabel: label, authority: authority}):
+	case c.enqueue(rejectionRecord{info: info, kindLabel: label}):
 		return true, false, false
 	default:
 		return false, true, false
@@ -392,9 +391,11 @@ func (c *ConnectionRejections) write(rec rejectionRecord) {
 		FailureReason: fmt.Sprintf("rejected: max_connections=%d reached", info.MaxConnections),
 		Timestamp:     info.At,
 		Tags:          tags,
+		// ServerAddr stays empty: a refused connection never had an
+		// upstream socket peer. The refused target is Tags["target"],
+		// which query filter.host also matches.
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: info.RemoteAddr,
-			ServerAddr: rec.authority,
 		},
 		ListenerName: info.Listener,
 	}
@@ -446,12 +447,11 @@ func rejectKindLabel(k connector.ProtocolKind) string {
 }
 
 // rejectAuthority returns the host[:port] the refused connection was bound
-// for, used as ConnInfo.ServerAddr (so query filter.host matches) and for
-// capture-scope evaluation. CONNECT and TCP forward targets are already an
-// authority. For an HTTP/1.x absolute-form request-target the authority
-// component is extracted as-is (no case folding, no default port);
-// origin-form targets carry no authority without parsing headers, which
-// the reject path never does.
+// for, used for capture-scope evaluation. CONNECT and TCP forward targets
+// are already an authority. For an HTTP/1.x absolute-form request-target
+// the authority component is extracted as-is (no case folding, no default
+// port); origin-form targets carry no authority without parsing headers,
+// which the reject path never does.
 func rejectAuthority(info connector.RejectInfo) string {
 	switch info.DetectedKind {
 	case connector.ProtocolHTTP1:

@@ -454,18 +454,7 @@ func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 		args = append(args, opts.ListenerName)
 	}
 	if opts.Host != "" {
-		// Match against server_addr (host:port or host) or the host portion
-		// of the URL stored in send flows. server_addr may contain a port,
-		// so we check both exact match and host-prefix match (host:*).
-		// For URL-based matching, we use multiple LIKE patterns with right-side
-		// boundary anchoring to avoid subdomain false positives:
-		//   %://host/  — path follows
-		//   %://host?  — query string follows (no path)
-		//   %://host:  — port number follows
-		//   %://host   — end of string (bare host)
-		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(opts.Host)
-		conditions = append(conditions, "(s.server_addr = ? OR s.server_addr LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND (m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\' OR m.url LIKE ? ESCAPE '\\')))")
-		args = append(args, opts.Host, escaped+":%", "%://"+escaped+"/%", "%://"+escaped+"?%", "%://"+escaped+":%", "%://"+escaped)
+		conditions, args = appendStreamHostPredicate(conditions, args, opts.Host)
 	}
 
 	clause := ""
@@ -473,6 +462,54 @@ func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 		clause = " WHERE " + strings.Join(conditions, " AND ")
 	}
 	return clause, args
+}
+
+// streamTagsTargetExpr reads tags.target, the requested destination that
+// audit / error streams (TLS stack-build errors, proxy-closed request
+// heads, capacity rejections) record instead of a server_addr. The CASE
+// keeps json_extract from ever seeing a tags value that is not valid JSON
+// (a hand-crafted or imported database), which would otherwise fail the
+// whole query.
+const streamTagsTargetExpr = "(CASE WHEN json_valid(s.tags) THEN json_extract(s.tags, '$.target') END)"
+
+// appendStreamHostPredicate adds the filter.host predicate. A stream
+// matches when the host appears in any of:
+//
+//   - server_addr — the upstream socket peer (host:port or host);
+//   - tags.target — the requested destination of an audit / error stream
+//     that never had an upstream socket. It is an authority for CONNECT /
+//     TLS-error / request-head / TCP forward rows and the request-target as
+//     received (possibly an absolute URL) for HTTP/1.x capacity rows;
+//   - the URL of a send flow.
+//
+// server_addr and authority-shaped tags.target values are compared exactly
+// or as a "host:" prefix. URL-shaped values use LIKE patterns with
+// right-side boundary anchoring to avoid subdomain false positives:
+//
+//	%://host/  — path follows
+//	%://host?  — query string follows (no path)
+//	%://host:  — port number follows
+//	%://host   — end of string (bare host)
+//
+// Every value is a bound parameter; LIKE metacharacters in host are
+// escaped.
+func appendStreamHostPredicate(conds []string, args []interface{}, host string) ([]string, []interface{}) {
+	escaped := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(host)
+	urlLike := func(col string) string {
+		return col + " LIKE ? ESCAPE '\\' OR " + col + " LIKE ? ESCAPE '\\' OR " +
+			col + " LIKE ? ESCAPE '\\' OR " + col + " LIKE ? ESCAPE '\\'"
+	}
+	urlArgs := []interface{}{"%://" + escaped + "/%", "%://" + escaped + "?%", "%://" + escaped + ":%", "%://" + escaped}
+	tgt := streamTagsTargetExpr
+
+	conds = append(conds, "(s.server_addr = ? OR s.server_addr LIKE ? ESCAPE '\\'"+
+		" OR "+tgt+" = ? OR "+tgt+" LIKE ? ESCAPE '\\' OR "+urlLike(tgt)+
+		" OR EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND ("+urlLike("m.url")+")))")
+	args = append(args, host, escaped+":%")
+	args = append(args, host, escaped+":%")
+	args = append(args, urlArgs...)
+	args = append(args, urlArgs...)
+	return conds, args
 }
 
 // appendStreamProtocolPredicate adds the Protocols-list / single-Protocol

@@ -221,9 +221,11 @@ func TestE2E_CapacityRejection_CONNECTVisibleInStatusAndFlows(t *testing.T) {
 	if dk, _ := tags["detected_kind"].(string); dk != "connect" {
 		t.Errorf("flow tags.detected_kind = %q, want connect", dk)
 	}
+	// No upstream socket ever existed, so server_addr is empty; the
+	// refused target is tags.target and filter.host matched on it above.
 	id, _ := got["id"].(string)
-	if addr := flowServerAddr(t, h, id); addr != authority {
-		t.Errorf("flow conn_info.server_addr = %q, want %q", addr, authority)
+	if addr := flowServerAddr(t, h, id); addr != "" {
+		t.Errorf("flow conn_info.server_addr = %q, want \"\" (no socket peer)", addr)
 	}
 }
 
@@ -301,8 +303,75 @@ func TestE2E_CapacityRejection_TCPForwardVisibleInStatusAndFlows(t *testing.T) {
 	if fp, _ := tags["forward_port"].(string); fp != portStr {
 		t.Errorf("flow tags.forward_port = %q, want %q", fp, portStr)
 	}
+	if tg, _ := tags["target"].(string); tg != echoAddr {
+		t.Errorf("flow tags.target = %q, want %q", tg, echoAddr)
+	}
 	id, _ := got["id"].(string)
-	if addr := flowServerAddr(t, h, id); addr != echoAddr {
-		t.Errorf("flow conn_info.server_addr = %q, want %q", addr, echoAddr)
+	if addr := flowServerAddr(t, h, id); addr != "" {
+		t.Errorf("flow conn_info.server_addr = %q, want \"\" (no socket peer)", addr)
+	}
+}
+
+// TestE2E_CapacityRejection_HTTP1AbsoluteFormFilterByHost: an over-cap
+// plain-forward request with an absolute-form target is recorded with
+// tags.target = the request-target as received (a full URL) and no
+// server_addr; filter.host on the URL's host still finds it, while a
+// host that merely prefixes the recorded one does not.
+func TestE2E_CapacityRejection_HTTP1AbsoluteFormFilterByHost(t *testing.T) {
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
+	startRes := h.MustOK(t, "proxy_start", map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"max_connections": 1,
+	})
+	proxyAddr, _ := startRes.Decoded["listen_addr"].(string)
+	if proxyAddr == "" {
+		t.Fatalf("proxy_start: missing listen_addr: %s", startRes.Text)
+	}
+
+	holdOnlySlot(t, proxyAddr, func() bool {
+		return queryCapacityStatus(t, h).ActiveConnections == 1
+	})
+
+	const target = "http://Ads.Example:8080/slot?id=1"
+	over, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatalf("dial over-cap: %v", err)
+	}
+	defer over.Close()
+	req := "GET " + target + " HTTP/1.1\r\nHost: Ads.Example:8080\r\n\r\n"
+	if _, err := over.Write([]byte(req)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	_ = over.SetReadDeadline(time.Now().Add(5 * time.Second))
+	statusLine, err := bufio.NewReader(over).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read 503 status line: %v", err)
+	}
+	if !strings.HasPrefix(statusLine, "HTTP/1.1 503") {
+		t.Fatalf("status line = %q, want HTTP/1.1 503", statusLine)
+	}
+
+	flows := pollBlockedCapacityFlows(t, h, "Ads.Example")
+	got := flows[0]
+	tags, _ := got["tags"].(map[string]any)
+	if tg, _ := tags["target"].(string); tg != target {
+		t.Errorf("flow tags.target = %q, want %q", tg, target)
+	}
+	if dk, _ := tags["detected_kind"].(string); dk != "http1" {
+		t.Errorf("flow tags.detected_kind = %q, want http1", dk)
+	}
+	id, _ := got["id"].(string)
+	if addr := flowServerAddr(t, h, id); addr != "" {
+		t.Errorf("flow conn_info.server_addr = %q, want \"\" (no socket peer)", addr)
+	}
+
+	// Right-side anchoring: a host that merely prefixes the recorded one
+	// must not match.
+	res := h.MustOK(t, "query", map[string]any{"resource": "flows", "filter": map[string]any{
+		"blocked_by": "capacity",
+		"host":       "Ads.Exam",
+	}})
+	if raw, _ := res.Decoded["flows"].([]any); len(raw) != 0 {
+		t.Errorf("query(flows, host=Ads.Exam) returned %d flows, want 0: %s", len(raw), res.Text)
 	}
 }

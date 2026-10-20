@@ -2670,11 +2670,10 @@ func buildTLSStackBuildErrorRecorder(store flow.Writer, scope *flow.RecordScope,
 			},
 			ConnInfo: &flow.ConnectionInfo{
 				ClientAddr: clientAddr,
-				// NOTE: the dial target, not a socket peer — the stack
-				// build failed before any upstream socket was handed to a
-				// Layer (mixed semantics vs. live streams; see
-				// flow.ConnectionInfo.ServerAddr).
-				ServerAddr: target,
+				// ServerAddr stays empty: it only ever holds an upstream
+				// socket peer, and the stack build failed before one was
+				// handed to a Layer. The requested destination is
+				// Tags["target"], which query filter.host also matches.
 			},
 			ListenerName: listenerName,
 		}

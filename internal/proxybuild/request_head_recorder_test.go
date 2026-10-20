@@ -97,8 +97,10 @@ func TestRequestHeadRecorder_Timeout(t *testing.T) {
 	if st.ConnID != "conn-1" {
 		t.Errorf("ConnID = %q, want conn-1", st.ConnID)
 	}
-	if st.ConnInfo == nil || st.ConnInfo.ClientAddr != "127.0.0.1:5555" || st.ConnInfo.ServerAddr != "example.test:443" {
-		t.Errorf("ConnInfo = %+v", st.ConnInfo)
+	// server_addr only ever holds an upstream socket peer; the requested
+	// destination is Tags["target"] (asserted below).
+	if st.ConnInfo == nil || st.ConnInfo.ClientAddr != "127.0.0.1:5555" || st.ConnInfo.ServerAddr != "" {
+		t.Errorf("ConnInfo = %+v, want ClientAddr=127.0.0.1:5555 ServerAddr=\"\"", st.ConnInfo)
 	}
 	wantTags := map[string]string{
 		"closed_by":          "proxy",

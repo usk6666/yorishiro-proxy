@@ -116,9 +116,11 @@ func buildRequestHeadRecorder(store flow.Writer, scope *flow.RecordScope, listen
 			Duration:      time.Since(started),
 			Tags:          requestHeadTags(f, head, listenerName),
 			ListenerName:  listenerName,
+			// ServerAddr stays empty: no upstream socket peer existed for
+			// this head. The requested destination is Tags["target"],
+			// which query filter.host also matches.
 			ConnInfo: &flow.ConnectionInfo{
 				ClientAddr: f.ClientAddr,
-				ServerAddr: f.Target,
 			},
 		}
 

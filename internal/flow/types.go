@@ -128,9 +128,11 @@ type ConnectionInfo struct {
 	// through an upstream proxy this is the upstream proxy's address, not
 	// the final destination — see UpstreamProxy. Live streams fill it from
 	// the first upstream Receive envelope, so a stream that never received
-	// anything from upstream leaves it empty. Some audit / error rows
-	// (TLS build errors, request-head records) still store the dial target
-	// here instead of a socket peer.
+	// anything from upstream leaves it empty. It never holds a requested
+	// hostname: audit / error rows that had no upstream socket (TLS
+	// stack-build errors, proxy-closed request heads, capacity
+	// rejections) leave it empty and carry the requested destination in
+	// Stream.Tags["target"], which the Host list filter also matches.
 	ServerAddr string
 	// UpstreamProxy is the upstream proxy the upstream socket was dialed
 	// through, as "scheme://host:port" with any userinfo stripped so no

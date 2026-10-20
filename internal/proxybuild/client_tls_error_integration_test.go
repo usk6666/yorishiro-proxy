@@ -87,8 +87,8 @@ func (s *clientTLSErrorStore) Streams() []*flow.Stream {
 //     ErrClientTLSMITMHandshake;
 //   - the recorder writes a state="error" Stream with
 //     FailureReason="client_tls_error" (NOT upstream_tls_error);
-//   - the CONNECT authority is preserved verbatim in Tags["target"] and
-//     ConnInfo.ServerAddr.
+//   - the CONNECT authority is preserved verbatim in Tags["target"], and
+//     ConnInfo.ServerAddr stays empty (no upstream socket peer).
 //
 // Raw passthrough mode routes the request through buildRawPassthroughStack
 // so the client-side MITM handshake fires BEFORE any upstream dial — the
@@ -186,13 +186,13 @@ func TestProxybuild_CONNECT_ClientTLSMITMHandshakeFailure_RecordsClientTLSError(
 		t.Errorf("Scheme = %q, want %q", errStream.Scheme, "https")
 	}
 
-	// 3. CONNECT authority preserved verbatim in both surfaces.
+	// 3. CONNECT authority preserved verbatim in Tags["target"];
+	// ServerAddr only ever holds a socket peer, so it is empty.
 	if errStream.Tags == nil || errStream.Tags["target"] != target {
 		t.Errorf("Tags[\"target\"] = %q, want %q", errStream.Tags["target"], target)
 	}
-	if errStream.ConnInfo == nil || errStream.ConnInfo.ServerAddr != target {
-		t.Errorf("ConnInfo.ServerAddr = %q, want %q",
-			serverAddrOrEmptyClient(errStream.ConnInfo), target)
+	if got := serverAddrOrEmptyClient(errStream.ConnInfo); got != "" {
+		t.Errorf("ConnInfo.ServerAddr = %q, want \"\" (no socket peer)", got)
 	}
 
 	// 4. Underlying error string is preserved so MCP users can
@@ -303,9 +303,6 @@ func findClientTLSErrorStream(streams []*flow.Stream, target string) *flow.Strea
 			continue
 		}
 		if st.Tags != nil && st.Tags["target"] == target {
-			return st
-		}
-		if st.ConnInfo != nil && st.ConnInfo.ServerAddr == target {
 			return st
 		}
 	}

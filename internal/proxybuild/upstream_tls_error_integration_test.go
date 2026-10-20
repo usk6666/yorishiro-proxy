@@ -278,15 +278,14 @@ func TestProxybuild_CONNECT_UpstreamTLSHandshakeFailure_RecordsErrorFlow(t *test
 				t.Errorf("Scheme = %q, want %q", errStream.Scheme, "https")
 			}
 
-			// 4. Target host preserved (CONNECT authority). The recorder
-			// stores it in Tags["target"] AND ConnInfo.ServerAddr so the
-			// audit record has redundant traceability.
+			// 4. Target host preserved (CONNECT authority) in
+			// Tags["target"]. ConnInfo.ServerAddr only ever holds a
+			// socket peer, and none was handed to a Layer, so it is empty.
 			if errStream.Tags == nil || errStream.Tags["target"] != target {
 				t.Errorf("Tags[\"target\"] = %q, want %q", errStream.Tags["target"], target)
 			}
-			if errStream.ConnInfo == nil || errStream.ConnInfo.ServerAddr != target {
-				t.Errorf("ConnInfo.ServerAddr = %q, want %q",
-					serverAddrOrEmpty(errStream.ConnInfo), target)
+			if got := serverAddrOrEmpty(errStream.ConnInfo); got != "" {
+				t.Errorf("ConnInfo.ServerAddr = %q, want \"\" (no socket peer)", got)
 			}
 
 			// 5. Error reason observable as a string.
@@ -380,9 +379,6 @@ func findErrorStreamForTarget(streams []*flow.Stream, target string) *flow.Strea
 			continue
 		}
 		if st.Tags != nil && st.Tags["target"] == target {
-			return st
-		}
-		if st.ConnInfo != nil && st.ConnInfo.ServerAddr == target {
 			return st
 		}
 	}

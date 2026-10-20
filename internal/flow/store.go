@@ -307,8 +307,9 @@ type StreamListOptions struct {
 	// accepted them (exact match on streams.listener_name). Empty
 	// disables the filter.
 	ListenerName string
-	// Host filters streams by host. Matches against the server_addr column
-	// or the host portion of the URL in send flows.
+	// Host filters streams by host. Matches against the server_addr column,
+	// the requested destination in tags.target (audit / error streams), or
+	// the host portion of the URL in send flows.
 	Host string
 	// SortBy specifies the field to sort results by.
 	// Valid values: "timestamp", "duration_ms".
