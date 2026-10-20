@@ -4,6 +4,7 @@ package mcptest_test
 
 import (
 	"bufio"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -131,6 +132,78 @@ func TestE2E_Intercept_HTTP1_ContentLengthTransferEncoding_ViaJSONRPC(t *testing
 				t.Fatal("timed out waiting for the proxied response")
 			}
 		})
+	}
+}
+
+// TestE2E_Intercept_HTTP1_ResponseBodyChangeReframes_ViaJSONRPC is the
+// response-side twin: a held Content-Length response whose body is replaced
+// with a longer one must reach the client with Content-Length re-stamped to
+// the new length, not the upstream's.
+func TestE2E_Intercept_HTTP1_ResponseBodyChangeReframes_ViaJSONRPC(t *testing.T) {
+	const newBody = "a-much-longer-response-body"
+
+	upstream := startRawHTTPUpstream(t) // answers "upstream-ok" with Content-Length: 11
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
+	proxyAddr := startProxyWithRules(t, h, []map[string]any{{
+		"id":        "hold-responses",
+		"enabled":   true,
+		"protocol":  "http",
+		"direction": "response",
+		"http":      map[string]any{"path_pattern": ".*"},
+	}}, nil)
+
+	conn, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	req := "GET http://" + upstream.addr() + "/resp HTTP/1.1\r\n" +
+		"Host: " + upstream.addr() + "\r\nConnection: close\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	entry := waitForHeldEntry(t, h, 5*time.Second)
+	h.MustOK(t, "intercept", map[string]any{
+		"action": "modify_and_forward",
+		"params": map[string]any{"intercept_id": entry["id"]},
+		"http":   map[string]any{"body": newBody},
+	})
+
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil || !strings.Contains(status, " 200 ") {
+		t.Fatalf("client status line = %q (err %v), want 200", status, err)
+	}
+	var cl []string
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read response header: %v", err)
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		if name, value, ok := strings.Cut(line, ":"); ok {
+			switch {
+			case strings.EqualFold(name, "Content-Length"):
+				cl = append(cl, strings.TrimSpace(value))
+			case strings.EqualFold(name, "Transfer-Encoding"):
+				t.Errorf("client response carries Transfer-Encoding %q, want none", value)
+			}
+		}
+	}
+	if want := []string{strconv.Itoa(len(newBody))}; !equalStrings(cl, want) {
+		t.Fatalf("client Content-Length = %q, want %q", cl, want)
+	}
+	body := make([]byte, len(newBody))
+	if _, err := io.ReadFull(br, body); err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if string(body) != newBody {
+		t.Errorf("client body = %q, want %q", body, newBody)
 	}
 }
 
