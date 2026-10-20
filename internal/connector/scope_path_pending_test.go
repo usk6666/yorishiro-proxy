@@ -342,7 +342,10 @@ func TestCONNECTHandler_PathScopedAllow_PassthroughRefused(t *testing.T) {
 		PassthroughList: pl,
 		Logger:          newTestLogger(),
 	}))
-	_ = writeCONNECT(t, client, up.addr())
+	// USK-1246: a scope-refused CONNECT is answered 403, not 200.
+	if line := writeCONNECT(t, client, up.addr()); !strings.Contains(line, "403") {
+		t.Errorf("CONNECT status = %q, want 403", line)
+	}
 	_, _ = client.Write([]byte("\x16\x03\x01 not really a ClientHello"))
 	assertClosedWithin(t, client, 5*time.Second)
 	waitHandlerDone(t, done)
