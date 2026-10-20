@@ -94,11 +94,12 @@ func InitPerProtocolSafetyEngines(cfg *config.Config, proxyCfg *config.ProxyConf
 }
 
 // loadPresetIntoAll loads a preset by name into all three per-protocol
-// engines. WS silently skips non-WS targets at evaluation time and gRPC
-// treats common.TargetBody as TargetPayload — both are documented in
-// their respective safety.go LoadPreset comments — so the same
-// destructive-sql / destructive-os-command preset is meaningful in
-// every protocol's pipeline.
+// engines. The built-in presets target {body, url, query}; the WS and
+// gRPC engines both treat common.TargetBody as their message payload
+// (see each engine's extractTarget) and skip url / query per message —
+// for WS those are evaluated on the Upgrade request by the HTTP engine —
+// so the same destructive-sql / destructive-os-command preset gates every
+// protocol's pipeline.
 func loadPresetIntoAll(httpEng *httprules.SafetyEngine, wsEng *wsrules.SafetyEngine, grpcEng *grpcrules.SafetyEngine, name string) error {
 	if err := httpEng.LoadPreset(name); err != nil {
 		return fmt.Errorf("http: %w", err)

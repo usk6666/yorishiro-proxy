@@ -56,7 +56,8 @@ func ValidateSafetyFilterConfig(cfg *SafetyFilterConfig) error {
 // rule path applies a single rule list across all three per-protocol
 // engines (internal/mcpserver/safety_perprotocol.go::compileCustomInputRule).
 // Each engine silently skips targets it does not understand at evaluation
-// time (e.g. wsrules.SafetyEngine.extractTarget on TargetBody returns ""),
+// time (e.g. wsrules.SafetyEngine.extractTarget on TargetURL returns "";
+// TargetBody is aliased to the payload by the WS and gRPC engines),
 // so the config validator must accept any target that any engine recognises
 // — otherwise per-protocol rules would fail to load even though the engine
 // would correctly evaluate them at runtime.

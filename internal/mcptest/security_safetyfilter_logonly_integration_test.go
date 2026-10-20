@@ -182,3 +182,45 @@ func TestE2E_SafetyFilter_LogOnly_GRPCForwardsDestructiveSQL(t *testing.T) {
 		t.Errorf("log_only gRPC stream state = %q, want not error", got)
 	}
 }
+
+// TestE2E_SafetyFilter_LogOnly_WSForwardsDestructiveSQLPreset pins
+// USK-1275 under log_only: with ONLY the destructive-sql preset, a
+// `DROP TABLE users` WS frame is forwarded and the ws flow is tagged with
+// the preset rule ID.
+func TestE2E_SafetyFilter_LogOnly_WSForwardsDestructiveSQLPreset(t *testing.T) {
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{
+		ConfigJSON:    safetyFilterDestructiveSQLLogOnlyConfig,
+		UpstreamProto: "ws",
+	})
+	startRes := h.MustOK(t, "proxy_start", map[string]any{"listen_addr": "127.0.0.1:0"})
+	proxyAddr, _ := startRes.Decoded["listen_addr"].(string)
+	if proxyAddr == "" {
+		t.Fatalf("proxy_start: missing listen_addr in result: %s", startRes.Text)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := dialWSThroughProxy(ctx, t, proxyAddr, wsUpstreamHostPort(t, h.UpstreamTLS.URL))
+	if err != nil {
+		t.Fatalf("dial WS through proxy: %v", err)
+	}
+	defer conn.Close()
+
+	payload := []byte("DROP TABLE users")
+	if err := writeMaskedClientFrame(conn, wslayer.OpcodeText, payload); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+	echo, err := readServerFrameWithDeadline(conn, 5*time.Second)
+	if err != nil {
+		t.Fatalf("read echo under log_only (frame was dropped?): %v", err)
+	}
+	if !bytes.Equal(echo.Payload, payload) {
+		t.Errorf("echo = %q, want %q", echo.Payload, payload)
+	}
+	if got := h.WSObservedHits.Total(); got != 1 {
+		t.Fatalf("upstream WS hits = %d, want 1 (log_only must forward)", got)
+	}
+
+	fl := waitForLogOnlyTag(t, h, "ws", "safety_log_only:destructive-sql:drop")
+	assertNotBlocked(t, fl)
+}
