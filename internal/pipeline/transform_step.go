@@ -38,6 +38,11 @@ func NewTransformStep(
 	}
 }
 
+// WithScopeRecheck is a scaffolding stub (USK-1167 red commit).
+func (s *TransformStep) WithScopeRecheck(host *HostScopeStep, http *HTTPScopeStep) *TransformStep {
+	return s
+}
+
 // Process type-switches on env.Message and dispatches to the per-protocol
 // TransformEngine arm. Mutations are in-place on the same Message pointer,
 // so subsequent Steps see the modifications without envelope replacement;
