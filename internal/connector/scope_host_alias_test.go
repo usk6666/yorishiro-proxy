@@ -57,7 +57,7 @@ func TestCheckTarget_HostAliasDeny(t *testing.T) {
 		{"legacy: octal single part", "10.0.0.5", "01200000005"},
 		{"legacy: trailing dot", "127.0.0.1", "2130706433."},
 		{"legacy: mixed", "192.168.1.1", "0300.0250.257"},
-		{"legacy: empty hex is zero", "0.0.0.1", "0x.0.0.1"},
+		{"empty hex part fails closed", "0.0.0.1", "0x.0.0.1"}, // not an alias (glibc rejects "0x"); Rule B blocks it
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,6 +91,12 @@ func TestCheckTarget_NumericHostFailsClosed(t *testing.T) {
 		"foo.0x7f",     // name ending in a hex number
 		"1.2.3.4..",    // two trailing dots: not folded, still numeric
 		"[1.2.3.4.5]",  // bracketed garbage
+		"0x",           // empty hex part: glibc inet_aton rejects it
+		"0X",           // empty hex part, uppercase prefix
+		"0x.0.0.1",     // empty hex first part
+		"0x7f.0x.0.1",  // empty hex middle part
+		"1.2.3.0x",     // empty hex last part
+		"1.2.3.0x.",    // empty hex last part, trailing dot
 		strings.Repeat("9", 4096),
 	}
 	for _, h := range hosts {
@@ -145,6 +151,8 @@ func TestCheckTarget_HostAliasAllowSymmetry(t *testing.T) {
 		{"other ipv6 address", "::1", "[::2]", false},
 		{"other ipv4 via mapped", "10.0.0.5", "::ffff:10.0.0.6", false},
 		{"leading dot not folded", "example.com", ".example.com", false},
+		{"empty hex part is not an alias", "1.2.3.0", "1.2.3.0x", false},
+		{"bare empty hex is not an alias", "0.0.0.0", "0x", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -156,6 +164,28 @@ func TestCheckTarget_HostAliasAllowSymmetry(t *testing.T) {
 					tc.allowHost, tc.target, got, reason, tc.wantAllow)
 			}
 		})
+	}
+}
+
+// TestParseLegacyIPv4_EmptyHexPart pins the parser to glibc inet_aton(3),
+// which rejects a "0x" / "0X" prefix with no hex digits after it. WHATWG
+// reads such a part as 0, but Go's pure resolver sends the name to DNS, so
+// folding it into an address would let an allow rule admit a host that
+// dials whatever DNS returns (USK-1250 review S-1).
+func TestParseLegacyIPv4_EmptyHexPart(t *testing.T) {
+	for _, in := range []string{"0x", "0X", "0x.0.0.1", "0x7f.0x.0.1", "1.2.3.0x", "0X.1", "1.0x"} {
+		if v, ok := parseLegacyIPv4(in); ok {
+			t.Errorf("parseLegacyIPv4(%q) = %#x, true; want rejected", in, v)
+		}
+		if c, isIP := canonicalScopeHostIP(in); isIP {
+			t.Errorf("canonicalScopeHostIP(%q) = %q, IP; want not an IP", in, c)
+		}
+	}
+	// Controls: a hex part with digits still parses.
+	for in, want := range map[string]uint32{"0x0": 0, "0x7f.0.0.1": 0x7f000001, "1.2.3.0x0": 0x01020300} {
+		if v, ok := parseLegacyIPv4(in); !ok || v != want {
+			t.Errorf("parseLegacyIPv4(%q) = %#x, %v; want %#x, true", in, v, ok, want)
+		}
 	}
 }
 
