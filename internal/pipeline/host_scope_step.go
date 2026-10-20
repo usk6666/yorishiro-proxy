@@ -122,7 +122,7 @@ func targetScopeBlock(env *envelope.Envelope) Result {
 // TargetRule.Schemes describes transport confidentiality — plaintext
 // versus TLS — spelled with the "http" / "https" tokens, not the L7
 // application protocol. That is the meaning the connection-level handler
-// gates already encode with their literals: connectPolicyAllow scopes a
+// gates already encode with their literals: connectPolicyReject scopes a
 // CONNECT tunnel as "https" even though the tunnel may carry any protocol,
 // and the plain HTTP forward handler scopes as "http" "so scope rules can
 // disambiguate http vs https traffic for the same host". Envelope.Context.TLS

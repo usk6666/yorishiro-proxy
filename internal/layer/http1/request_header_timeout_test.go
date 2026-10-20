@@ -193,6 +193,7 @@ func TestLayer_RequestHeaderTimeout_KeepAliveSecondRequest(t *testing.T) {
 		if r := <-nextAsync(ch1); r.err != nil {
 			t.Fatalf("request 1: %v", r.err)
 		}
+		answerOK(t, ch1) // USK-1229: an unanswered request ends the connection
 		_ = ch1.Close()
 
 		done := make(chan struct{})
@@ -238,6 +239,7 @@ func TestLayer_RequestHeaderTimeout_KeepAliveSecondRequest(t *testing.T) {
 			if r.err != nil {
 				t.Fatalf("request %d (%s) after idle gap: %v", i+1, path, r.err)
 			}
+			answerOK(t, ch) // USK-1229: an unanswered request ends the connection
 			_ = ch.Close()
 		}
 	})

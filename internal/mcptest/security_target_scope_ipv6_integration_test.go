@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -42,7 +43,7 @@ func TestE2E_USK1129_BracketedIPv6PolicyDeny_BlocksCONNECT(t *testing.T) {
 		t.Fatalf("proxy_start: missing listen_addr in result: %s", startRes.Text)
 	}
 
-	connectAndHandshake(t, proxyAddr, deniedAddr)
+	connectDenied(t, proxyAddr, deniedAddr)
 	connectAndHandshake(t, proxyAddr, controlAddr)
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -95,6 +96,34 @@ func connectAndHandshake(t *testing.T, proxyAddr, target string) {
 		InsecureSkipVerify: true, //nolint:gosec // asserting the scope gate, not cert validity
 	})
 	_ = tlsConn.Handshake()
+}
+
+// connectDenied sends a CONNECT for target through the proxy and requires
+// the scope gate to refuse it: "HTTP/1.1 403 Forbidden" naming the scope
+// gate, then the proxy closes the connection (USK-1246).
+func connectDenied(t *testing.T, proxyAddr, target string) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	got, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("read CONNECT %s reply until EOF: %v (got %q)", target, err, got)
+	}
+	reply := string(got)
+	if !strings.HasPrefix(reply, "HTTP/1.1 403 Forbidden\r\n") {
+		t.Errorf("CONNECT %s reply = %q, want 403 Forbidden", target, reply)
+	}
+	if !strings.Contains(reply, "yorishiro-proxy: target blocked by scope") {
+		t.Errorf("CONNECT %s reply = %q, want body naming the scope gate", target, reply)
+	}
 }
 
 // startIPv6SinkholeUpstream is startSinkholeUpstream on [::1]. It skips the

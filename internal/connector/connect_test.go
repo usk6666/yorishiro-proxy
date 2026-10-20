@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -28,14 +27,22 @@ func TestCONNECTNegotiator_Success(t *testing.T) {
 	pc := NewPeekConn(proxySide)
 	neg := NewCONNECTNegotiator(newTestLogger())
 
+	// ReadRequest parses only; it must not reply (USK-1246).
+	target, err := neg.ReadRequest(context.Background(), pc)
+	if err != nil {
+		t.Fatalf("ReadRequest error: %v", err)
+	}
+	if target != "example.com:443" {
+		t.Errorf("target = %q, want example.com:443", target)
+	}
+
 	var (
-		target string
-		err    error
-		done   = make(chan struct{})
+		writeErr error
+		done     = make(chan struct{})
 	)
 	go func() {
 		defer close(done)
-		target, err = neg.Negotiate(context.Background(), pc)
+		writeErr = neg.WriteEstablished(pc)
 	}()
 
 	// Read the proxy's reply from the client side.
@@ -47,17 +54,14 @@ func TestCONNECTNegotiator_Success(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Negotiate did not complete")
+		t.Fatal("WriteEstablished did not complete")
 	}
 
-	if err != nil {
-		t.Fatalf("Negotiate error: %v", err)
+	if writeErr != nil {
+		t.Fatalf("WriteEstablished error: %v", writeErr)
 	}
-	if target != "example.com:443" {
-		t.Errorf("target = %q, want example.com:443", target)
-	}
-	if !strings.HasPrefix(reply, "HTTP/1.1 200") {
-		t.Errorf("reply = %q, want HTTP/1.1 200 ...", reply)
+	if reply != "HTTP/1.1 200 Connection Established\r\n\r\n" {
+		t.Errorf("reply = %q, want HTTP/1.1 200 Connection Established", reply)
 	}
 }
 
@@ -77,7 +81,7 @@ func TestCONNECTNegotiator_MalformedMethod(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, err = neg.Negotiate(context.Background(), pc)
+		_, err = neg.ReadRequest(context.Background(), pc)
 	}()
 	go io.Copy(io.Discard, client)
 	<-done

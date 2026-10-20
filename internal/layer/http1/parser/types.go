@@ -58,6 +58,12 @@ const (
 	// The semantic body (Body / BodyBuffer) is unaffected and capped by the
 	// independent body-spill / MaxBodySize policies.
 	AnomalyRawBodyTruncated AnomalyType = "RawBodyTruncated"
+	// AnomalyTruncatedBody indicates that the connection ended before the
+	// body framed by the message's own headers was complete: fewer bytes
+	// than Content-Length declared, or a chunked body cut before its
+	// terminal zero-size chunk (USK-1229). The captured body and RawBody
+	// hold exactly the bytes received.
+	AnomalyTruncatedBody AnomalyType = "TruncatedBody"
 )
 
 // TrailerProvider is implemented by body readers that parse chunked trailers
@@ -106,6 +112,20 @@ type RawBodyProvider interface {
 	// the absolute byte cap and is a prefix of the actual on-wire bytes. The
 	// semantic body (Body / BodyBuffer) is unaffected by this cap.
 	RawBodyTruncated() bool
+}
+
+// BodyTruncationProvider is implemented by the parser's body readers. After
+// the body has been drained, BodyTruncated reports whether the connection
+// ended before the body framed by the message's own headers was complete
+// (USK-1229): a Content-Length body that received fewer bytes than
+// declared, or a chunked body whose stream ended before the terminal
+// zero-size chunk. detail describes the shortfall for the
+// AnomalyTruncatedBody anomaly. EOF-delimited bodies (HTTP/1.0 /
+// Connection: close without Content-Length) are complete by definition and
+// never report truncation. The reader still returns io.EOF at the cut so
+// existing drain loops are unchanged; callers that care consult this.
+type BodyTruncationProvider interface {
+	BodyTruncated() (truncated bool, detail string)
 }
 
 // ChunkRecordSetter is implemented by body readers that decode chunked

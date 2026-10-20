@@ -609,7 +609,9 @@ func TestChannel_KeepAlive_MultipleRequests(t *testing.T) {
 		"GET /second HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
 	go func() {
 		client.Write([]byte(reqs))
-		client.Close()
+		// USK-1229: keep reading the responses (the first request must be
+		// answered for the second to be parsed).
+		_, _ = io.Copy(io.Discard, client)
 	}()
 
 	// USK-730: per-exchange Channel — each keep-alive request yields its
@@ -627,6 +629,7 @@ func TestChannel_KeepAlive_MultipleRequests(t *testing.T) {
 	if msg1.Path != "/first" {
 		t.Errorf("Path = %q, want /first", msg1.Path)
 	}
+	answerOK(t, ch1)
 	_ = ch1.Close()
 
 	ch2 := <-l.Channels()
@@ -1726,14 +1729,16 @@ func TestHTTP1Layer_StateReleaserFiresPerTransaction(t *testing.T) {
 		WithStateReleaser(rec),
 	)
 
-	// Three keep-alive requests; client.Close at the end drains EOF on
-	// the fourth Next so markTerminated fires from the parse loop.
+	// Three keep-alive requests, each answered; l.Close at the end ends
+	// the fourth parse.
 	reqs := "GET /first HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n" +
 		"GET /second HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n" +
 		"GET /third HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
 	go func() {
 		_, _ = client.Write([]byte(reqs))
-		_ = client.Close()
+		// USK-1229: read the responses; each request is answered so the
+		// next keep-alive request is parsed.
+		_, _ = io.Copy(io.Discard, client)
 	}()
 
 	// USK-730: per-exchange Channel — each request gets its own Channel,
@@ -1757,6 +1762,7 @@ func TestHTTP1Layer_StateReleaserFiresPerTransaction(t *testing.T) {
 		if env.FlowID == "" {
 			t.Fatalf("Next #%d: empty FlowID", i+1)
 		}
+		answerOK(t, ch)
 		_ = ch.Close()
 	}
 
@@ -1949,7 +1955,9 @@ func TestHTTP1Layer_ReleaseStream_FiresOnConnectionClose(t *testing.T) {
 		"GET /third HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
 	go func() {
 		_, _ = client.Write([]byte(reqs))
-		_ = client.Close()
+		// USK-1229: read the responses; each request is answered so the
+		// next keep-alive request is parsed.
+		_, _ = io.Copy(io.Discard, client)
 	}()
 
 	streamIDs := make([]string, 0, 3)
@@ -1966,6 +1974,7 @@ func TestHTTP1Layer_ReleaseStream_FiresOnConnectionClose(t *testing.T) {
 		if env.StreamID == "" {
 			t.Fatalf("Next #%d: empty StreamID", i+1)
 		}
+		answerOK(t, ch)
 		_ = ch.Close()
 	}
 

@@ -23,11 +23,11 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// TestConnectPolicyAllow_IPv6RuleForms is T1: the CONNECT gate receives the
+// TestConnectPolicyReject_IPv6RuleForms is T1: the CONNECT gate receives the
 // target exactly as the client wrote it ("[::1]:443") and splits it with
 // net.SplitHostPort before CheckTarget. A Policy deny written in either IPv6
 // spelling must block every zone-less spelling of the same address.
-func TestConnectPolicyAllow_IPv6RuleForms(t *testing.T) {
+func TestConnectPolicyReject_IPv6RuleForms(t *testing.T) {
 	tests := []struct {
 		name      string
 		denyHost  string
@@ -47,9 +47,9 @@ func TestConnectPolicyAllow_IPv6RuleForms(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			scope := NewTargetScope()
 			scope.SetPolicyRules(nil, []TargetRule{{Hostname: tc.denyHost}})
-			got := connectPolicyAllow(CONNECTHandlerConfig{Scope: scope}, tc.target, discardLogger())
+			got := connectPolicyReject(CONNECTHandlerConfig{Scope: scope}, tc.target, discardLogger()) == nil
 			if got != tc.wantAllow {
-				t.Errorf("connectPolicyAllow(deny %q, target %q) = %v, want %v",
+				t.Errorf("connectPolicyReject(deny %q, target %q) admitted = %v, want %v",
 					tc.denyHost, tc.target, got, tc.wantAllow)
 			}
 		})
