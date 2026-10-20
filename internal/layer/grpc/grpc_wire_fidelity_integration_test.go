@@ -33,6 +33,9 @@ import (
 	"golang.org/x/net/http2/hpack"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
+	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 )
 
 // fidelityOrigin is a raw HTTP/2 gRPC origin that records every request's
@@ -464,4 +467,52 @@ func TestGRPCFidelity_EndStreamResponseWithoutGRPCStatus(t *testing.T) {
 		t.Errorf("recorded End Metadata = %v, want grpc_anomaly_missing_status", ends[0].Metadata)
 	}
 	waitForStreamState(t, store, st.ID, "complete", 5*time.Second)
+}
+
+// TestGRPCFidelity_DroppedEndAfterHeldStartResetsClient: an intercept drop
+// of the Receive End of a bare HEADERS(:status 503, END_STREAM) response,
+// after its Start was released, leaves the deferred response HEADERS
+// unsent. The client must not hang: session teardown resets the stream,
+// and no response HEADERS reaches it (documented in sendStart).
+func TestGRPCFidelity_DroppedEndAfterHeldStartResetsClient(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ca, issuer := makeCA(t)
+	origin := startFidelityOrigin(t, issuer)
+
+	engine := grpcrules.NewInterceptEngine()
+	engine.SetRules([]grpcrules.InterceptRule{{
+		ID:        "hold-receive",
+		Enabled:   true,
+		Direction: grpcrules.DirectionReceive,
+	}})
+	queue := common.NewHoldQueue()
+	proxyAddr, _ := startGRPCMITMProxy(t, ctx, ca, issuer, pipelineOpts{intercept: engine, queue: queue})
+
+	// Release the held Receive Start unchanged; drop the held Receive End.
+	go func() {
+		for ctx.Err() == nil {
+			for _, e := range queue.List() {
+				switch e.Envelope.Message.(type) {
+				case *envelope.GRPCStartMessage:
+					_ = queue.Release(e.ID, &common.HoldAction{Type: common.ActionRelease})
+				case *envelope.GRPCEndMessage:
+					_ = queue.Release(e.ID, &common.HoldAction{Type: common.ActionDrop})
+					return
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	start := time.Now()
+	frames := rawGRPCCall(t, proxyAddr, origin.addr(), "/fid.Svc/Bare503", []hpack.HeaderField{
+		hf("content-type", "application/grpc"), hf("te", "trailers"),
+	})
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("client stream ended after %v, want a prompt reset", elapsed)
+	}
+	if len(frames) != 1 || frames[0].kind != "rst" {
+		t.Errorf("client frames = %v, want exactly one RST_STREAM (the held HEADERS is discarded)", frames)
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1259,7 +1260,11 @@ func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *
 	if env.Direction == envelope.Receive && opaque != nil && opaque.endStreamEnd != nil {
 		// The upstream's HEADERS frame carried END_STREAM: hold it so
 		// sendEnd can write the response back as that one frame
-		// (USK-1251).
+		// (USK-1251). If a Step drops the Receive End (intercept drop,
+		// plugin), the held HEADERS is never sent: session teardown
+		// closes this Channel, which discards it, and the client sees
+		// RST_STREAM with no response HEADERS. Only an operator action
+		// reaches this, and nothing leaks (pendingResp dies with c).
 		c.pendingResp = &pendingResponseHeaders{env: innerEnv, baseline: opaque.endStreamEnd}
 		return nil
 	}
@@ -1304,19 +1309,67 @@ func (c *grpcChannel) sendEndStreamResponse(ctx context.Context, env *envelope.E
 		if err := c.inner.Send(ctx, pending.env); err != nil {
 			return err
 		}
+		trailers := buildEndTrailerKVs(m)
+		if hasPlaceholderStatus(m) {
+			// The upstream sent no grpc-status and the End's status was
+			// not edited: write only the edited trailers rather than a
+			// made-up grpc-status: 0.
+			trailers = slices.Clone(m.Trailers)
+		}
 		return c.inner.Send(ctx, &envelope.Envelope{
 			StreamID:  env.StreamID,
 			FlowID:    env.FlowID,
 			Sequence:  env.Sequence,
 			Direction: env.Direction,
 			Protocol:  envelope.ProtocolHTTP,
-			Message:   &http2.H2TrailersEvent{Trailers: buildEndTrailerKVs(m)},
+			Message:   &http2.H2TrailersEvent{Trailers: trailers},
 			Context:   env.Context,
 		})
 	}
 	hdr.Headers = withEndStatusInHeaders(hdr.Headers, m, pending.baseline)
 	hdr.EndStream = true
 	return c.inner.Send(ctx, pending.env)
+}
+
+// sendPlaceholderEnd writes a Receive-direction AnomalyGRPCMissingStatus
+// End (status fields untouched) whose response HEADERS was not deferred.
+// It never fabricates a grpc-status the upstream did not send (USK-1251):
+//
+//   - The response HEADERS already went out (the Start was Clone()d, or a
+//     Data flushed it): an untouched End ends the stream with an empty
+//     DATA frame; an End whose Trailers were edited ends it with a
+//     TRAILERS frame carrying exactly those trailers.
+//   - No response HEADERS went out (a Step dropped the Receive Start):
+//     the only frame left would be a proxy-built Trailers-Only, which
+//     needs a fabricated :status and grpc-status and would turn e.g. a
+//     load balancer's 503 into a successful RPC. Send fails with a
+//     StreamError instead, so the session resets the client stream.
+//
+// Caller holds c.sendMu. The endSent latch is set before the inner Send.
+func (c *grpcChannel) sendPlaceholderEnd(ctx context.Context, env *envelope.Envelope, m *envelope.GRPCEndMessage) error {
+	c.mu.Lock()
+	started := c.recv.startEmitted
+	c.recv.endSent = true
+	c.mu.Unlock()
+	if !started {
+		return &layer.StreamError{
+			Code:   layer.ErrorInternalError,
+			Reason: "grpc: response without grpc-status has no response HEADERS to end",
+		}
+	}
+	var msg envelope.Message = &http2.H2DataEvent{EndStream: true}
+	if len(m.Trailers) > 0 {
+		msg = &http2.H2TrailersEvent{Trailers: slices.Clone(m.Trailers)}
+	}
+	return c.inner.Send(ctx, &envelope.Envelope{
+		StreamID:  env.StreamID,
+		FlowID:    env.FlowID,
+		Sequence:  env.Sequence,
+		Direction: env.Direction,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   msg,
+		Context:   env.Context,
+	})
 }
 
 // sendData converts a GRPCDataMessage envelope into an H2DataEvent
@@ -1407,9 +1460,9 @@ func (c *grpcChannel) sendData(ctx context.Context, env *envelope.Envelope, m *e
 //
 // Two relayed shapes take precedence (USK-1251): when sendStart deferred
 // the response HEADERS because the upstream's frame carried END_STREAM,
-// sendEndStreamResponse writes it back as that one frame; and the
-// AnomalyGRPCMissingStatus placeholder End after an already-sent HEADERS
-// ends the stream with an empty DATA frame, fabricating no grpc-status.
+// sendEndStreamResponse writes it back as that one frame; and an
+// AnomalyGRPCMissingStatus placeholder End otherwise goes through
+// sendPlaceholderEnd, which never fabricates a grpc-status.
 //
 // Caller (Send) holds c.sendMu. The direction's endSent latch is set before
 // the inner Send so a failed write is not retried with more frames.
@@ -1419,29 +1472,8 @@ func (c *grpcChannel) sendEnd(ctx context.Context, env *envelope.Envelope, m *en
 			c.pendingResp = nil
 			return c.sendEndStreamResponse(ctx, env, m, p)
 		}
-		if isMissingStatusPlaceholder(m) {
-			c.mu.Lock()
-			started := c.recv.startEmitted
-			if started {
-				c.recv.endSent = true
-			}
-			c.mu.Unlock()
-			if started {
-				// The response HEADERS already went out (its Start was
-				// Clone()d, so it was not deferred) and the upstream sent
-				// no grpc-status at all: end the stream with an empty
-				// DATA frame rather than fabricate a grpc-status trailer
-				// (USK-1251).
-				return c.inner.Send(ctx, &envelope.Envelope{
-					StreamID:  env.StreamID,
-					FlowID:    env.FlowID,
-					Sequence:  env.Sequence,
-					Direction: env.Direction,
-					Protocol:  envelope.ProtocolHTTP,
-					Message:   &http2.H2DataEvent{EndStream: true},
-					Context:   env.Context,
-				})
-			}
+		if hasPlaceholderStatus(m) {
+			return c.sendPlaceholderEnd(ctx, env, m)
 		}
 	}
 	statusKVs := buildEndTrailerKVs(m)

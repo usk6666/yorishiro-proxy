@@ -311,12 +311,14 @@ func setHeaderValues(kvs []envelope.KeyValue, name, value string) []envelope.Key
 	return out
 }
 
-// isMissingStatusPlaceholder reports whether m is the untouched End this
-// Layer synthesizes for a response without any grpc-status
-// (AnomalyGRPCMissingStatus, every field still zero). Sending it must not
-// fabricate a grpc-status the upstream never sent.
-func isMissingStatusPlaceholder(m *envelope.GRPCEndMessage) bool {
-	if m.Status != 0 || m.Message != "" || len(m.StatusDetails) > 0 || len(m.Trailers) > 0 {
+// hasPlaceholderStatus reports whether m is the End this Layer synthesizes
+// for a response without any grpc-status (AnomalyGRPCMissingStatus) with
+// its status fields still untouched (Status 0, no message, no details).
+// Its Trailers may have been edited. Sending it must not fabricate a
+// grpc-status the upstream never sent: Status 0 here means "absent", not
+// OK.
+func hasPlaceholderStatus(m *envelope.GRPCEndMessage) bool {
+	if m.Status != 0 || m.Message != "" || len(m.StatusDetails) > 0 {
 		return false
 	}
 	for _, a := range m.Anomalies {

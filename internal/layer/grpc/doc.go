@@ -89,9 +89,17 @@
 //     entries in place; a Start-side edit is relayed as edited; an End
 //     Trailers edit falls back to HEADERS + TRAILERS rebuilt from the End.
 //     A Data Send in between flushes the HEADERS first without
-//     END_STREAM. When the Start was Clone()d (no Opaque, not deferred),
-//     an untouched placeholder End is sent as an empty END_STREAM DATA
-//     frame instead of a fabricated grpc-status trailer.
+//     END_STREAM. A placeholder End whose status fields are untouched
+//     never gets a fabricated grpc-status: in the Trailers-edit fallback
+//     its TRAILERS carry only the edited trailers; after HEADERS already
+//     went out (Start Clone()d — no Opaque, not deferred — or flushed by
+//     a Data) it is an empty END_STREAM DATA frame, or a TRAILERS frame
+//     of just its edited trailers; and when no response HEADERS went out
+//     at all (a Step dropped the Receive Start) Send fails with a
+//     StreamError so the client stream is reset rather than answered
+//     with a proxy-built grpc-status 0. A dropped End leaves the deferred
+//     HEADERS unsent; teardown discards it and the client sees
+//     RST_STREAM.
 //
 // Synthetic firstHeaders (D5):
 //
