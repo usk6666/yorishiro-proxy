@@ -447,10 +447,6 @@ Returns the list of compiled rules, their targets, actions, and whether SafetyFi
 
 ## Output Filter Configuration
 
-> **Note**: Output Filter の config ファイル経由での設定は今後対応予定です (Coming soon)。
-> 現在、Output Filter はプログラマティック API (`safety.Config`) のみサポートしています。
-> 以下の設定例は将来の config ファイルサポート時の参考として掲載しています。
-
 ### Enable PII masking with default presets
 Add the following to your config file (`-config config.json`):
 ```json
@@ -499,12 +495,12 @@ Input filter blocks destructive payloads before they reach the target; output fi
 
 ### Add custom output masking rules
 
-> **Note**: config ファイルでは per-rule の `action`/`replacement` フィールドは未対応です。
+> **Note**: config ファイルには per-rule の `action` フィールドはありません。
 > セクションレベルの `action` が全ルールに適用されます。
-> per-rule の `action`/`replacement` はプログラマティック API (`safety.Config`) で利用可能です。
+> `replacement` は per-rule で指定できます（カスタムルールのマスク文字列、またはプリセット参照時のデフォルト置換文字列の上書き）。
 
 ```json
-// config.json (Coming soon)
+// config.json
 {
   "safety_filter": {
     "enabled": true,

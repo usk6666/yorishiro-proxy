@@ -580,7 +580,7 @@ Rules with Validators use a **slow path** (individual match validation) instead 
 
 #### Custom Output Rules
 
-Custom rules require `id`, `pattern`, and `targets` fields. The `action` and `replacement` fields are available via the programmatic API (`safety.Config`). In config files, the section-level `action` applies to all rules within that section (config file support is coming soon).
+Custom rules require `id`, `pattern`, and `targets` fields; `name` and `replacement` are optional. Rules have no per-rule `action` in the config file: the section-level `output.action` (`mask` by default, or `log_only`) applies to every rule in the section. `replacement` is honored per rule -- for a custom rule it is the mask string (an omitted `replacement` replaces matches with the empty string), and on a preset reference it overrides the preset's default replacement.
 
 ```json
 {
@@ -588,7 +588,6 @@ Custom rules require `id`, `pattern`, and `targets` fields. The `action` and `re
   "name": "API key pattern",
   "pattern": "(sk-[a-zA-Z0-9]{32,})",
   "targets": ["body"],
-  "action": "mask",
   "replacement": "[MASKED:api_key]"
 }
 ```
@@ -628,15 +627,17 @@ Output rules typically use `body` as the target. Header-level masking is also su
 | HTTP/1.x | Supported | Supported | Full support |
 | HTTP/2 | Supported | Supported | Full support |
 | gRPC | Supported | Supported | Via HTTP/2 |
-| WebSocket | Partial | Supported | Input: only custom rules with target `payload` (or `opcode`) are evaluated, per frame (all opcodes) -- the built-in presets and `body` / `url` / `query` rules never match WebSocket frames; fragment bypass possible. Output: masks frame payloads in `query` / `resend_ws` results |
+| WebSocket | Partial | Supported | Input: every client→upstream frame (all opcodes) is checked against `body` (incl. the built-in presets), `payload` and `opcode` rules; `url` / `query` / `headers` rules apply to the Upgrade request (HTTP Input Filter), not per frame; `header` is not evaluated on the live path; fragment bypass possible. Output: masks frame payloads in `query` / `resend_ws` results |
 | SOCKS5 | N/A | N/A | Transport layer only (filters apply after HTTP delegation) |
 | Raw TCP | N/A | Supported | Binary stream. Output: masks raw bytes in `query` results and `response_bytes` in `resend_raw` results, as received (no decoding) |
 
 ## WebSocket Safety Filter
 
-SafetyFilter is applied to WebSocket traffic on a per-frame basis. Every frame is evaluated regardless of opcode (text, binary, continuation and control frames alike), but on the Input side only rules targeting `payload` or `opcode` match.
+SafetyFilter is applied to WebSocket traffic on a per-frame basis. Every frame is evaluated regardless of opcode (text, binary, continuation, ping, pong and close alike; a close frame's payload includes its 2-byte status code).
 
-- **Send direction (Input Filter)**: `CheckInput` inspects the frame payload and the upgrade request URL. If a rule matches with `block` action, the frame is silently dropped (not forwarded) and the connection remains open for subsequent frames. If the blocked frame is non-FIN (start of a fragmented message), subsequent continuation frames belonging to that message are also dropped.
+- **Upgrade request**: The WebSocket handshake (HTTP/1.1 `Upgrade` request or HTTP/2 extended CONNECT) is an ordinary Send-direction HTTP request, so the HTTP Input Filter evaluates it first -- `url`, `query` and `headers` rules (including the presets' `url` / `query` targets) match here. `header` (bare or `header:Name`) is not evaluated on the live path: bare `header` is accepted by config validation but never matches, and `header:Name` is rejected at startup; bare `header` is only checked for `resend_ws` / `fuzz_ws` (below). With `block` (the default action), a match answers the handshake with `403 Forbidden` and no WebSocket connection is established; with `log_only` the match is logged and the handshake proceeds.
+- **Send direction (Input Filter, per frame)**: For each client→upstream frame, `body` and `payload` rules match the frame payload (`body` is an alias of `payload`, as for gRPC, so the built-in presets apply; a violation is reported with target `payload`), and `opcode` rules match the opcode as a hex string (e.g. `0x1` text, `0x8` close). With permessage-deflate, a single-frame compressed message is matched on its decompressed payload; in a fragmented compressed message the non-final fragments are matched on their compressed bytes and the final (FIN) frame on the whole reassembled, decompressed message. If a rule matches with `block` action, only that frame is silently dropped (not forwarded) and the connection remains open; later frames -- including continuation frames of the same fragmented message -- are still evaluated and forwarded on their own.
+- **MCP-initiated frames (`resend_ws` / `fuzz_ws`)**: These are checked by the MCP-plane engine, not the per-frame engine above. `body` rules (including the presets) are matched against the frame payload, and `url` / `query` / `header` / `headers` rules against the Upgrade URL and headers; `payload` and `opcode` rules are currently **not** evaluated there. Use `body` (or a preset) for a rule that must cover both live traffic and resend / fuzz.
 - **Output Filter (MCP boundary only)**: Frames relayed through the proxy are never masked, in either direction. When a recorded or resent frame is returned to the AI agent (`query`, `resend_ws`), `FilterOutput` masks matching content in the payload copy of that tool response. The original unmasked payload is preserved in the Flow Store.
 
 ### Applicable Rule Targets
@@ -645,16 +646,19 @@ WebSocket frames do not carry HTTP headers. The applicable rule targets differ b
 
 | Target | Input Filter | Output Filter | Reason |
 |--------|-------------|---------------|--------|
-| `body` | No | Yes | Input Filter: not evaluated for WebSocket frames (use `payload`). Output Filter: masks the payload copy returned by `query` / `resend_ws` |
-| `payload` | Yes | No | Input Filter: matches against the frame payload. Not an accepted Output Filter target (config validation rejects it); use `body` |
-| `url` | Yes (upgrade URL) | No | Input Filter receives the upgrade request URL; Output Filter has no URL context |
-| `query` | Yes (upgrade URL) | No | Input Filter can match the query string of the upgrade request URL |
-| `header` / `headers` | No | No | WebSocket frames have no HTTP headers |
+| `body` | Yes | Yes | Input Filter: alias of `payload` -- matches the frame payload (live frames and `resend_ws` / `fuzz_ws`). Output Filter: masks the payload copy returned by `query` / `resend_ws` |
+| `payload` | Yes (live frames only) | No | Input Filter: matches the frame payload of proxied frames; not evaluated for `resend_ws` / `fuzz_ws`. Not an accepted Output Filter target (config validation rejects it); use `body` |
+| `opcode` | Yes (live frames only) | No | Input Filter: matches the opcode as a hex string (`0x0`-`0xA`); not evaluated for `resend_ws` / `fuzz_ws` |
+| `url` | Upgrade request only | No | Not evaluated per frame. The HTTP Input Filter matches it on the Upgrade request (403 on match); `resend_ws` / `fuzz_ws` check it against the Upgrade URL |
+| `query` | Upgrade request only | No | Same as `url`, for the query string of the Upgrade request URL |
+| `headers` | Upgrade request only | No | WebSocket frames have no HTTP headers; matched on the Upgrade request's headers only (live HTTP Input Filter and `resend_ws` / `fuzz_ws`) |
+| `header` | `resend_ws` / `fuzz_ws` only | No | Not evaluated on the live path (bare `header` never matches; `header:Name` is rejected at startup). `resend_ws` / `fuzz_ws` check it against the Upgrade headers. Use `headers` for live traffic |
 
 ### Known Limitations
 
-1. **Fragment bypass**: Filters are applied per-frame, not per-message. Each frame's payload, including continuation frames (opcode 0x0), is inspected on its own, so a pattern split across frame boundaries (e.g., `DROP` in one frame and ` TABLE` in the next) will not be detected.
-2. **No header matching**: WebSocket data frames lack HTTP headers, so rules targeting `header` or `headers` have no effect. However, `url` and `query` rules are effective for the Input Filter because `CheckInput` receives the upgrade request URL.
+1. **Fragment bypass**: Filters are applied per-frame, not per-message. Each frame's payload of an uncompressed fragmented message, including continuation frames (opcode 0x0), is inspected on its own, so a pattern split across frame boundaries (e.g., `DROP` in one frame and ` TABLE` in the next) will not be detected. Fragmented permessage-deflate messages are matched as a whole only on their FIN frame. By then the preceding fragments have already been forwarded, and a block drops only the FIN frame. The proxy then stops tracking the message, so a client can re-send a final continuation frame (matched only on its raw compressed bytes) and complete the blocked message upstream. Do not rely on the Input Filter to stop fragmented compressed messages. A follow-up tracks per-message matching.
+2. **Blocking one fragment does not block the message**: Only the matching frame is dropped; the remaining fragments of the same message are forwarded. A follow-up tracks changing this.
+3. **No per-frame URL / header matching**: `url`, `query`, `header` and `headers` rules never match individual frames. `url`, `query` and `headers` are enforced once, on the Upgrade request; `header` is not enforced on live traffic at all (bare `header` is checked only for `resend_ws` / `fuzz_ws`).
 
 ## Error Handling
 
