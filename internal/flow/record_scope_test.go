@@ -213,6 +213,53 @@ func TestRecordScope_Method_GRPC(t *testing.T) {
 	}
 }
 
+// TestExtractScopeFields_GRPCStartHTTPMethod pins USK-1252: a gRPC-Web
+// Start carries the observed HTTP request method on HTTPMethod, and
+// capture_scope must see that method verbatim instead of a hardcoded
+// POST. A Start without one (native gRPC, synthetic producers) still
+// projects POST — the method those Starts are sent with.
+func TestExtractScopeFields_GRPCStartHTTPMethod(t *testing.T) {
+	tests := []struct {
+		name       string
+		proto      envelope.Protocol
+		httpMethod string
+		want       string
+	}{
+		{"grpcweb_get", envelope.ProtocolGRPCWeb, "GET", "GET"},
+		{"grpcweb_lowercase_verbatim", envelope.ProtocolGRPCWeb, "put", "put"},
+		{"grpcweb_post", envelope.ProtocolGRPCWeb, "POST", "POST"},
+		{"grpcweb_without_method_falls_back", envelope.ProtocolGRPCWeb, "", "POST"},
+		{"native_grpc_falls_back", envelope.ProtocolGRPC, "", "POST"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := grpcStartEnv(t, tt.proto, "grpcb.in:443", "hello.HelloService", "SayHello")
+			env.Message.(*envelope.GRPCStartMessage).HTTPMethod = tt.httpMethod
+			method, _, path := extractScopeFields(env)
+			if method != tt.want {
+				t.Errorf("method = %q, want %q", method, tt.want)
+			}
+			if path != "/hello.HelloService/SayHello" {
+				t.Errorf("path = %q, want %q", path, "/hello.HelloService/SayHello")
+			}
+		})
+	}
+
+	// A method rule sees the observed method: GET matches, POST does not.
+	get := grpcStartEnv(t, envelope.ProtocolGRPCWeb, "grpcb.in:443", "hello.HelloService", "SayHello")
+	get.Message.(*envelope.GRPCStartMessage).HTTPMethod = "GET"
+	rsGet := NewRecordScope()
+	rsGet.SetRules([]ScopeRule{{Hostname: "grpcb.in", Method: "GET"}}, nil)
+	if !rsGet.ShouldRecord(get) {
+		t.Error("method=GET rule must match a gRPC-Web GET Start")
+	}
+	rsPost := NewRecordScope()
+	rsPost.SetRules([]ScopeRule{{Hostname: "grpcb.in", Method: "POST"}}, nil)
+	if rsPost.ShouldRecord(get) {
+		t.Error("method=POST rule must not match a gRPC-Web GET Start")
+	}
+}
+
 // TestRecordScope_URLPrefix_GRPCWeb verifies that gRPC-Web envelopes —
 // which share the *envelope.GRPCStartMessage type with native gRPC — are
 // covered by the same arm (USK-909).

@@ -97,6 +97,18 @@ type GRPCStartMessage struct {
 	// observed :path carried no query. USK-1053.
 	RawQuery string
 
+	// HTTPMethod is the HTTP request method observed on the request that
+	// carried this Start (the HTTP/1.x request-line method or the HTTP/2
+	// :method pseudo-header), verbatim — no case folding (RFC 9110 §9.1
+	// methods are case-sensitive). Populated on the request side
+	// (Direction=Send) by the gRPC-Web Layer, which relays it to the
+	// upstream; empty on the response side. The native gRPC Layer does
+	// not populate it yet. An empty value (synthetic producers such as
+	// resend / fuzz) is sent as POST. A derived L7 overlay like
+	// Authority / Scheme / Path — the wire bytes stay in Envelope.Raw.
+	// USK-1252.
+	HTTPMethod string
+
 	// HTTPStatus is the HTTP status code of the response that carried
 	// this Start (the HTTP/1.x status line or the HTTP/2 :status
 	// pseudo-header). Populated on the response side (Direction=Receive)

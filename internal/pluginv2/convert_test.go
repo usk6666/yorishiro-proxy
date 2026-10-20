@@ -227,6 +227,9 @@ def hook(msg):
 				Scheme:    "http",
 				Path:      "/greeter.Greeter/SayHello",
 				RawQuery:  "trace=1",
+				// USK-1252: the gRPC-Web request-method overlay. Not a
+				// dict key, so it must be carried too.
+				HTTPMethod: "PUT",
 				// USK-1219: the gRPC-Web response-side status overlay.
 				// Not a dict key either, so it must be carried too.
 				HTTPStatus:       503,
@@ -265,6 +268,9 @@ def hook(msg):
 			if gm.RawQuery != m.RawQuery {
 				t.Errorf("RawQuery = %q, want %q (must survive rebuild)", gm.RawQuery, m.RawQuery)
 			}
+			if gm.HTTPMethod != m.HTTPMethod {
+				t.Errorf("HTTPMethod = %q, want %q (must survive rebuild)", gm.HTTPMethod, m.HTTPMethod)
+			}
 			if gm.HTTPStatus != m.HTTPStatus {
 				t.Errorf("HTTPStatus = %d, want %d (must survive rebuild)", gm.HTTPStatus, m.HTTPStatus)
 			}
@@ -288,6 +294,8 @@ func TestGRPCStart_PseudoHeadersAreNotPluginMutableKeys(t *testing.T) {
 		Scheme:    "http",
 		Path:      "/greeter.Greeter/SayHello",
 		RawQuery:  "trace=1",
+		// USK-1252: kept off the hook surface like the rest of the overlay.
+		HTTPMethod: "PUT",
 		// USK-1219: kept off the hook surface like the request overlay.
 		HTTPStatus:       503,
 		HTTPStatusReason: "Service Unavailable",
@@ -301,7 +309,7 @@ func TestGRPCStart_PseudoHeadersAreNotPluginMutableKeys(t *testing.T) {
 	for _, k := range d.sortedKeysForTest() {
 		present[k] = true
 	}
-	for _, key := range []string{"authority", "scheme", "path", "raw_query", "http_status", "http_status_reason"} {
+	for _, key := range []string{"authority", "scheme", "path", "raw_query", "http_method", "http_status", "http_status_reason"} {
 		if present[key] {
 			t.Errorf("dict key %q is present; pseudo-headers must stay off the plugin hook surface", key)
 		}
