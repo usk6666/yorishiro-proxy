@@ -151,7 +151,13 @@ type Envelope struct {
 	// Per-Layer support (USK-1079, USK-1238): HTTP/1.x (both directions),
 	// raw TCP (bytechunk), and WebSocket honour it, as does the
 	// session-side SSE event writer (USK-1239); gRPC Data and gRPC-Web
-	// already write a non-empty Raw verbatim. HTTP/2 does not yet.
+	// Data/End already write a non-empty Raw verbatim. Header-block
+	// envelopes of the HTTP/2 family — an h2 HTTPMessage, a gRPC Start /
+	// End, a gRPC-Web Start — cannot be written verbatim (their Raw is
+	// unframed HPACK / a header snapshot), so the Pipeline refuses a
+	// plugin's raw write on them and never sets the marker (USK-1237;
+	// see the Layer-owned RawWinsSupported predicates registered on the
+	// route's WireEncoderRegistry).
 	//
 	// Clone copies the flag. It is never set on Layer-produced envelopes.
 	RawAuthoritative bool

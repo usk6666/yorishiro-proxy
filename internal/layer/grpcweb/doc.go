@@ -85,6 +85,16 @@
 // (the observed path wins when parseServiceMethod cannot represent it) and
 // forwards RawQuery for the inner HTTP Layer to rejoin.
 //
+// # Request method (USK-1252)
+//
+// The request method observed by the inner Layer (HTTP/1.x request line or
+// HTTP/2 :method) is projected onto GRPCStartMessage.HTTPMethod and relayed
+// verbatim, without case folding, by the opposite-side Send
+// (methodForStart): classification is content-type-only, so a GET or PUT
+// carrying a gRPC-Web content-type reaches the upstream as that method, not
+// POST. A Start without one (synthetic producers, or a live request whose
+// :method / request-line method was absent or empty) is sent as POST.
+//
 // # Malformed bodies, request trailers and framing headers (USK-1203)
 //
 // A body that fails to parse (malformed base64 / LPM / trailer) is emitted

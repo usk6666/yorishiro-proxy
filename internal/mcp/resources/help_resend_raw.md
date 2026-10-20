@@ -62,8 +62,8 @@ Tag stored on the new flow's `Tags` map.
 ## Result fields
 
 - `stream_id` — new Stream record holding send Flow + every received chunk Flow
-- `response_bytes` — concatenated payload across all received bytechunk envelopes (always base64; raw bytes are binary by definition)
-- `response_size` — total received byte count
+- `response_bytes` — concatenated payload across all received bytechunk envelopes (always base64; raw bytes are binary by definition), masked by SafetyFilter Output Filter when active (bytes as received; the recorded Flows keep the original)
+- `response_size` — total received byte count (wire length, before any Output Filter masking)
 - `response_chunks` — envelope count for callers who want segmentation shape without per-chunk schema
 - `truncated` — `true` when the receive loop hit the per-call response cap before upstream closed
 - `duration_ms` / `tag`

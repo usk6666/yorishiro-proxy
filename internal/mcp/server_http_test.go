@@ -119,6 +119,10 @@ func TestRunHTTP_RejectsNonLoopbackAddress(t *testing.T) {
 		{"all_interfaces", ":3000"},
 		{"explicit_all", "0.0.0.0:3000"},
 		{"external_ip", "192.168.1.1:3000"},
+		// USK-1125: the proxy listener accepts these, the MCP HTTP
+		// server must not.
+		{"private_ip", "10.0.0.5:3000"},
+		{"ipv6_unspecified", "[::]:3000"},
 	}
 
 	for _, tt := range tests {

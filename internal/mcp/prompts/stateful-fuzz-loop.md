@@ -177,4 +177,4 @@ After testing is complete:
 
 - Within one `run_macro` invocation, earlier steps' extracted KV pairs are available to later steps via `§var_name§` template expansion.
 - KV Store is reset between top-level `run_macro` invocations.
-- To carry state across macro invocations, read the returned `kv_store` and feed it into the next call's `initial_vars`.
+- To carry state across macro invocations, read the returned `kv_store` and feed it into the next call's `initial_vars`. When a SafetyFilter Output rule is configured, returned `kv_store` values that match it are masked, so a masked value cannot be carried over this way — extract it again inside the macro instead.

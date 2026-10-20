@@ -11,10 +11,16 @@ Listener name for multi-listener support. Allows running multiple simultaneous l
 - Default: `"default"`
 
 ### listen_addr (string, optional)
-TCP address to listen on. Must be a loopback address for security.
+TCP address the proxy listener (HTTP, HTTPS via CONNECT, and SOCKS5 on the same port) binds to.
 - Default: `"127.0.0.1:8080"`
-- Format: `"host:port"` (e.g. `"127.0.0.1:9090"`, `"[::1]:8080"`)
-- Only loopback addresses (127.0.0.1, ::1, localhost) are allowed
+- Format: `"host:port"`. The host must be an IP literal or the literal `localhost`: loopback (`"127.0.0.1:9090"`, `"[::1]:8080"`), all interfaces (`"0.0.0.0:8080"`, `"[::]:8080"`), or one specific interface address (`"10.0.0.5:8080"`, `"[fe80::1%eth0]:8080"`)
+- To listen on all interfaces, write `0.0.0.0` or `[::]` explicitly — an empty host (`":8080"`) is rejected
+- `0.0.0.0` binds IPv4 only; `[::]` is the dual-stack wildcard and accepts IPv4 as well as IPv6 connections (write firewall rules for both families when using `[::]`). An IPv4-mapped literal such as `[::ffff:0.0.0.0]` is treated as the IPv4 address it maps and binds IPv4 only
+- Host names other than `localhost` are rejected (the bound interface must not depend on DNS), as are legacy IPv4 spellings such as `127.1`
+- The port must be a decimal number 0-65535 (`0` = kernel-assigned); service names such as `http` are rejected
+- **A non-loopback address makes the proxy an open proxy**: there is no client authentication, so any host that can route to the address can use it. Access control is the network side (firewall / nftables) plus the `target_scope` Policy layer — see `docs(topic="security")`, section "Listener Exposure". When the listener binds a non-loopback address the server logs one `Warn` line (`proxy listener bound to non-loopback address`) at start
+- `tcp_forwards` listeners inherit this listener's bound host (a `0.0.0.0` listener exposes its forwards on `0.0.0.0` too; a `[::1]` listener puts them on `::1`)
+- A bind that overlaps another running listener or forward (same non-zero port, and the same host or either host `0.0.0.0` / `::`) is rejected before binding
 
 ### upstream_proxy (string, optional)
 Upstream proxy URL to route all outgoing traffic through.

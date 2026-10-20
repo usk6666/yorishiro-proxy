@@ -599,12 +599,16 @@ func validateDeps(deps Deps) error {
 }
 
 // defaultSharedEncoders registers the 4 non-conflicting per-protocol
-// encoders (ws / grpc / grpc-web / sse) on r. The HTTP encoder is left
-// unset; route-specific helpers add it.
+// encoders (ws / grpc / grpc-web / sse) on r, plus the gRPC / gRPC-Web
+// raw-wins policies (RFC-001 §9.3 D4: msg["raw"] on a Start/End header
+// block is refused, on Data honoured). The HTTP encoder is left unset;
+// route-specific helpers add it.
 func defaultSharedEncoders(r *pipeline.WireEncoderRegistry) {
 	r.Register(envelope.ProtocolWebSocket, ws.EncodeWireBytes)
 	r.Register(envelope.ProtocolGRPC, grpclayer.EncodeWireBytes)
+	r.RegisterRawWinsPolicy(envelope.ProtocolGRPC, grpclayer.RawWinsSupported)
 	r.Register(envelope.ProtocolGRPCWeb, grpcweb.EncodeWireBytes)
+	r.RegisterRawWinsPolicy(envelope.ProtocolGRPCWeb, grpcweb.RawWinsSupported)
 	r.Register(envelope.ProtocolSSE, sse.EncodeWireBytes)
 }
 
@@ -620,11 +624,14 @@ func defaultHTTP1WireEncoderRegistry() *pipeline.WireEncoderRegistry {
 // defaultHTTP2WireEncoderRegistry returns a registry for the h2 route:
 // 4 shared encoders plus httpaggregator.EncodeWireBytes for
 // envelope.ProtocolHTTP. Plugin-mutated HTTPMessage envelopes round-trip
-// to wire as HPACK-encoded H2 frames.
+// to wire as HPACK-encoded H2 frames. A plugin msg["raw"] on an
+// HTTPMessage is refused on this route (httpaggregator.RawWinsSupported,
+// RFC-001 §9.3 D4): h2 Raw is unframed HPACK and cannot be written.
 func defaultHTTP2WireEncoderRegistry() *pipeline.WireEncoderRegistry {
 	r := pipeline.NewWireEncoderRegistry()
 	defaultSharedEncoders(r)
 	r.Register(envelope.ProtocolHTTP, httpaggregator.EncodeWireBytes)
+	r.RegisterRawWinsPolicy(envelope.ProtocolHTTP, httpaggregator.RawWinsSupported)
 	return r
 }
 
@@ -866,7 +873,11 @@ func runRawRelaySession(ctx context.Context, stack *connector.ConnectionStack, p
 // path, so U1(a)'s strict rule applies once the route is known:
 //
 //   - the admitting gate's check re-run strictly, with the gate's own
-//     scheme (connector.LiveConnHandle.AdmitOpaque);
+//     scheme (connector.LiveConnHandle.ResolveOpaque). It also marks the
+//     live connection resolved, before the check and so before the relay
+//     starts, so every later policy-change re-evaluation (Reconcile /
+//     Settle) is strict too and narrowing the scope to a path-scoped
+//     allow cuts the relay (USK-1283);
 //   - HostScopeStep's verdict on the first client chunk, evaluated now
 //     rather than when the client first writes (Pipeline.AdmitsRawRelay),
 //     since a server-first upstream would otherwise reach a silent client.
@@ -875,7 +886,7 @@ func runRawRelaySession(ctx context.Context, stack *connector.ConnectionStack, p
 // target_scope) through the session's OnPipelineDrop hook; the caller
 // returns without relaying and its deferred stack.Close drops both legs.
 func refuseRawRelay(ctx context.Context, envCtx envelope.EnvelopeContext, p *pipeline.Pipeline, opts session.SessionOptions) bool {
-	allowed, reason := connector.LiveConnFromContext(ctx).AdmitOpaque()
+	allowed, reason := connector.LiveConnFromContext(ctx).ResolveOpaque()
 	if allowed && p.AdmitsRawRelay(ctx, envCtx) {
 		return false
 	}
