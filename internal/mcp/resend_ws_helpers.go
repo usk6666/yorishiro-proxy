@@ -466,16 +466,25 @@ func resendWSUpgradeURL(scheme, authority, path, rawQuery string) *url.URL {
 // canonical leg's own value also keeps the two legs of one check from
 // disagreeing on the scheme axis; lowercasing mirrors TargetScope.CheckURL,
 // which lowercases before matching.
+//
+// USK-1304 / USK-1306: the upgrade request's Host header is always
+// plan.upgradeURL.Host (buildResendWSUpgradeHeaders), so it is also
+// checked as a name leg against the dial address (checkHostHeaderLegs):
+// a port-scoped deny matches on the dial port too, and every
+// comma-separated part is deny-checked. fuzz_ws reaches this for its base
+// plan and for every variant.
 func (s *Server) checkResendWSScope(plan *resendWSPlan) error {
 	if err := s.checkTargetScopeURL(plan.upgradeURL); err != nil {
 		return err
 	}
+	scheme := strings.ToLower(plan.upgradeURL.Scheme)
 	if plan.dialAddr != plan.upgradeURL.Host {
-		if err := s.checkTargetScopeAddr(strings.ToLower(plan.upgradeURL.Scheme), plan.dialAddr); err != nil {
+		if err := s.checkTargetScopeAddr(scheme, plan.dialAddr); err != nil {
 			return err
 		}
 	}
-	return nil
+	host := []envelope.KeyValue{{Name: "Host", Value: plan.upgradeURL.Host}}
+	return checkHostHeaderLegs(s.connector.targetScope, scheme, host, envelope.WirePath(plan.upgradeURL), plan.dialAddr)
 }
 
 // buildResendWSEnvelope constructs the Send envelope and the wire bytes

@@ -188,18 +188,51 @@ func (s *TargetScope) CheckHostHeader(scheme, value, path, dialTarget string) (a
 	return s.checkNameValueLocked(scheme, value, host, port, path, dialTarget)
 }
 
+// ReasonAuthorityUninterpretable is the block reason for an authority
+// whose host:port form cannot be split (see CheckAuthority).
+const ReasonAuthorityUninterpretable = "blocked: authority has an uninterpretable host or port"
+
 // CheckAuthority checks a request authority (HTTP/1 Host as parsed,
-// HTTP/2 :authority) as a name leg against dialTarget. The whole value is
-// split leniently, as the live path always has: a missing or non-numeric
-// port takes the scheme default. Like CheckHostHeader it also deny-checks
-// each comma-separated part (strictly split) and the bare-IPv6 last-colon
+// HTTP/2 :authority) as a name leg against dialTarget. The whole value's
+// port is read leniently, as the live path always has: a missing or
+// non-numeric port takes the scheme default. Its host:port form is not:
+// when the scope has rules, a value CheckHostHeader refuses for its form
+// — colons that are neither a host:port split nor an IPv6 literal
+// ("db.internal:5432:x"), or a bracket holding anything but an IPv6
+// literal ("[db.internal:5432]:443") — is refused here too, so the
+// HTTP/2 :authority leg (no host header) does not stay open where the
+// Host leg is closed. Like CheckHostHeader it also deny-checks each
+// comma-separated part (strictly split) and the bare-IPv6 last-colon
 // reading (USK-1304), and the dial port joins the deny match (USK-1306).
 // With dialTarget "" the whole value gets the full CheckTarget check.
 func (s *TargetScope) CheckAuthority(scheme, authority, path, dialTarget string) (allowed bool, reason string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.hasRulesLocked() && !authorityFormInterpretable(scheme, authority) {
+		return false, ReasonAuthorityUninterpretable
+	}
 	host, port := splitAuthorityLenient(scheme, authority)
 	return s.checkNameValueLocked(scheme, authority, host, port, path, dialTarget)
+}
+
+// authorityFormInterpretable reports whether authority's host:port form
+// is one CheckHostHeader accepts, ignoring the port's value: either
+// splitHostHeaderValue accepts it outright, or net.SplitHostPort splits it
+// into a host that is a plain name (no colon) or, when bracketed, an IPv6
+// literal — so only an unparsable port is left, which CheckAuthority
+// reads leniently as the scheme default.
+func authorityFormInterpretable(scheme, authority string) bool {
+	if _, _, ok := splitHostHeaderValue(scheme, authority); ok {
+		return true
+	}
+	h, _, err := net.SplitHostPort(authority)
+	if err != nil {
+		return false
+	}
+	if strings.HasPrefix(authority, "[") {
+		return isIPv6Literal(h)
+	}
+	return strings.IndexByte(h, ':') < 0
 }
 
 // checkNameValueLocked deny-checks value's extra readings, then checks
