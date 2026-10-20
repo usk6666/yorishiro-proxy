@@ -293,6 +293,12 @@ func TestBindAddrsOverlap(t *testing.T) {
 		{"0.0.0.0:0", "127.0.0.1:0", false},
 		{"0.0.0.0:0", "0.0.0.0:0", false},
 		{"[::1]:8080", "127.0.0.1:8080", false},
+		// IPv4-mapped spellings are the IPv4 address they map.
+		{"[::ffff:0.0.0.0]:8080", "127.0.0.1:8080", true},
+		{"127.0.0.1:8080", "[0:0:0:0:0:ffff:0:0]:8080", true},
+		{"[::ffff:0.0.0.0]:8080", "10.0.0.5:8080", true},
+		{"[::ffff:127.0.0.1]:8080", "127.0.0.1:8080", true},
+		{"[::ffff:127.0.0.1]:8080", "10.0.0.5:8080", false},
 	}
 	for _, tt := range tests {
 		if got := bindAddrsOverlap(tt.a, tt.b); got != tt.want {
