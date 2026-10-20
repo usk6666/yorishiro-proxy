@@ -93,3 +93,26 @@ func TestH2UpstreamRST_AfterEarlyHints_ClientSeesUpstreamCode(t *testing.T) {
 	}
 	waitStreamOutcomes(t, store, map[string]int{"error/internal_error": 1}, 5*time.Second)
 }
+
+// TestH2UpstreamRST_GRPCWeb_ClientSeesUpstreamCode: the same relay for a
+// gRPC-Web request over h2 through CONNECT (the client stream is wrapped by
+// the gRPC-Web Channel). sendGRPCWebUnary lives in
+// tcp_forward_h2_rst_code_integration_test.go.
+func TestH2UpstreamRST_GRPCWeb_ClientSeesUpstreamCode(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	origin := startRefusingH2OriginOpts(t, refusingOriginOpts{mode: originRSTLast, batch: 1, rstCode: http2.ErrCodeInternal})
+	store := &flowStoreForH2Pool{}
+	proxyAddr := startProxyForRefusedTest(t, ctx, store)
+
+	cli := dialRawH2ThroughProxy(t, proxyAddr, origin.addr)
+	sendGRPCWebUnary(t, cli, origin.addr, 1)
+	r := cli.collect(t, 10*time.Second, 1)[1]
+
+	if !r.rst || r.rstCode != http2.ErrCodeInternal || len(r.statuses) != 0 {
+		t.Errorf("stream 1: statuses=%v ended=%v rst=%v code=%v; want RST_STREAM(INTERNAL_ERROR)",
+			r.statuses, r.ended, r.rst, r.rstCode)
+	}
+	waitStreamOutcomes(t, store, map[string]int{"error/internal_error": 1}, 5*time.Second)
+}
