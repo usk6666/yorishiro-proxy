@@ -1886,6 +1886,10 @@ func TestSQLiteStore_HostFilter_TagsTarget(t *testing.T) {
 		{target: "http://example.com.evil.com/x"},
 		// Legacy / live leg: server_addr only, no tags.target.
 		{serverAddr: "example.com:8443"},
+		// LIKE escape character: a backslash in the filter host must
+		// match itself, never act as the ESCAPE character.
+		{serverAddr: `a\b.example:443`},
+		{serverAddr: "ax.example:443"},
 	}
 	for i, r := range rows {
 		st := &Stream{
@@ -1915,6 +1919,8 @@ func TestSQLiteStore_HostFilter_TagsTarget(t *testing.T) {
 		{"impostor matches itself only", "example.com.evil.com", 2},
 		{"host prefix does not match", "example", 0},
 		{"LIKE wildcard is escaped", "exampl_.com", 0},
+		{"LIKE escape char matches itself", `a\b.example`, 1},
+		{"LIKE escape char does not escape the next char", `a\x.example`, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
