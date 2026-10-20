@@ -285,7 +285,10 @@ func (m *Manager) Start(ctx context.Context, listenAddr string) error {
 // default listener is already running. Returns ErrListenerExists for
 // non-default names that already exist.
 //
-// listenAddr defaults to "127.0.0.1:8080" when empty.
+// listenAddr defaults to "127.0.0.1:8080" when empty. An address that
+// overlaps a running listener or TCP forward is rejected with a wrapped
+// ErrBindConflict before the bind. A listener bound to a non-loopback
+// address logs one Warn line.
 func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string) error {
 	if name == "" {
 		name = DefaultListenerName
@@ -302,6 +305,12 @@ func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string
 			return ErrAlreadyRunning
 		}
 		return fmt.Errorf("listener %q: %w", name, ErrListenerExists)
+	}
+
+	// USK-1125: refuse an address that overlaps a running listener or
+	// forward before building the stack (m.mu is held through the bind).
+	if err := m.checkBindConflictLocked(listenAddr); err != nil {
+		return fmt.Errorf("start proxy %q: %w", name, err)
 	}
 
 	stack, err := m.factory(ctx, name, listenAddr)
@@ -351,7 +360,17 @@ func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string
 		listenerCtx: listenerCtx,
 	}
 
-	m.logger.Info("proxy started", "name", name, "listen_addr", stack.Listener.Addr())
+	boundAddr := stack.Listener.Addr()
+	m.logger.Info("proxy started", "name", name, "listen_addr", boundAddr)
+	// USK-1125: one operator-visible line per non-loopback listener start.
+	// There is no in-proxy client authentication; access control is the
+	// network side plus the TargetScope Policy.
+	if isNonLoopbackBind(boundAddr) {
+		m.logger.Warn("proxy listener bound to non-loopback address: no client authentication, reachable by any host that can route to it",
+			"name", name,
+			"listen_addr", boundAddr,
+		)
+	}
 	return nil
 }
 

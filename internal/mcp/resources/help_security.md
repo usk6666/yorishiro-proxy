@@ -62,6 +62,15 @@ The operator replaces the running Policy Layer — target scope `allows` / `deni
 - **Audit**: a successful reload logs `target scope policy reloaded` at Info with the trigger, source path, file `sha256` and `mtime`, rule counts before/after, and the resulting policy and effective rate limits and budget. `get_target_scope` reports `source` and `loaded_at` so the agent can see that the policy changed.
 - **Placement**: keep the policy file in a directory that neither the proxy's user nor the agent can write. File permissions alone are not enough — anyone who can write the directory can replace the file by rename, which is how `manage` export writes its files — so never place it where `manage` export can write.
 
+## Listener Exposure
+
+The proxy listener (`proxy_start` `listen_addr`, or the config file's `listen_addr`) defaults to `127.0.0.1:8080` but may bind any IP literal: `0.0.0.0` / `[::]` for every interface, or one specific interface address. `tcp_forwards` listeners inherit their parent listener's bound host, and SOCKS5 shares the listener's port.
+
+- **No in-proxy client access control**: the proxy has no client authentication (SOCKS5 `socks5_auth` aside) and no client CIDR allow-list. A listener on a non-loopback address is an open proxy for every host that can route to it.
+- **Where access control lives**: on the network side (host firewall / nftables, network namespaces) for *who may connect*, and in the target scope Policy Layer for *where connections may go*. Run a non-loopback listener only where both are in place.
+- **Operator signal**: binding a non-loopback address logs one Warn line, `proxy listener bound to non-loopback address`, with the listener `name` and the bound `listen_addr`.
+- **The MCP HTTP server is different**: it stays loopback-only; this section is about the proxy data-path listener alone.
+
 ## Actions
 
 ### `set_target_scope`
