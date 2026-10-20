@@ -7,9 +7,11 @@ package mcptest_test
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/mcptest"
 )
@@ -19,7 +21,9 @@ import (
 // fires: /admin is answered 403 and never reaches the upstream, and the
 // block is recorded. Before the TargetHost check HTTPScopeStep judged the
 // authority as 127.0.0.1:443, the deny's port did not match, and
-// HostScopeStep (no path) could not match a path-scoped deny either.
+// HostScopeStep (no path) could not match a path-scoped deny either. A
+// second /admin request whose Host names a different explicit port
+// (127.0.0.1:443) is blocked the same way.
 func TestE2E_ScopePortInference_PortlessHostDenyOnDialPort(t *testing.T) {
 	upstream, hits := reloadTestUpstream(t)
 	target := upstream.Listener.Addr().String()
@@ -49,11 +53,71 @@ func TestE2E_ScopePortInference_PortlessHostDenyOnDialPort(t *testing.T) {
 	if got := keepAliveGet(t, c, "127.0.0.1", "/public"); got != http.StatusOK || hits.Load() != 1 {
 		t.Fatalf("GET /public (Host 127.0.0.1) = %d (upstream hits %d), want 200 and 1", got, hits.Load())
 	}
-	if got := keepAliveGet(t, c, "127.0.0.1", "/admin"); got != http.StatusForbidden {
-		t.Errorf("GET /admin (Host 127.0.0.1, dial port %s) = %d, want 403", port, got)
+	if got, server := keepAliveGetServer(t, c, "127.0.0.1", "/admin"); got != http.StatusForbidden || server != "yorishiro-proxy" {
+		t.Errorf("GET /admin (Host 127.0.0.1, dial port %s) = %d (Server %q), want the proxy's 403", port, got, server)
 	}
 	if got := hits.Load(); got != 1 {
 		t.Errorf("upstream hits after /admin = %d, want 1 — the port-less Host carried /admin past the deny on port %s", got, port)
 	}
-	waitBlockedHTTPStream(t, h)
+	// The block is recorded, and it is the only one: /public was relayed,
+	// so the one target_scope Stream belongs to /admin. (A target_scope
+	// Stream carries no messages, so its URL cannot be read back.)
+	blocked := waitBlockedHTTPStreams(t, h, 1)
+	if s, _ := blocked[0]["scheme"].(string); s != "https" {
+		t.Errorf("blocked Stream scheme = %q, want https", s)
+	}
+
+	// An authority naming an explicit port other than the dial port is the
+	// same bypass class: the Host leg judges 127.0.0.1:443, which the deny
+	// does not cover, so only the dial-port leg can block it.
+	if got, server := keepAliveGetServer(t, c, "127.0.0.1:443", "/admin"); got != http.StatusForbidden || server != "yorishiro-proxy" {
+		t.Errorf("GET /admin (Host 127.0.0.1:443, dial port %s) = %d (Server %q), want the proxy's 403", port, got, server)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("upstream hits after /admin with Host 127.0.0.1:443 = %d, want 1 — the mismatched-port Host carried /admin past the deny on port %s", got, port)
+	}
+	waitBlockedHTTPStreams(t, h, 2)
+}
+
+// waitBlockedHTTPStreams waits until exactly n http Streams are recorded
+// with blocked_by=target_scope and returns them; more than n fails.
+func waitBlockedHTTPStreams(t *testing.T, h *mcptest.Harness, n int) []map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		flows := queryHTTPFlows(t, h, map[string]any{"blocked_by": "target_scope"})
+		if len(flows) > n {
+			t.Fatalf("%d http Streams with blocked_by=target_scope, want %d", len(flows), n)
+		}
+		if len(flows) == n {
+			return flows
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d http Streams with blocked_by=target_scope after 5s, want %d", len(flows), n)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// keepAliveGetServer is keepAliveGet that also returns the response's
+// Server header, so a 403 can be attributed to the proxy rather than the
+// upstream.
+func keepAliveGetServer(t *testing.T, c *liveTLSConn, host, path string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, "https://"+host+path, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = c.SetDeadline(time.Time{}) }()
+	if err := req.Write(c); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	resp, err := http.ReadResponse(c.br, req)
+	if err != nil {
+		t.Fatalf("read response to %s: %v", path, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return resp.StatusCode, resp.Header.Get("Server")
 }

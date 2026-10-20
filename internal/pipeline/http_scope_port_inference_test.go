@@ -58,28 +58,35 @@ func TestScopeChain_PortlessH2AuthorityDenyOnDialPort(t *testing.T) {
 		{Hostname: "x.test", Ports: []int{8443}, PathPrefix: "/admin"},
 	})
 
+	// The x.test:443 rows pin the sibling of the port-less case: an
+	// authority naming an explicit port other than the dial port. The
+	// authority leg judges x.test:443, which the deny does not cover, so
+	// only the dial-port leg can block it.
 	tests := []struct {
+		authority string
 		path      string
 		wantBlock bool
 	}{
-		{"/admin", true},
-		{"/admin/users", true},
-		{"/public", false},
+		{"x.test", "/admin", true},
+		{"x.test", "/admin/users", true},
+		{"x.test", "/public", false},
+		{"x.test:443", "/admin", true},
+		{"x.test:443", "/public", false},
 	}
 	for _, tc := range tests {
-		t.Run(tc.path, func(t *testing.T) {
+		t.Run(tc.authority+tc.path, func(t *testing.T) {
 			env := rawH2RequestEnvelope(t, []hpack.HeaderField{
 				{Name: ":method", Value: "GET"},
 				{Name: ":scheme", Value: "https"},
-				{Name: ":authority", Value: "x.test"},
+				{Name: ":authority", Value: tc.authority},
 				{Name: ":path", Value: tc.path},
 			})
 			// The h2 Layer helper is wired for a default-port dial; this
 			// connection was opened by `CONNECT x.test:8443`.
 			env.Context.TargetHost = "x.test:8443"
 			msg := env.Message.(*envelope.HTTPMessage)
-			if msg.Authority != "x.test" {
-				t.Fatalf("precondition: aggregated Authority = %q, want port-less %q", msg.Authority, "x.test")
+			if msg.Authority != tc.authority {
+				t.Fatalf("precondition: aggregated Authority = %q, want %q", msg.Authority, tc.authority)
 			}
 
 			_, action, resp := scopeChain(scope).Run(context.Background(), env)
@@ -90,7 +97,7 @@ func TestScopeChain_PortlessH2AuthorityDenyOnDialPort(t *testing.T) {
 				return
 			}
 			if action != Respond || resp == nil {
-				t.Fatalf("action = %v, want Respond (403) — the deny on the dial port was bypassed by a port-less :authority", action)
+				t.Fatalf("action = %v, want Respond (403) — the deny on the dial port was bypassed by :authority %q", action, tc.authority)
 			}
 			if m, ok := resp.Message.(*envelope.HTTPMessage); !ok || m.Status != 403 {
 				t.Errorf("response = %#v, want a 403 HTTPMessage", resp.Message)
