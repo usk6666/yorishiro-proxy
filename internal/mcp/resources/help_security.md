@@ -486,19 +486,29 @@ When SafetyFilter blocks an MCP tool operation (resend, fuzz, intercept modify_a
 
 ## SafetyFilter (Output Filter)
 
-The Output Filter is a **Policy Layer** mechanism that prevents sensitive information (PII) from being exposed to AI agents. It inspects outgoing HTTP response bodies and headers against a set of regex rules and masks matching content before returning data to the AI agent.
+The Output Filter is a **Policy Layer** mechanism that prevents sensitive information (PII) from being exposed to AI agents. When one of the MCP tools listed under [How It Works](#how-it-works) returns recorded or freshly fetched traffic to the AI agent, it inspects the covered fields of that tool response against a set of regex rules and masks matching content. Other tools return their data unmasked.
 
-Raw data is always preserved in the Flow Store -- masking is applied only when data is returned to AI agents (via MCP tools or proxy responses).
+The Output Filter operates **only at the MCP boundary**. It never touches the wire: the proxied client (browser, curl, next hop) receives the upstream response exactly as observed, and the Flow Store always records the original, unmasked bytes. Masking is applied to a copy, only when an MCP tool returns data to the AI agent.
 
 Output Filter rules are **immutable at runtime** -- they are defined in the configuration file and cannot be modified by AI agents.
 
-**Applicability**: As a Policy Layer mechanism, the Output Filter applies to **all** proxy traffic returning data to AI agents -- masking is performed both in the live pipeline (responses returned to the proxied client) and in MCP tool responses (query results, resend responses, fuzz results, intercept queue entries, compare diffs, export data).
+**Applicability**: The Output Filter protects the AI agent's input boundary, not the upstream server or the proxied client. There is no Receive-direction filtering in the live pipeline: the pipeline's SafetyStep runs the Input Filter on the Send direction only, and response traffic is relayed to the client unmodified. To block destructive payloads bound for the target, use the Input Filter instead.
 
 ### How It Works
 
-1. **Proxy Layer**: Response body and headers are masked before returning to the client (HTTP/1.x, HTTPS CONNECT, HTTP/2)
-2. **MCP Tool Layer**: Query results, resend responses, fuzz results, intercept queue entries, compare diffs, and export data are masked before returning to the AI agent
+1. **Live traffic is not masked**: Responses relayed through the proxy reach the client byte-for-byte as received from upstream (HTTP/1.x, HTTPS CONNECT, HTTP/2, gRPC, WebSocket, SSE, raw TCP). The Output Filter is never invoked on the data path.
+2. **MCP tool responses are masked**: Before a tool result is serialized for the AI agent, the following are masked:
+   - `query` -- flow details (request/response headers, bodies, decoded bodies, raw bytes), `messages` entries, and `intercept_queue` entries (headers / trailers / gRPC metadata, bodies and payloads, and raw bytes; URL components, HTTP status reasons, WebSocket close reasons and `grpc-message` are not masked)
+   - `resend_http` -- response headers and body
+   - `resend_ws` -- the response frame payload
+   - `resend_grpc` -- response DATA message payloads only; the response start metadata, trailers and `grpc-message` are **not** masked
+   - `manage` `export_flows` -- inline export only, and only partially: `body`-target rules scan the serialized JSONL text, so plain-text fields (URL, header values, metadata) can be masked, but bodies and raw bytes are base64-encoded before masking and are effectively **not** masked; `header`-target rules are not applied. Exports written to a file are not masked at all. Use `query` for masked bodies.
 3. **Raw Data Preserved**: The Flow Store always contains the original unmasked data for human review via the Web UI
+
+**Coverage notes**:
+
+- Patterns match the bytes exactly as the tool returns them. Content-Encoded (e.g. gzip, br, zstd) bodies are not decoded before masking, so a compressed body is effectively not masked. The exception is `query`'s decoded-body view (`body_decoded` / `request_body_decoded` / `response_body_decoded`), which is decoded first and then masked.
+- Tools not listed above return their data unmasked -- for example `resend_raw` (`response_bytes`) and `macro` `run_macro` (`kv_store`).
 
 ### Output Rule Configuration
 
@@ -574,16 +584,16 @@ Output rules typically use `body` as the target. Header-level masking is also su
 | HTTP/1.x | Supported | Supported | Full support |
 | HTTP/2 | Supported | Supported | Full support |
 | gRPC | Supported | Supported | Via HTTP/2 |
-| WebSocket | Supported (text only) | Supported (text only) | Binary frames not covered; fragment bypass possible |
+| WebSocket | Partial | Supported | Input: only custom rules with target `payload` (or `opcode`) are evaluated, per frame (all opcodes) -- the built-in presets and `body` / `url` / `query` rules never match WebSocket frames; fragment bypass possible. Output: masks frame payloads in `query` / `resend_ws` results |
 | SOCKS5 | N/A | N/A | Transport layer only (filters apply after HTTP delegation) |
 | Raw TCP | N/A | N/A | Binary stream |
 
 ## WebSocket Safety Filter
 
-SafetyFilter is applied to WebSocket traffic on a per-frame basis. Only **text frames** (opcode 0x1) are inspected; binary frames and control frames are passed through without filtering.
+SafetyFilter is applied to WebSocket traffic on a per-frame basis. Every frame is evaluated regardless of opcode (text, binary, continuation and control frames alike), but on the Input side only rules targeting `payload` or `opcode` match.
 
-- **Send direction (Input Filter)**: `CheckInput` inspects the text frame payload and the upgrade request URL. If a rule matches with `block` action, the frame is silently dropped (not forwarded) and the connection remains open for subsequent frames. If the blocked frame is non-FIN (start of a fragmented message), subsequent continuation frames belonging to that message are also dropped.
-- **Receive direction (Output Filter)**: `FilterOutput` inspects the text frame payload and masks matching content. The original unmasked payload is preserved in the Flow Store.
+- **Send direction (Input Filter)**: `CheckInput` inspects the frame payload and the upgrade request URL. If a rule matches with `block` action, the frame is silently dropped (not forwarded) and the connection remains open for subsequent frames. If the blocked frame is non-FIN (start of a fragmented message), subsequent continuation frames belonging to that message are also dropped.
+- **Output Filter (MCP boundary only)**: Frames relayed through the proxy are never masked, in either direction. When a recorded or resent frame is returned to the AI agent (`query`, `resend_ws`), `FilterOutput` masks matching content in the payload copy of that tool response. The original unmasked payload is preserved in the Flow Store.
 
 ### Applicable Rule Targets
 
@@ -591,16 +601,16 @@ WebSocket frames do not carry HTTP headers. The applicable rule targets differ b
 
 | Target | Input Filter | Output Filter | Reason |
 |--------|-------------|---------------|--------|
-| `body` | Yes | Yes | Matches against the text frame payload |
+| `body` | No | Yes | Input Filter: not evaluated for WebSocket frames (use `payload`). Output Filter: masks the payload copy returned by `query` / `resend_ws` |
+| `payload` | Yes | No | Input Filter: matches against the frame payload. Not an accepted Output Filter target (config validation rejects it); use `body` |
 | `url` | Yes (upgrade URL) | No | Input Filter receives the upgrade request URL; Output Filter has no URL context |
 | `query` | Yes (upgrade URL) | No | Input Filter can match the query string of the upgrade request URL |
 | `header` / `headers` | No | No | WebSocket frames have no HTTP headers |
 
 ### Known Limitations
 
-1. **Binary frames not covered**: Binary frames (opcode 0x2) are not inspected by either Input Filter or Output Filter. Regex-based pattern matching is not meaningful for binary data.
-2. **Fragment bypass**: Filters are applied per-frame, not per-message. Only text frames (opcode 0x1) are inspected; continuation frames (opcode 0x0) are not inspected by the safety filter even if the entire pattern is contained within a single continuation frame. Additionally, if a fragmented message splits a pattern across frame boundaries (e.g., `DROP` in one frame and ` TABLE` in the next), the pattern will not be detected.
-3. **No header matching**: WebSocket data frames lack HTTP headers, so rules targeting `header` or `headers` have no effect. However, `url` and `query` rules are effective for the Input Filter because `CheckInput` receives the upgrade request URL.
+1. **Fragment bypass**: Filters are applied per-frame, not per-message. Each frame's payload, including continuation frames (opcode 0x0), is inspected on its own, so a pattern split across frame boundaries (e.g., `DROP` in one frame and ` TABLE` in the next) will not be detected.
+2. **No header matching**: WebSocket data frames lack HTTP headers, so rules targeting `header` or `headers` have no effect. However, `url` and `query` rules are effective for the Input Filter because `CheckInput` receives the upgrade request URL.
 
 ## Error Handling
 

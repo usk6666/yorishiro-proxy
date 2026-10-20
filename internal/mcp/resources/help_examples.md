@@ -495,7 +495,7 @@ This masks credit card numbers, email addresses, phone numbers, and My Number in
   }
 }
 ```
-Input filter blocks destructive payloads; output filter masks PII in responses.
+Input filter blocks destructive payloads before they reach the target; output filter masks PII in data that MCP tools return to the AI agent (proxied traffic itself is never masked).
 
 ### Add custom output masking rules
 
