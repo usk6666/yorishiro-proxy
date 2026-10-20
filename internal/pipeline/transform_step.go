@@ -19,6 +19,10 @@ type TransformStep struct {
 	ws   *wsrules.TransformEngine
 	grpc *grpcrules.TransformEngine
 	sse  *sserules.TransformEngine
+
+	// Scope Steps re-run on a modified HTTP request (WithScopeRecheck).
+	hostScope *HostScopeStep
+	httpScope *HTTPScopeStep
 }
 
 // NewTransformStep creates a TransformStep. Any nil engine causes the
@@ -38,15 +42,27 @@ func NewTransformStep(
 	}
 }
 
-// WithScopeRecheck is a scaffolding stub (USK-1167 red commit).
+// WithScopeRecheck wires the scope Steps that are re-run against an HTTP
+// request a Transform rule modified (USK-1167). TransformStep runs after
+// the head-of-pipeline scope check, and a rule such as set_header Host can
+// rewrite the very field a virtual-host server routes on, so a modified
+// request is re-checked exactly as an intercept release is (recheckScope):
+// a block is the same synthetic 403 with BlockedBy=target_scope. Pass the
+// same instances the Pipeline runs at its head. Either Step may be nil;
+// without this option a transformed request is not re-checked. Returns the
+// receiver for fluent construction.
 func (s *TransformStep) WithScopeRecheck(host *HostScopeStep, http *HTTPScopeStep) *TransformStep {
+	s.hostScope = host
+	s.httpScope = http
 	return s
 }
 
 // Process type-switches on env.Message and dispatches to the per-protocol
 // TransformEngine arm. Mutations are in-place on the same Message pointer,
 // so subsequent Steps see the modifications without envelope replacement;
-// Result.Envelope is always nil.
+// Result.Envelope is always nil. A Send HTTP request a rule modified is
+// re-checked against the scope when WithScopeRecheck is wired, and a block
+// is returned as that check's Respond / target_scope Result (USK-1167).
 //
 // Each per-protocol engine is responsible for clearing env.Raw on commit
 // when a wire-encoded snapshot is invalidated by the mutation. The Step
@@ -93,6 +109,15 @@ func (s *TransformStep) processHTTP(ctx context.Context, env *envelope.Envelope,
 		// msg["raw"] write hands the wire back to the Message path. A
 		// plugin that must win registers phase="post_pipeline".
 		env.RawAuthoritative = false
+
+		// USK-1167: a request rule may have rewritten the Host header (or
+		// any other field the scope matches on) after the head-of-pipeline
+		// check; re-judge the request about to be forwarded.
+		if env.Direction == envelope.Send {
+			if r := recheckScope(ctx, s.hostScope, s.httpScope, env); r.Action != Continue {
+				return r
+			}
+		}
 	}
 
 	// In-place mutation — no Result.Envelope replacement needed.

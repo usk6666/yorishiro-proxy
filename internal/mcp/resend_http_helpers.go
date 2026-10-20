@@ -634,17 +634,25 @@ func resolveResendHTTPDial(msg *envelope.HTTPMessage, overrideHost string) (addr
 // (envelope.WirePath, == msg.Path), the same form TargetScope.CheckURL and
 // the live HTTPScopeStep match on; canonical.Path is only the lenient
 // decoding since USK-1139, and CheckTarget decodes once more itself.
+//
+// USK-1167: every Host header value is checked too, against the dial
+// address addr (checkHostHeaderLegs). The HTTP/1 encoder writes the Host
+// line from msg.Headers and never from msg.Authority, so a `headers` list
+// naming a denied vhost reached it on an allowed authority. The Host legs
+// use the canonical leg's scheme and the wire-form path.
 func (s *Server) checkResendHTTPScope(msg *envelope.HTTPMessage, addr, overrideHost string) error {
 	canonical := resendHTTPRequestURL(msg)
 	if err := s.checkTargetScopeURL(canonical); err != nil {
 		return err
 	}
+	scheme := strings.ToLower(canonical.Scheme)
+	path := envelope.WirePath(canonical)
 	if overrideHost != "" {
-		if err := s.checkTargetScopeAddrPath(strings.ToLower(canonical.Scheme), addr, envelope.WirePath(canonical)); err != nil {
+		if err := s.checkTargetScopeAddrPath(scheme, addr, path); err != nil {
 			return err
 		}
 	}
-	return nil
+	return checkHostHeaderLegs(s.connector.targetScope, scheme, msg.Headers, path, addr)
 }
 
 // resendHTTPRequestURL composes the canonical *url.URL used for scope

@@ -1274,7 +1274,13 @@ func (s *Server) checkFuzzHTTPVariantScope(plan *fuzzHTTPPlan, variantMsg *envel
 	if plan.useTLS {
 		connScheme = "https"
 	}
-	return s.checkTargetScopeAddrPath(connScheme, plan.dialAddr, variantMsg.Path)
+	if err := s.checkTargetScopeAddrPath(connScheme, plan.dialAddr, variantMsg.Path); err != nil {
+		return err
+	}
+	// USK-1167: the encoder writes the variant's Host header lines, so each
+	// value — after headers[N].value / .name positions and §var§ expansion —
+	// is judged against the dialled address on the connection scheme.
+	return checkHostHeaderLegs(s.connector.targetScope, connScheme, variantMsg.Headers, variantMsg.Path, plan.dialAddr)
 }
 
 // runFuzzHTTPSingleExchange runs one variant's send/receive cycle and

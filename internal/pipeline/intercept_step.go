@@ -107,7 +107,8 @@ func (s *InterceptStep) WithScopeRecheck(host *HostScopeStep, http *HTTPScopeSte
 // It exists for code that forwards an envelope after the head of the
 // Pipeline already scope-checked an earlier form of it: an intercept
 // release (scope may have narrowed during the hold, or modify_and_forward
-// rewrote the target) and, later, plugin rewrites (USK-1150).
+// rewrote the target), a request a Transform rule modified (USK-1167, e.g.
+// set_header Host) and, later, plugin rewrites (USK-1150).
 func recheckScope(ctx context.Context, host *HostScopeStep, httpStep *HTTPScopeStep, env *envelope.Envelope) Result {
 	if host != nil {
 		if r := host.Process(ctx, env); r.Action != Continue {
