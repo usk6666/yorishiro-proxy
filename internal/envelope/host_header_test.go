@@ -26,7 +26,12 @@ func TestHostHeaderValues(t *testing.T) {
 		{"OWS trimmed", []KeyValue{{Name: "Host", Value: " \tb.example:80 \t"}}, []string{"b.example:80"}},
 		{"comma not split", []KeyValue{{Name: "Host", Value: "a.example, b.example"}}, []string{"a.example, b.example"}},
 		{"empty value kept", []KeyValue{{Name: "Host", Value: ""}}, []string{""}},
-		{"name with whitespace is not Host", []KeyValue{{Name: "Host ", Value: "a"}}, nil},
+		{
+			"trailing SP / HTAB before the colon still names Host",
+			[]KeyValue{{Name: "Host ", Value: "a"}, {Name: "host\t", Value: "b"}, {Name: "Host \t ", Value: "c"}},
+			[]string{"a", "b", "c"},
+		},
+		{"leading whitespace is not trimmed from the name", []KeyValue{{Name: " Host", Value: "a"}}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

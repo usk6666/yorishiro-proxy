@@ -78,6 +78,12 @@ func TestHTTPScopeStep_HostHeaderLegs(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name:      "Host name with trailing whitespace before the colon",
+			denies:    denyVhost,
+			env:       hostLegH1Request(hostLegTarget, envelope.KeyValue{Name: "Host ", Value: "denied.example"}),
+			wantBlock: true,
+		},
+		{
 			name:      "Host with a port",
 			denies:    denyVhost,
 			env:       hostLegH1Request(hostLegTarget, envelope.KeyValue{Name: "host", Value: "denied.example:8080"}),

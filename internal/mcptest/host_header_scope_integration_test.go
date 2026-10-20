@@ -234,6 +234,44 @@ func TestE2E_HostHeaderScope_FuzzHTTP(t *testing.T) {
 	}
 }
 
+// TestE2E_HostHeaderScope_FuzzHTTPDomainAllowPlaceholderHost: under a
+// domain allow, a base Host placeholder that a headers[0].value position
+// replaces does not abort the run at plan time; the allowed variant is
+// sent and the out-of-allow variant is refused per variant, before send.
+func TestE2E_HostHeaderScope_FuzzHTTPDomainAllowPlaceholderHost(t *testing.T) {
+	upstreamAddr, upstream := startObservedUpstream(t)
+	_, port, err := net.SplitHostPort(upstreamAddr)
+	if err != nil {
+		t.Fatalf("split upstream addr: %v", err)
+	}
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{
+		ConfigJSON: `{"target_scope_policy":{"allows":[{"hostname":"localhost"}]}}`,
+	})
+
+	out := decodeFuzzScopeRecheckResult(t, h.CallTool(t, "fuzz_http", map[string]any{
+		"method":     "GET",
+		"scheme":     "http",
+		"authority":  net.JoinHostPort("localhost", port),
+		"path":       "/fuzz-host-placeholder",
+		"headers":    []map[string]any{{"name": "Host", "value": "placeholder.invalid"}},
+		"positions":  []map[string]any{{"path": "headers[0].value", "payloads": []string{"localhost", "other.example"}}},
+		"timeout_ms": 10000,
+	}))
+
+	if len(out.Variants) != 2 {
+		t.Fatalf("len(variants) = %d, want 2", len(out.Variants))
+	}
+	if v := out.Variants[0]; v.StatusCode != http.StatusOK || v.Error != "" {
+		t.Errorf("variants[0] = status %d error %q, want 200 and no error", v.StatusCode, v.Error)
+	}
+	if v := out.Variants[1]; v.StatusCode != 0 || !strings.Contains(v.Error, "request blocked by target scope") {
+		t.Errorf("variants[1] = status %d error %q, want status 0 and a target scope rejection", v.StatusCode, v.Error)
+	}
+	if got := upstream.hitCount(); got != 1 {
+		t.Errorf("upstream hits = %d, want 1", got)
+	}
+}
+
 // TestE2E_HostHeaderScope_DuplicateHostLive: a live plain-forward request
 // carrying an allowed Host and a second, denied, `host` header is refused
 // and recorded as a blocked audit Stream. A pipeline-blocked request is
