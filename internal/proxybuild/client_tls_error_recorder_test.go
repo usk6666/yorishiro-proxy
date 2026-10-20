@@ -77,9 +77,11 @@ func TestBuildTLSStackBuildErrorRecorder_ClientSide_HappyPath(t *testing.T) {
 	if st.ConnInfo == nil {
 		t.Fatal("Stream.ConnInfo is nil; want non-nil with target / client addr")
 	}
-	if st.ConnInfo.ServerAddr != target {
-		t.Errorf("Stream.ConnInfo.ServerAddr = %q, want %q",
-			st.ConnInfo.ServerAddr, target)
+	// No upstream socket existed: server_addr stays empty (it only ever
+	// holds a socket peer); the requested target lives in Tags["target"].
+	if st.ConnInfo.ServerAddr != "" {
+		t.Errorf("Stream.ConnInfo.ServerAddr = %q, want \"\" (no socket peer)",
+			st.ConnInfo.ServerAddr)
 	}
 	if st.ConnInfo.ClientAddr != "127.0.0.1:54321" {
 		t.Errorf("Stream.ConnInfo.ClientAddr = %q, want %q",
@@ -184,9 +186,9 @@ func TestBuildTLSStackBuildErrorRecorder_ClientSide_AuthorityVerbatim(t *testing
 			if st.Tags["target"] != target {
 				t.Errorf("Tags[target] = %q, want %q (verbatim)", st.Tags["target"], target)
 			}
-			if st.ConnInfo.ServerAddr != target {
-				t.Errorf("ConnInfo.ServerAddr = %q, want %q (verbatim)",
-					st.ConnInfo.ServerAddr, target)
+			if st.ConnInfo.ServerAddr != "" {
+				t.Errorf("ConnInfo.ServerAddr = %q, want \"\" (no socket peer)",
+					st.ConnInfo.ServerAddr)
 			}
 			if st.FailureReason != "client_tls_error" {
 				t.Errorf("FailureReason = %q, want %q",

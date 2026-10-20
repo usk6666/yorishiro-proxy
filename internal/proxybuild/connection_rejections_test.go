@@ -211,8 +211,10 @@ func TestConnectionRejections_RecordsAuditStream(t *testing.T) {
 	if st.Protocol != "http" {
 		t.Errorf("Protocol = %q, want http for CONNECT", st.Protocol)
 	}
-	if st.ConnInfo == nil || st.ConnInfo.ServerAddr != "ExAmPlE.com:443" || st.ConnInfo.ClientAddr != "127.0.0.1:40001" {
-		t.Errorf("ConnInfo = %+v, want ServerAddr=ExAmPlE.com:443 ClientAddr=127.0.0.1:40001", st.ConnInfo)
+	// No upstream socket ever existed: server_addr stays empty; the refused
+	// target is Tags["target"] (asserted below).
+	if st.ConnInfo == nil || st.ConnInfo.ServerAddr != "" || st.ConnInfo.ClientAddr != "127.0.0.1:40001" {
+		t.Errorf("ConnInfo = %+v, want ServerAddr=\"\" ClientAddr=127.0.0.1:40001", st.ConnInfo)
 	}
 	if st.Tags["target"] != "ExAmPlE.com:443" || st.Tags["detected_kind"] != "connect" || st.Tags["listener"] != "default" {
 		t.Errorf("Tags = %v, want target/detected_kind/listener", st.Tags)
@@ -222,7 +224,7 @@ func TestConnectionRejections_RecordsAuditStream(t *testing.T) {
 	}
 }
 
-func TestConnectionRejections_HTTP1AbsoluteFormServerAddr(t *testing.T) {
+func TestConnectionRejections_HTTP1AbsoluteFormTarget(t *testing.T) {
 	store := &recordingFlowStore{}
 	c := NewConnectionRejections(ConnectionRejectionsConfig{Store: store, Logger: silentLogger()})
 	t.Cleanup(c.Close)
@@ -237,8 +239,8 @@ func TestConnectionRejections_HTTP1AbsoluteFormServerAddr(t *testing.T) {
 		t.Fatalf("saved streams = %d, want 1", len(streams))
 	}
 	st := streams[0]
-	if st.ConnInfo == nil || st.ConnInfo.ServerAddr != "Ads.Example:8080" {
-		t.Errorf("ConnInfo = %+v, want ServerAddr = authority of the absolute-form target", st.ConnInfo)
+	if st.ConnInfo == nil || st.ConnInfo.ServerAddr != "" {
+		t.Errorf("ConnInfo = %+v, want empty ServerAddr (no socket peer)", st.ConnInfo)
 	}
 	if st.Tags["target"] != "http://Ads.Example:8080/slot?id=1" {
 		t.Errorf("Tags[target] = %q, want verbatim request-target", st.Tags["target"])
@@ -364,8 +366,8 @@ func TestConnectionRejections_DrainerRecheckAfterRelease(t *testing.T) {
 		t.Fatalf("saved streams = %d, want 2; queue len=%d (record stranded after drainer release)",
 			len(streams), len(c.queue))
 	}
-	if got := streams[1].ConnInfo.ServerAddr; got != "late.example:443" {
-		t.Errorf("second stream ServerAddr = %q, want late.example:443", got)
+	if got := streams[1].Tags["target"]; got != "late.example:443" {
+		t.Errorf("second stream Tags[target] = %q, want late.example:443", got)
 	}
 }
 
@@ -424,8 +426,8 @@ func TestConnectionRejections_CaptureScope(t *testing.T) {
 	if len(streams) != 1 {
 		t.Fatalf("saved streams = %d, want 1 (in-scope only)", len(streams))
 	}
-	if got := streams[0].ConnInfo.ServerAddr; got != "a.example:443" {
-		t.Errorf("recorded ServerAddr = %q, want a.example:443", got)
+	if got := streams[0].Tags["target"]; got != "a.example:443" {
+		t.Errorf("recorded Tags[target] = %q, want a.example:443", got)
 	}
 	snap := c.Snapshot()
 	if snap.Total != 2 {

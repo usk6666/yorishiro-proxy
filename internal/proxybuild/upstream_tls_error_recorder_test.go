@@ -65,9 +65,11 @@ func TestBuildUpstreamTLSErrorRecorder_HappyPath(t *testing.T) {
 	if st.ConnInfo == nil {
 		t.Fatal("Stream.ConnInfo is nil; want non-nil with target / client addr")
 	}
-	if st.ConnInfo.ServerAddr != target {
-		t.Errorf("Stream.ConnInfo.ServerAddr = %q, want %q",
-			st.ConnInfo.ServerAddr, target)
+	// No upstream socket existed: server_addr stays empty (it only ever
+	// holds a socket peer); the requested target lives in Tags["target"].
+	if st.ConnInfo.ServerAddr != "" {
+		t.Errorf("Stream.ConnInfo.ServerAddr = %q, want \"\" (no socket peer)",
+			st.ConnInfo.ServerAddr)
 	}
 	if st.ConnInfo.ClientAddr != "127.0.0.1:54321" {
 		t.Errorf("Stream.ConnInfo.ClientAddr = %q, want %q",
@@ -139,9 +141,8 @@ func TestBuildUpstreamTLSErrorRecorder_AuthorityVerbatim(t *testing.T) {
 			if got := store.saved[0].Tags["target"]; got != target {
 				t.Errorf("Tags[target] = %q, want %q (verbatim)", got, target)
 			}
-			if got := store.saved[0].ConnInfo.ServerAddr; got != target {
-				t.Errorf("ConnInfo.ServerAddr = %q, want %q (verbatim)",
-					got, target)
+			if got := store.saved[0].ConnInfo.ServerAddr; got != "" {
+				t.Errorf("ConnInfo.ServerAddr = %q, want \"\" (no socket peer)", got)
 			}
 		})
 	}

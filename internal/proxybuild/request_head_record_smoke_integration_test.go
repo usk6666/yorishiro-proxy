@@ -208,6 +208,14 @@ func TestProxybuild_PlainHTTP_RequestHeadTimeoutRecorded_Smoke(t *testing.T) {
 	if st.ConnID == "" {
 		t.Error("stream ConnID is empty")
 	}
+	// The requested destination lives in Tags["target"]; server_addr only
+	// ever holds an upstream socket peer, and this head never reached one.
+	if st.Tags["target"] != upstream {
+		t.Errorf("Tags[target] = %q, want %q", st.Tags["target"], upstream)
+	}
+	if st.ConnInfo != nil && st.ConnInfo.ServerAddr != "" {
+		t.Errorf("ConnInfo.ServerAddr = %q, want \"\" (no socket peer)", st.ConnInfo.ServerAddr)
+	}
 	if len(flows) != 1 || flows[0].Direction != "send" || flows[0].Sequence != 0 {
 		t.Fatalf("flows = %d (first dir %q), want one send flow", len(flows), flows[0].Direction)
 	}

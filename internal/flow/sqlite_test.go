@@ -1859,6 +1859,139 @@ func TestSQLiteStore_HostFilter_BoundaryAnchoring(t *testing.T) {
 	}
 }
 
+// TestSQLiteStore_HostFilter_TagsTarget pins that filter.host matches the
+// requested destination of audit / error streams, which carry it in
+// tags.target and leave server_addr empty (no upstream socket peer). The
+// row shapes mirror the writers: CONNECT / TLS-error / request-head rows
+// store an authority, HTTP/1.x capacity rows store the absolute-form
+// request-target as received. Right-side anchoring is the same as for the
+// send-flow URL leg, so a host that is only a prefix of the recorded one
+// never matches.
+func TestSQLiteStore_HostFilter_TagsTarget(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	rows := []struct {
+		target     string
+		serverAddr string
+	}{
+		{target: "example.com:443"},
+		{target: "example.com"},
+		{target: "https://example.com?q=1"},
+		{target: "http://example.com"},
+		{target: "http://Ads.Example:8080/x"},
+		{target: "example.com.evil.com:443"},
+		{target: "http://example.com.evil.com/x"},
+		// Legacy / live leg: server_addr only, no tags.target.
+		{serverAddr: "example.com:8443"},
+	}
+	for i, r := range rows {
+		st := &Stream{
+			Protocol:  "http",
+			State:     "error",
+			Timestamp: now.Add(time.Duration(i) * time.Millisecond),
+		}
+		if r.target != "" {
+			st.Tags = map[string]string{"target": r.target}
+		}
+		if r.serverAddr != "" {
+			st.ConnInfo = &ConnectionInfo{ServerAddr: r.serverAddr}
+		}
+		if err := store.SaveStream(ctx, st); err != nil {
+			t.Fatalf("SaveStream(%+v): %v", r, err)
+		}
+	}
+
+	tests := []struct {
+		name string
+		host string
+		want int
+	}{
+		{"authority, bare, URL query, URL end and server_addr legs", "example.com", 5},
+		{"absolute-form URL host", "Ads.Example", 1},
+		{"absolute-form URL host with port", "Ads.Example:8080", 1},
+		{"impostor matches itself only", "example.com.evil.com", 2},
+		{"host prefix does not match", "example", 0},
+		{"LIKE wildcard is escaped", "exampl_.com", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := StreamListOptions{Host: tt.host}
+			streams, err := store.ListStreams(ctx, opts)
+			if err != nil {
+				t.Fatalf("ListStreams(Host=%q): %v", tt.host, err)
+			}
+			if len(streams) != tt.want {
+				var got []string
+				for _, st := range streams {
+					got = append(got, st.Tags["target"])
+				}
+				t.Errorf("ListStreams(Host=%q) = %d streams (targets %q), want %d", tt.host, len(streams), got, tt.want)
+			}
+			n, err := store.CountStreams(ctx, opts)
+			if err != nil {
+				t.Fatalf("CountStreams(Host=%q): %v", tt.host, err)
+			}
+			if n != tt.want {
+				t.Errorf("CountStreams(Host=%q) = %d, want %d", tt.host, n, tt.want)
+			}
+		})
+	}
+}
+
+// TestSQLiteStore_HostFilter_InvalidTagsJSON pins that the tags.target leg
+// of the host filter tolerates a row whose tags column is not valid JSON
+// (a hand-crafted or imported database): the query neither errors nor
+// matches that row on its tags.
+func TestSQLiteStore_HostFilter_InvalidTagsJSON(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	bad := &Stream{Protocol: "http", State: "error", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, bad); err != nil {
+		t.Fatalf("SaveStream(bad): %v", err)
+	}
+	good := &Stream{
+		Protocol:  "http",
+		State:     "error",
+		Timestamp: time.Now().UTC(),
+		Tags:      map[string]string{"target": "example.com:443"},
+	}
+	if err := store.SaveStream(ctx, good); err != nil {
+		t.Fatalf("SaveStream(good): %v", err)
+	}
+	if err := store.enqueueWrite(ctx, func(ctx context.Context) error {
+		_, err := store.db.ExecContext(ctx,
+			`UPDATE streams SET tags = ? WHERE id = ?`, `{"target": "example.com:443"`, bad.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("seed invalid tags: %v", err)
+	}
+
+	opts := StreamListOptions{Host: "example.com"}
+	streams, err := store.ListStreams(ctx, opts)
+	if err != nil {
+		t.Fatalf("ListStreams(Host=example.com) over invalid tags JSON: %v", err)
+	}
+	if len(streams) != 1 || streams[0].ID != good.ID {
+		var ids []string
+		for _, st := range streams {
+			ids = append(ids, st.ID)
+		}
+		t.Errorf("ListStreams(Host=example.com) = %v, want only %s", ids, good.ID)
+	}
+	n, err := store.CountStreams(ctx, opts)
+	if err != nil {
+		t.Fatalf("CountStreams(Host=example.com) over invalid tags JSON: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("CountStreams(Host=example.com) = %d, want 1", n)
+	}
+}
+
 func TestSQLiteStore_FlowTiming_SaveAndGet(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
