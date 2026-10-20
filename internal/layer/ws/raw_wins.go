@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -55,7 +56,13 @@ func (c *wsChannel) resyncSendDeflate(ctx context.Context, raw []byte) {
 	bufPtr, onPtr := c.fragStateForDirection(wireDir)
 	r := bytes.NewReader(raw)
 	for r.Len() > 0 {
-		frame, _, err := ReadFrameRaw(r)
+		// Reject a frame whose header claims more bytes than raw holds
+		// before ReadFrameRaw allocates the claimed payload length.
+		err := checkRawFrameFits(raw[len(raw)-r.Len():])
+		var frame *Frame
+		if err == nil {
+			frame, _, err = ReadFrameRaw(r)
+		}
 		if err == nil {
 			err = advanceSendDeflate(ds, frame, bufPtr, onPtr)
 		}
@@ -69,6 +76,32 @@ func (c *wsChannel) resyncSendDeflate(ctx context.Context, raw []byte) {
 			return
 		}
 	}
+}
+
+// checkRawFrameFits reports an error when b does not hold the whole
+// frame its header describes (header + extended length + mask key +
+// claimed payload). It bounds the resync parse only; the bytes have
+// already been written to the wire verbatim.
+func checkRawFrameFits(b []byte) error {
+	if len(b) < 2 {
+		return fmt.Errorf("truncated frame header: %d bytes", len(b))
+	}
+	r := bytes.NewReader(b[2:])
+	payloadLen, err := decodePayloadLength(r, b[1]&0x7F)
+	if err != nil {
+		return err
+	}
+	avail := uint64(r.Len())
+	if b[1]&0x80 != 0 {
+		if avail < 4 {
+			return fmt.Errorf("truncated frame: mask key needs 4 bytes, %d available", avail)
+		}
+		avail -= 4
+	}
+	if payloadLen > avail {
+		return fmt.Errorf("truncated frame: header claims %d payload bytes, %d available", payloadLen, avail)
+	}
+	return nil
 }
 
 // advanceSendDeflate applies one parsed frame to the send-side deflate
@@ -114,12 +147,19 @@ func advanceSendDeflate(ds *deflateState, frame *Frame, bufPtr *[]byte, onPtr *b
 }
 
 // resetRawWinsFragState discards a fragmented compressed message that
-// raw-wins Sends started but did not finish when a Message-path frame
+// raw-wins Sends started but did not finish when a Message-path data frame
 // is about to be written on the same direction. Mixing raw-wins and
 // Message-path fragments of one compressed message is not supported
 // (USK-1238 D1); the partial state is dropped so it cannot leak into a
 // later raw-wins message.
-func (c *wsChannel) resetRawWinsFragState(ctx context.Context, wireDir envelope.Direction) {
+//
+// Control frames (Close / Ping / Pong) leave the state alone: RFC 6455
+// §5.4 allows them between the fragments of a data message, e.g. a
+// relayed Ping or the USK-854 keepalive Ping during an intercept hold.
+func (c *wsChannel) resetRawWinsFragState(ctx context.Context, wireDir envelope.Direction, opcode byte) {
+	if (&Frame{Opcode: opcode}).IsControl() {
+		return
+	}
 	bufPtr, onPtr := c.fragStateForDirection(wireDir)
 	if !*onPtr {
 		return

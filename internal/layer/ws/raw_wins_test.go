@@ -240,3 +240,66 @@ func runDeflateResyncCase(t *testing.T, role, peerRole Role, deflateOpt Option, 
 		}
 	}
 }
+
+// TestCheckRawFrameFits pins the resync guard (CWE-770): a frame whose
+// header claims more payload than the raw bytes hold is rejected before
+// ReadFrameRaw would allocate the claimed length.
+func TestCheckRawFrameFits(t *testing.T) {
+	huge := []byte{0x80 | OpcodeText, 0x80 | 127, 0, 0, 0, 0, 0x00, 0xF0, 0, 0, 1, 2, 3, 4, 'x'}
+	cases := []struct {
+		name string
+		b    []byte
+		ok   bool
+	}{
+		{name: "complete masked frame", b: wireFrame(RoleClient, 0x80|OpcodeText, []byte("hello")), ok: true},
+		{name: "complete unmasked frame with trailing bytes", b: append(wireFrame(RoleServer, 0x80|OpcodeText, []byte("hi")), 0x81), ok: true},
+		{name: "one byte", b: []byte{0x81}},
+		{name: "truncated extended length", b: []byte{0x81, 126, 0x01}},
+		{name: "truncated mask key", b: []byte{0x81, 0x80 | 1, 1, 2}},
+		{name: "64-bit length claims far more than available", b: huge},
+		{name: "7-bit length one byte short", b: []byte{0x81, 3, 'a', 'b'}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkRawFrameFits(tc.b)
+			if (err == nil) != tc.ok {
+				t.Errorf("checkRawFrameFits(%x) err = %v, want ok=%v", tc.b, err, tc.ok)
+			}
+		})
+	}
+}
+
+// TestChannel_Send_RawWins_TruncatedHugeFrame: a raw-wins envelope whose
+// frame header claims a huge payload it does not carry still goes to the
+// wire verbatim; the resync aborts (fragment state reset) without error.
+func TestChannel_Send_RawWins_TruncatedHugeFrame(t *testing.T) {
+	params := deflateParams{enabled: true, contextTakeover: true, windowBits: 15}
+	rwc := newFakeRWC(nil)
+	l := New(rwc, rwc, rwc, "s-trunc", RoleClient, WithDeflateEnabled(true), WithClientDeflate(params))
+	defer l.Close()
+	ch := <-l.Channels()
+	wc := ch.(*wsChannel)
+
+	m1c := deflateCompressWithContext(t, [][]byte{resyncM1})[0]
+	fragA := wireFrame(RoleClient, 0x40|OpcodeText, m1c[:len(m1c)/2])
+	// Continuation claiming 0xF0000000 payload bytes, carrying one.
+	trunc := []byte{0x80 | OpcodeContinuation, 0x80 | 127, 0, 0, 0, 0, 0xF0, 0, 0, 0, 1, 2, 3, 4, 'x'}
+
+	var want []byte
+	for _, raw := range [][]byte{fragA, trunc} {
+		want = append(want, raw...)
+		if err := ch.Send(context.Background(), &envelope.Envelope{
+			Direction: envelope.Send, Protocol: envelope.ProtocolWebSocket,
+			Raw: raw, RawAuthoritative: true,
+			Message: &envelope.WSMessage{Opcode: envelope.WSText, Fin: true},
+		}); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+	if got := rwc.writer.Bytes(); !bytes.Equal(got, want) {
+		t.Fatalf("wire = %x, want verbatim %x", got, want)
+	}
+	if bufPtr, onPtr := wc.fragStateForDirection(wc.sendDirection()); *onPtr || len(*bufPtr) != 0 {
+		t.Errorf("fragment state after aborted resync: on=%v len=%d, want reset", *onPtr, len(*bufPtr))
+	}
+}

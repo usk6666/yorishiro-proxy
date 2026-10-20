@@ -669,7 +669,7 @@ func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 	}
 
 	wireDir := c.sendDirection()
-	c.resetRawWinsFragState(ctx, wireDir)
+	c.resetRawWinsFragState(ctx, wireDir, byte(msg.Opcode))
 
 	frame := &Frame{
 		Fin:    msg.Fin,
