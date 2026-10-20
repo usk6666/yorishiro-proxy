@@ -34,6 +34,13 @@
 //     prefix) AND to the decompressed length after gunzip — the latter
 //     is enforced via io.LimitReader inside gunzip to mitigate
 //     CWE-409 / CWE-400 (decompression bomb).
+//   - END_STREAM while an LPM is still incomplete yields
+//     *layer.StreamError{Code: ErrorProtocol}.
+//   - In both failure cases the observed bytes of the incomplete LPM are
+//     handed to the WithLPMFrameRecordCallback hook as a
+//     wire_level=grpc-lpm-frame row carrying AnomalyGRPCLPMTooLarge or
+//     AnomalyGRPCLPMTruncated (USK-1254). Recording only — the stream
+//     terminates exactly as it did before, and nothing is forwarded.
 //   - A bidirectional gRPC stream holds two reassembler buffers (one
 //     per direction), so worst-case in-flight memory per stream is
 //     2 * MaxGRPCMessageSize (CWE-770; same envelope as the body limits

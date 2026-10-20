@@ -2,6 +2,29 @@ package envelope
 
 import "time"
 
+// gRPC (native, over HTTP/2) LPM framing anomalies (USK-1254). Both are
+// attached to GRPCDataMessage.Anomalies on a wire_level=grpc-lpm-frame
+// overlay envelope that records the bytes of an LPM the reassembler could
+// not complete. The stream itself still terminates with a
+// *layer.StreamError; the anomaly row exists so the partial LPM bytes are
+// recorded alongside a structured tag (MITM Principle #5). They are
+// distinct from the gRPC-Web AnomalyMalformedGRPCWebLPM, which marks a
+// whole-body parse failure on the gRPC-Web Layer.
+const (
+	// AnomalyGRPCLPMTooLarge marks an LPM whose declared length exceeds
+	// the per-Channel message-size cap. Raw carries the 5 observed prefix
+	// bytes plus whatever payload bytes the same DATA frame carried (up to
+	// the declared length). Detail: "declared=N cap=M captured=K".
+	AnomalyGRPCLPMTooLarge AnomalyType = "GRPCLPMTooLarge"
+
+	// AnomalyGRPCLPMTruncated marks an LPM cut short by END_STREAM: either
+	// the 5-byte prefix itself is incomplete (Detail "prefix_bytes=N") or
+	// the payload is shorter than the declared length (Detail
+	// "declared=N observed=M"). Raw carries every observed byte of the
+	// incomplete LPM.
+	AnomalyGRPCLPMTruncated AnomalyType = "GRPCLPMTruncated"
+)
+
 // GRPCStartMessage carries the gRPC metadata (HEADERS frame) that opens
 // one direction of a gRPC RPC. See RFC-001 section 3.2.3.
 //
@@ -158,6 +181,14 @@ type GRPCDataMessage struct {
 	// the last DATA frame; without this field the proxy cannot round-trip
 	// the request-side termination signal. See RFC-001 §3.2.3 / §9.2.
 	EndStream bool
+
+	// Anomalies records LPM framing deviations (USK-1254). It is populated
+	// only on the wire_level=grpc-lpm-frame overlay envelope that records
+	// an LPM the reassembler could not complete (AnomalyGRPCLPMTooLarge /
+	// AnomalyGRPCLPMTruncated); such an envelope never reaches the
+	// semantic path and is never forwarded. Variant-recording comparisons
+	// must NOT inspect this field — it is parser-derived state.
+	Anomalies []Anomaly
 }
 
 // Protocol returns ProtocolGRPC.
@@ -172,6 +203,7 @@ func (m *GRPCDataMessage) CloneMessage() Message {
 		WireLength: m.WireLength,
 		Payload:    cloneBytes(m.Payload),
 		EndStream:  m.EndStream,
+		Anomalies:  cloneAnomalies(m.Anomalies),
 	}
 }
 

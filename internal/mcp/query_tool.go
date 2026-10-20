@@ -625,6 +625,10 @@ var flowMetadataAnomalyKeyToType = map[string]string{
 	"grpc_anomaly_malformed_trailer":          string(envelope.AnomalyMalformedGRPCWebTrailer),
 	"grpc_anomaly_missing_trailer":            string(envelope.AnomalyMissingGRPCWebTrailer),
 	"grpc_anomaly_unexpected_request_trailer": string(envelope.AnomalyUnexpectedGRPCWebRequestTrailer),
+	// Native gRPC partial-LPM anomalies (USK-1254); recorded only on
+	// wire_level=grpc-lpm-frame overlay rows.
+	"grpc_anomaly_lpm_too_large": string(envelope.AnomalyGRPCLPMTooLarge),
+	"grpc_anomaly_lpm_truncated": string(envelope.AnomalyGRPCLPMTruncated),
 	// SSE anomalies (USK-656).
 	"sse_anomaly_missing_data": string(envelope.AnomalySSEMissingData),
 	"sse_anomaly_truncated":    string(envelope.AnomalySSETruncated),

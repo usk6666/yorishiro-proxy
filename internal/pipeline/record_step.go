@@ -1484,6 +1484,10 @@ func grpcAnomalyMetadataKey(t envelope.AnomalyType) string {
 		return "grpc_anomaly_missing_trailer"
 	case envelope.AnomalyUnexpectedGRPCWebRequestTrailer:
 		return "grpc_anomaly_unexpected_request_trailer"
+	case envelope.AnomalyGRPCLPMTooLarge:
+		return "grpc_anomaly_lpm_too_large"
+	case envelope.AnomalyGRPCLPMTruncated:
+		return "grpc_anomaly_lpm_truncated"
 	default:
 		return ""
 	}
@@ -1492,14 +1496,45 @@ func grpcAnomalyMetadataKey(t envelope.AnomalyType) string {
 // projectGRPCData projects a GRPCDataMessage. Body holds the decompressed
 // payload; RawBytes (set by envelopeToFlow) holds the wire form (5-byte
 // LPM prefix + compressed payload).
+//
+// USK-1254: the partial-LPM overlay row (wire_level=grpc-lpm-frame, an LPM
+// the gRPC Layer could not complete) carries Anomalies, projected into
+// grpc_anomaly_* keys. When its prefix itself was truncated (fewer than 5
+// observed bytes) the flag and length were never on the wire, so
+// grpc_compressed / grpc_wire_length are omitted instead of recording
+// fabricated zeros.
 func projectGRPCData(m *envelope.GRPCDataMessage, fl *flow.Flow) {
 	fl.Body = m.Payload
 	fl.Metadata["grpc_event"] = "data"
 	fl.Metadata["grpc_service"] = m.Service
 	fl.Metadata["grpc_method"] = m.Method
-	fl.Metadata["grpc_compressed"] = strconv.FormatBool(m.Compressed)
-	fl.Metadata["grpc_wire_length"] = strconv.FormatUint(uint64(m.WireLength), 10)
+	if !grpcLPMPrefixTruncated(m, fl.RawBytes) {
+		fl.Metadata["grpc_compressed"] = strconv.FormatBool(m.Compressed)
+		fl.Metadata["grpc_wire_length"] = strconv.FormatUint(uint64(m.WireLength), 10)
+	}
 	fl.Metadata["grpc_end_stream"] = strconv.FormatBool(m.EndStream)
+	for _, a := range m.Anomalies {
+		key := grpcAnomalyMetadataKey(a.Type)
+		if key == "" {
+			continue
+		}
+		fl.Metadata[key] = a.Detail
+	}
+}
+
+// grpcLPMPrefixTruncated reports whether m is a partial-LPM row whose
+// 5-byte prefix was cut short (USK-1254): it carries
+// AnomalyGRPCLPMTruncated and fewer than 5 raw bytes were observed.
+func grpcLPMPrefixTruncated(m *envelope.GRPCDataMessage, raw []byte) bool {
+	if len(raw) >= 5 {
+		return false
+	}
+	for _, a := range m.Anomalies {
+		if a.Type == envelope.AnomalyGRPCLPMTruncated {
+			return true
+		}
+	}
+	return false
 }
 
 // projectGRPCEnd projects a GRPCEndMessage. grpc_status is always present
