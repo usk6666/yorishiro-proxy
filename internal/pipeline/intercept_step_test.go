@@ -182,6 +182,77 @@ func TestInterceptStep_ModifyAndForward(t *testing.T) {
 	}
 }
 
+// TestInterceptStep_ModifyAndForward_KeepsLayerOpaque: the HoldQueue hands
+// the control plane Envelope.Clone snapshots, which drop Opaque, so a
+// modified envelope comes back without the producing Layer's state. The
+// HTTP/1.x Layer needs that state to patch the modification onto the held
+// wire bytes (re-frame a changed body, keep the held body on a header-only
+// change); without it the request is serialized synthetically under the
+// held framing headers (USK-1258). The step restores the held envelope's
+// Opaque when the forwarded message is still an HTTPMessage, and leaves a
+// message-type change (raw override on an HTTP hold) alone.
+func TestInterceptStep_ModifyAndForward_KeepsLayerOpaque(t *testing.T) {
+	type layerState struct{ id int }
+
+	tests := []struct {
+		name       string
+		modified   envelope.Message
+		wantOpaque bool
+	}{
+		{"http_message", &envelope.HTTPMessage{Method: "POST", Path: "/", Body: []byte("changed")}, true},
+		{"raw_override", &envelope.RawMessage{Bytes: []byte("RAW")}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := newTestInterceptEngine(newCatchAllRequestRule())
+			queue := common.NewHoldQueue()
+			step := NewInterceptStep(engine, nil, nil, nil, queue, nil, nil)
+
+			opaque := &layerState{id: 1}
+			env := &envelope.Envelope{
+				Direction: envelope.Send,
+				Protocol:  envelope.ProtocolHTTP,
+				Opaque:    opaque,
+				Message:   &envelope.HTTPMessage{Method: "POST", Path: "/", Body: []byte("orig")},
+			}
+
+			go func() {
+				deadline := time.Now().Add(2 * time.Second)
+				for time.Now().Before(deadline) {
+					entries := queue.List()
+					if len(entries) > 0 {
+						// The control plane builds the modification from its
+						// snapshot, exactly as the MCP intercept tool does.
+						modified := entries[0].Envelope.Clone()
+						modified.Message = tc.modified
+						if err := queue.Release(entries[0].ID, &common.HoldAction{
+							Type:     common.ActionModifyAndForward,
+							Modified: modified,
+						}); err != nil {
+							t.Errorf("Release: %v", err)
+						}
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+				t.Error("timed out waiting for held entry")
+			}()
+
+			result := step.Process(context.Background(), env)
+			if result.Action != Continue || result.Envelope == nil {
+				t.Fatalf("Process = %+v, want Continue with the modified envelope", result)
+			}
+			if result.Envelope.Message != tc.modified {
+				t.Fatalf("forwarded Message = %v, want the modified one", result.Envelope.Message)
+			}
+			gotOpaque := result.Envelope.Opaque == any(opaque)
+			if gotOpaque != tc.wantOpaque {
+				t.Errorf("forwarded Opaque = %v, want held Opaque restored = %v", result.Envelope.Opaque, tc.wantOpaque)
+			}
+		})
+	}
+}
+
 func TestInterceptStep_NoMatch(t *testing.T) {
 	// Rule only matches /api/ paths.
 	engine := newTestInterceptEngine(httprules.InterceptRule{
