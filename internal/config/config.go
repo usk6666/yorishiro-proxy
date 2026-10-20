@@ -682,10 +682,12 @@ type HostTLSEntry struct {
 type TargetRuleConfig struct {
 	// Hostname matches the target hostname (case-insensitive).
 	// Supports wildcard prefix "*.example.com" to match all subdomains.
-	// IPv6 literals may be bare ("::1") or bracketed ("[::1]"); both match
-	// every zone-less spelling of the address. A zone-qualified target such
-	// as "[fe80::1%eth0]" keeps its zone and does not match a zone-less rule
-	// (rules cannot carry a zone). When empty, the rule matches any host.
+	// IPv6 literals may be bare ("::1") or bracketed ("[::1]"). Hosts are
+	// compared in a canonical form, so a rule matches every spelling that
+	// dials the same host: IPv6 text forms with or without a zone,
+	// IPv4-mapped IPv6 and its IPv4 address, one trailing dot, and legacy
+	// IPv4 spellings ("127.1") (USK-1250). When empty, the rule matches any
+	// host.
 	// See ValidateTargetRule for the accepted forms (bare "*", "host:port",
 	// URLs and wildcards over IP literals are rejected).
 	Hostname string `json:"hostname"`

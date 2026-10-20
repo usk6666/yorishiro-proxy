@@ -2,7 +2,6 @@ package connector
 
 import (
 	"fmt"
-	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -50,12 +49,20 @@ type TargetScope struct {
 type TargetRule struct {
 	// Hostname matches the target hostname (case-insensitive).
 	// Supports wildcard prefix "*.example.com" to match all subdomains.
-	// An IPv6 literal may be written bare ("::1") or bracketed ("[::1]");
-	// every zone-less textual form of one address is the same host (see
-	// canonicalScopeHost). A zone-qualified target such as "[fe80::1%eth0]"
-	// keeps its zone and does not match a zone-less rule (rules cannot carry
-	// a zone). Empty matches any host (Policy layer only; the Agent layer
-	// requires a hostname).
+	// An IPv6 literal may be written bare ("::1") or bracketed ("[::1]").
+	// Rule and target are compared in canonical form (canonicalScopeHost),
+	// so every spelling that may dial the same host matches: any textual form
+	// of an IPv6 address, with or without a zone ("[fe80::1%eth0]" matches
+	// "fe80::1"); an IPv4-mapped IPv6 address and its IPv4 address
+	// ("::ffff:10.0.0.5" and "10.0.0.5", in either direction); a single
+	// trailing dot ("db.internal." matches "db.internal" and "*.internal");
+	// and legacy inet_aton IPv4 spellings ("2130706433", "0x7f.0.0.1",
+	// "127.1" match "127.0.0.1"; only a libc resolver or an upstream proxy
+	// reads those as the address — Go's pure resolver looks them up in DNS,
+	// so on an allow rule they may admit a different host; see
+	// canonicalScopeHost) (USK-1129, USK-1250). The stored rule is
+	// never rewritten. Empty matches any host (Policy layer only; the Agent
+	// layer requires a hostname).
 	Hostname string `json:"hostname"`
 
 	// Ports restricts the rule to specific port numbers.
@@ -90,11 +97,22 @@ func NewTargetScope() *TargetScope {
 //  4. If agent allow rules exist and none match, it is BLOCKED.
 //  5. Otherwise, it is ALLOWED.
 //
+// Before step 1, when either layer has any rule, a hostname whose last
+// label is a number but that is not a valid IPv4 address ("1.2.3.4.5",
+// "999999999999") is BLOCKED: a resolver may still read it as an address
+// no rule can name (USK-1250, see numericHostUnparsable). With no rules at
+// all (open mode) it is allowed like any other host.
+//
 // Returns allowed=true if the target is permitted, and a reason string
 // explaining the decision when blocked.
 func (s *TargetScope) CheckTarget(scheme, hostname string, port int, path string) (allowed bool, reason string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// 0. Fail closed on an unparsable numeric host (rules exist only).
+	if s.hasRulesLocked() && numericHostUnparsable(hostname) {
+		return false, numericHostReason
+	}
 
 	// 1. Policy denies (highest priority).
 	for _, rule := range s.policyDenies {
@@ -307,6 +325,11 @@ func (s *TargetScope) AgentRules() (allows, denies []TargetRule) {
 func (s *TargetScope) HasRules() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.hasRulesLocked()
+}
+
+// hasRulesLocked is HasRules for a caller already holding s.mu.
+func (s *TargetScope) hasRulesLocked() bool {
 	return len(s.policyAllows) > 0 || len(s.policyDenies) > 0 ||
 		len(s.agentAllows) > 0 || len(s.agentDenies) > 0
 }
@@ -412,6 +435,7 @@ func ruleCoversRule(covering, covered TargetRule) bool {
 //   - "*.example.com" covers "*.example.com" (same wildcard)
 //   - "example.com" covers "example.com" (same exact)
 //   - "::1" covers "[::1]" (same IPv6 address, see canonicalScopeHost)
+//   - "10.0.0.5" covers "::ffff:10.0.0.5" and vice versa (same address)
 //   - "*.example.com" does NOT cover "*.other.com"
 //   - a non-empty covering hostname does NOT cover "" (any host)
 func hostnameCoveredBy(covering, covered string) bool {
@@ -489,8 +513,11 @@ func PathPrefixMatches(path, prefix string) bool {
 // matchHostname performs case-insensitive hostname matching with wildcard support.
 // Pattern "*.example.com" matches "sub.example.com" but not "example.com".
 // Exact patterns match exactly; both sides are compared in canonical form
-// (canonicalScopeHost), so an IPv6 rule matches every zone-less spelling of
-// its address.
+// (canonicalScopeHost), so a rule matches every spelling of its host that
+// dials the same destination (IPv6 forms and zones, IPv4-mapped IPv6, one
+// trailing dot, legacy IPv4). A wildcard compares after the trailing dot
+// is stripped: "a.internal." matches "*.internal", the apex "internal."
+// does not.
 func matchHostname(pattern, hostname string) bool {
 	pattern = canonicalScopeHost(pattern)
 	hostname = canonicalScopeHost(hostname)
@@ -501,42 +528,6 @@ func matchHostname(pattern, hostname string) bool {
 	}
 
 	return pattern == hostname
-}
-
-// canonicalScopeHost returns the form in which TargetScope compares a rule
-// hostname with a target hostname: lowercased, one enclosing "[...]" pair
-// stripped, and an IPv6 literal rewritten to its RFC 5952 text form via
-// net/netip ("[0:0::1]" -> "::1").
-//
-// Data-path gates hand CheckTarget an IPv6 host in two spellings — bracket-
-// stripped when the authority carries a port (net.SplitHostPort,
-// url.Hostname), verbatim "[::1]" when it does not (the port-less fallback)
-// — and rules may be authored either way, so without this a "[::1]" rule
-// never matched a ported target and a "::1" rule never matched a port-less
-// one (USK-1129). Brackets are stripped regardless of content, mirroring
-// net.SplitHostPort. IPv4-mapped IPv6 is NOT unmapped ("::ffff:10.0.0.1"
-// stays distinct from "10.0.0.1"), and no other host form is rewritten.
-// An IPv6 zone is kept: netip.ParseAddr accepts it and String() preserves
-// it, so a zone-qualified target such as "[fe80::1%eth0]" canonicalizes to
-// "fe80::1%eth0" and does not match a zone-less rule (rules cannot carry a
-// zone — ValidateTargetRule rejects one). Whether to drop the zone is an
-// open design question tracked with USK-1132.
-//
-// This is a comparison-only normalization of a control-plane predicate:
-// stored rules and recorded wire data are never rewritten. The input may be
-// an attacker-controlled Host header; the length guard keeps "[", "]" and
-// "[]" verbatim and nothing here can panic.
-func canonicalScopeHost(h string) string {
-	h = strings.ToLower(h)
-	if len(h) > 2 && h[0] == '[' && h[len(h)-1] == ']' {
-		h = h[1 : len(h)-1]
-	}
-	if strings.IndexByte(h, ':') >= 0 {
-		if addr, err := netip.ParseAddr(h); err == nil && addr.Is6() {
-			return addr.String()
-		}
-	}
-	return h
 }
 
 // containsInt reports whether the slice contains the given value.
@@ -591,7 +582,8 @@ func TargetRuleEqual(a, b TargetRule) bool {
 
 // targetRuleEqual reports whether two TargetRule values are equal.
 // Hostnames compare in canonical form (canonicalScopeHost), so "::1" and
-// "[::1]" are one rule.
+// "[::1]", "example.com." and "example.com", and "::ffff:10.0.0.5" and
+// "10.0.0.5" are one rule.
 func targetRuleEqual(a, b TargetRule) bool {
 	if canonicalScopeHost(a.Hostname) != canonicalScopeHost(b.Hostname) {
 		return false

@@ -71,8 +71,9 @@ func TestCheckTarget_IPv6RuleForms(t *testing.T) {
 		{"bracketed allow permits bracketed target", "[::1]", "[::1]", true},
 		{"bare allow permits expanded target", "::1", "0:0:0:0:0:0:0:1", true},
 		{"bracketed allow rejects other address", "[::1]", "::2", false},
-		// IPv4-mapped stays distinct (no Unmap; USK-1132 owns that question).
-		{"ipv4-mapped is not ipv4", "127.0.0.1", "::ffff:127.0.0.1", false},
+		// IPv4-mapped IPv6 dials the IPv4 host (RFC 4291 §2.5.5.2), so it is
+		// the same host for scope purposes (USK-1250, absorbing USK-1132).
+		{"ipv4-mapped is ipv4", "127.0.0.1", "::ffff:127.0.0.1", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

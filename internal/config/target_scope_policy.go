@@ -36,17 +36,24 @@ var targetRuleSchemes = map[string]bool{
 //     spellings are equivalent: connector compares hosts on a canonical form
 //     (one enclosing bracket pair stripped, IPv6 in its RFC 5952 text form),
 //     so "[::1]", "::1" and "0:0::1" are the same rule and match the same
-//     targets (USK-1129). A zone-qualified target such as "[fe80::1%eth0]"
-//     keeps its zone and does not match a zone-less rule (rules cannot carry
-//     a zone; see USK-1132). A wildcard over an IP literal ("*.::1",
-//     "*.[::1]", "*.10.0.0.1") is rejected: no host ends with ".::1".
+//     targets (USK-1129). The comparison also ignores a target's IPv6
+//     zone ("[fe80::1%eth0]" matches "fe80::1"; a rule cannot carry one),
+//     unmaps IPv4-mapped IPv6 in both directions (a "::ffff:10.0.0.5"
+//     rule is accepted and equals "10.0.0.5"), strips one trailing dot
+//     from the target, and reads legacy inet_aton IPv4 target spellings
+//     ("2130706433", "127.1") as dotted-quad (USK-1250). Those legacy
+//     spellings are still rejected as rule hostnames ("invalid IPv4
+//     address"): the dotted-quad rule already matches them. A wildcard
+//     over an IP literal ("*.::1", "*.[::1]", "*.10.0.0.1") is rejected:
+//     no host ends with ".::1".
 //     Labels may contain letters, digits, '-' and '_'.
-//   - a trailing-dot hostname ("internal.corp.") is rejected. The data path
-//     does not strip the trailing dot, so such a rule matches only targets
-//     spelled as an FQDN ("CONNECT internal.corp.:443") and misses the usual
-//     dotless spelling — almost always an operator mistake. Rejecting it
-//     fails closed: startup (or the security tool call) refuses loudly
-//     instead of installing a rule that covers less than it appears to.
+//   - a trailing-dot hostname ("internal.corp.") is rejected. connector
+//     strips one trailing dot from both sides before comparing (USK-1250),
+//     so such a rule would match exactly what its dotless form matches;
+//     the dotless form is the one spelling the operator needs, and keeping
+//     the rejection means no previously refused config starts loading.
+//     Rejecting fails closed: startup (or the security tool call) refuses
+//     loudly instead of installing the rule.
 //   - ports must be in 1-65535.
 //   - path_prefix "" is accepted (all paths). Otherwise it must start with
 //     "/" and contain no "*", "?" or "#" (see validatePathPrefix).
@@ -91,9 +98,10 @@ func validateTargetHostname(hostname string) error {
 		}
 	}
 
-	// A trailing-dot rule matches only FQDN-spelled targets (the data path
-	// does not strip the dot), so it is rejected as a likely operator
-	// mistake. The rejection fails closed: the caller refuses the rule.
+	// A trailing-dot rule is rejected (see ValidateTargetRule): connector
+	// compares hosts with one trailing dot stripped, so the dotless
+	// spelling already matches both "x" and "x." targets. The rejection
+	// fails closed: the caller refuses the rule.
 	if strings.HasSuffix(h, ".") {
 		return fmt.Errorf("hostname %q: trailing dot is not allowed", hostname)
 	}
