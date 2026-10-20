@@ -145,10 +145,11 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 		tags = string(tagsJSON)
 	}
 
-	var clientAddr, serverAddr, tlsVersion, tlsCipher, tlsALPN, tlsCertSubject, tlsClientJA3, tlsClientJA4 string
+	var clientAddr, serverAddr, upstreamProxy, tlsVersion, tlsCipher, tlsALPN, tlsCertSubject, tlsClientJA3, tlsClientJA4 string
 	if st.ConnInfo != nil {
 		clientAddr = st.ConnInfo.ClientAddr
 		serverAddr = st.ConnInfo.ServerAddr
+		upstreamProxy = st.ConnInfo.UpstreamProxy
 		tlsVersion = st.ConnInfo.TLSVersion
 		tlsCipher = st.ConnInfo.TLSCipher
 		tlsALPN = st.ConnInfo.TLSALPN
@@ -172,8 +173,8 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO streams (id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin, tls_client_ja3, tls_client_ja4)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO streams (id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin, tls_client_ja3, tls_client_ja4, listener_name, upstream_proxy)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.ID,
 		st.ConnID,
 		st.Protocol,
@@ -196,6 +197,8 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 		string(origin),
 		tlsClientJA3,
 		tlsClientJA4,
+		st.ListenerName,
+		upstreamProxy,
 	)
 	if err != nil {
 		return fmt.Errorf("insert stream: %w", err)
@@ -343,6 +346,7 @@ func buildStreamUpdateSets(update StreamUpdate) ([]string, []interface{}, error)
 		args = append(args, string(tagsJSON))
 	}
 	addString("server_addr", update.ServerAddr)
+	addString("upstream_proxy", update.UpstreamProxy)
 	addString("tls_version", update.TLSVersion)
 	addString("tls_cipher", update.TLSCipher)
 	addString("tls_alpn", update.TLSALPN)
@@ -427,7 +431,7 @@ func ValidateStreamID(id string) error {
 }
 
 // streamColumns is the list of columns selected in stream queries.
-const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin, tls_client_ja3, tls_client_ja4`
+const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin, tls_client_ja3, tls_client_ja4, listener_name, upstream_proxy`
 
 // buildStreamWhereClause constructs a SQL WHERE clause from StreamListOptions.
 // Method, URLPattern, StatusCode, and HTTPVersion are matched via EXISTS
@@ -444,6 +448,10 @@ func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 	if opts.ConnID != "" {
 		conditions = append(conditions, "s.conn_id = ?")
 		args = append(args, opts.ConnID)
+	}
+	if opts.ListenerName != "" {
+		conditions = append(conditions, "s.listener_name = ?")
+		args = append(args, opts.ListenerName)
 	}
 	if opts.Host != "" {
 		// Match against server_addr (host:port or host) or the host portion
@@ -1220,6 +1228,7 @@ func scanStream(row scannable) (*Stream, error) {
 		origin         string
 		tlsClientJA3   string
 		tlsClientJA4   string
+		upstreamProxy  string
 	)
 
 	err := row.Scan(
@@ -1245,6 +1254,8 @@ func scanStream(row scannable) (*Stream, error) {
 		&origin,
 		&tlsClientJA3,
 		&tlsClientJA4,
+		&st.ListenerName,
+		&upstreamProxy,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1270,6 +1281,7 @@ func scanStream(row scannable) (*Stream, error) {
 	st.ConnInfo = connInfoFromColumns(ConnectionInfo{
 		ClientAddr:           clientAddr,
 		ServerAddr:           serverAddr,
+		UpstreamProxy:        upstreamProxy,
 		TLSVersion:           tlsVersion,
 		TLSCipher:            tlsCipher,
 		TLSALPN:              tlsALPN,

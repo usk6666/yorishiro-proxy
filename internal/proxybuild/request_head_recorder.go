@@ -115,6 +115,7 @@ func buildRequestHeadRecorder(store flow.Writer, scope *flow.RecordScope, listen
 			Timestamp:     started,
 			Duration:      time.Since(started),
 			Tags:          requestHeadTags(f, head, listenerName),
+			ListenerName:  listenerName,
 			ConnInfo: &flow.ConnectionInfo{
 				ClientAddr: f.ClientAddr,
 				ServerAddr: f.Target,

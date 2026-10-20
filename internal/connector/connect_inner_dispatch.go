@@ -215,11 +215,11 @@ func BuildPlainH2CStack(
 		TargetHost: target,
 		// TLS intentionally nil: no handshake happened on the client side.
 	}
-	upstreamEnvCtx := envelope.EnvelopeContext{
+	upstreamEnvCtx := WithUpstreamPeer(envelope.EnvelopeContext{
 		ConnID:     connID,
 		TargetHost: target,
 		// TLS intentionally nil: no handshake happened on the upstream side.
-	}
+	}, upstreamConn)
 
 	stack := NewConnectionStack(connID)
 
@@ -303,7 +303,7 @@ func BuildBytechunkStack(
 		bytechunk.WithStateReleaser(cfgPluginEngine(cfg)),
 	))
 	stack.PushUpstream(bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive,
-		bytechunk.WithEnvelopeContext(envCtx),
+		bytechunk.WithEnvelopeContext(WithUpstreamPeer(envCtx, upstreamConn)),
 	))
 	return stack, nil
 }

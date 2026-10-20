@@ -138,6 +138,8 @@ type EnvelopeContext struct {
     ConnID     string        // unique per client TCP connection
     ClientAddr net.Addr      // original client address
     TargetHost string        // CONNECT destination or SOCKS5 target
+    ServerAddr net.Addr      // upstream leg only: the upstream socket's peer (USK-1116)
+    UpstreamProxy string     // upstream leg only: proxy dialed through, "scheme://host:port", no userinfo
     TLS        *TLSSnapshot  // non-nil if a TLS layer is in the stack
     ReceivedAt time.Time     // wall-clock at Next() time
 }
@@ -151,6 +153,8 @@ type TLSSnapshot struct {
     CipherSuite       uint16
 }
 ```
+
+**Upstream peer (USK-1116).** `ServerAddr` and `UpstreamProxy` follow the per-Layer rule: they are stamped only on the upstream-facing Layer's template (`connector.WithUpstreamPeer` at every upstream Layer construction site, including h1 / h2 redial, which overwrite the values copied from the stale Layer), so they ride on Receive envelopes and stay empty on the client leg. `ServerAddr` is `upstreamConn.RemoteAddr()` — the socket the proxy actually talked to, which is the upstream proxy when one was used, never the dial-target hostname; on an h2 pool hit the pooled Layer's own socket is authoritative. `UpstreamProxy` is the proxy URL the dial resolved (per-listener override and rotation included), carried by a marker wrapper on the raw TCP conn from `dialTCP` and rendered as `scheme://host:port` with userinfo dropped so no credential reaches the flow store. RecordStep projects both onto `Stream.ConnInfo` from the first Receive envelope per stream, and stamps `ConnInfo.ClientAddr` (from the listener's per-connection ctx) and `Stream.ListenerName` (construction-time `WithListenerName`, i.e. configuration) at stream creation. A stream that never receives an upstream envelope keeps `server_addr` empty.
 
 **Design rule:** Any field on `Envelope` (not on `Message`) must be meaningful for *every* protocol, including raw TCP. If a field is HTTP-shaped, it belongs on `HTTPMessage`, not `Envelope`.
 

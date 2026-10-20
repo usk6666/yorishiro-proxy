@@ -25,7 +25,8 @@ Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` reso
 - **origin** (string): Stream origin classification filter (`"proxy"` for live MITM traffic, `"resend"` for resend_* MCP tool streams, `"fuzz"` reserved for fuzz campaigns).
 - **state** (string): Flow lifecycle state filter (`"active"`, `"complete"`, `"error"`).
 - **conn_id** (string): Connection ID filter for flows (exact match). Use to find all flows from the same connection.
-- **host** (string): Host filter for flows. Matches against the `server_addr` or the host portion of the request URL (e.g. `"example.com"`).
+- **listener_name** (string): Listener filter for flows (exact match). Selects the streams accepted by the listener started with `proxy_start` `name` (`"default"` when no name was given); TCP-forward streams carry their parent listener's name. Streams from `resend_*` / fuzz and rows recorded before this field existed have an empty `listener_name` and never match.
+- **host** (string): Host filter for flows. Matches against the `server_addr` or the host portion of the request URL (e.g. `"example.com"`). Because `server_addr` is the upstream socket's peer, a stream reached through an upstream proxy matches the proxy's host here.
 - **direction** (string): Message direction filter for the `messages` resource (`"send"` or `"receive"`).
 - **body_contains** (string): Response body substring filter for fuzz_results.
 - **outliers_only** (boolean): Return only outlier fuzz results (detected by status_code, body_length, or timing deviation).
@@ -117,7 +118,14 @@ Use the `messages` resource with `limit`/`offset` to page through all messages.
 
 Requires: `id` (flow ID).
 
-Returns: id, conn_id, protocol, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant flows), timestamps.
+Returns: id, conn_id, protocol, state, listener_name, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant flows), timestamps.
+
+Connection info (`conn_info`) on live streams:
+- `client_addr`: the peer address of the client socket the listener accepted.
+- `server_addr`: the peer address of the upstream socket the proxy actually connected — never a requested hostname. When `upstream_proxy` is set this is the upstream proxy's address, not the final destination (the destination is in `url` / `tags.target`). It is filled from the first upstream response envelope, so a stream that never received anything from upstream (dial failure, blocked before forwarding) has none. Some error / audit streams (`upstream_tls_error`, `client_tls_error`, proxy-closed request heads, `capacity` rejections) carry the requested target here instead, because no upstream socket existed.
+- `upstream_proxy`: the upstream proxy the connection went through, as `scheme://host:port` with credentials removed; absent for a direct connection.
+
+`listener_name` (also on each `flows[]` entry) is the name of the listener that accepted the connection — the `proxy_start` `name`, or `"default"`. It comes from configuration, not from the traffic, so a client cannot change it.
 
 The `url` field (here, in `flows[]`, in `messages[]` and in `original_request`) carries the request path in wire form — percent-encoding exactly as sent, not decoded. A JSON string cannot carry bytes that are not valid UTF-8, so any such path or query bytes are shown `%XX`-escaped (upper-case hex, e.g. the wire byte `0xFF` appears as `%FF`); every other byte is verbatim. `resend_http` with `flow_id` still replays the original wire bytes, not the escaped text.
 
@@ -212,6 +220,14 @@ Returns for WebSocket items: `items[]` (id, phase, protocol, opcode, direction, 
 {
   "resource": "flows",
   "filter": {"conn_id": "abc-conn-123"}
+}
+```
+
+### Filter flows by listener
+```json
+{
+  "resource": "flows",
+  "filter": {"listener_name": "worker-a"}
 }
 ```
 

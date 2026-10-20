@@ -75,7 +75,9 @@ func RedialUpstreamH1(
 	// already snapshotted the original handshake on prior envelopes, so
 	// keeping the template coherent for the CONNECT's lifetime is more
 	// useful than re-recording TLS here).
-	envCtx := stale.EnvelopeContextTemplate()
+	// USK-1116: the copied template still names the stale socket's peer;
+	// overwrite it with the fresh socket's.
+	envCtx := WithUpstreamPeer(stale.EnvelopeContextTemplate(), upstreamConn)
 	connID := redialConnIDLabel(envCtx.ConnID, generation)
 
 	fresh := http1.New(upstreamConn, connID, envelope.Receive,

@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
@@ -665,14 +666,9 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	// observation on the Stream.
 	s.appendAnnotations(ctx, env)
 
-	// On Receive, project upstream TLS snapshot (if present) onto
-	// Stream.ConnInfo. The Send side carries the synthetic MITM cert we
-	// presented to the client; Receive carries the real upstream TLS
-	// reality that analysts actually need. UpdateStream is idempotent —
-	// repeated Receive envelopes on the same stream rewrite the same
-	// values.
-	if env.Direction == envelope.Receive && env.Context.TLS != nil {
-		s.updateStreamTLS(ctx, env)
+	// On Receive, project the upstream leg's reality onto Stream.ConnInfo.
+	if env.Direction == envelope.Receive {
+		s.projectUpstreamConnInfo(ctx, env)
 	}
 
 	// USK-1015: project the client's ClientHello JA3/JA4 into ConnInfo. These
@@ -903,6 +899,54 @@ func (s *RecordStep) updateStreamTLS(ctx context.Context, env *envelope.Envelope
 	}
 }
 
+// projectUpstreamConnInfo projects the upstream leg's connection metadata
+// carried by a Receive envelope onto Stream.ConnInfo:
+//
+//   - the upstream TLS snapshot (if present). The Send side carries the
+//     synthetic MITM cert we presented to the client; Receive carries the
+//     real upstream TLS reality that analysts actually need.
+//     UpdateStream is idempotent — repeated Receive envelopes on the same
+//     stream rewrite the same values.
+//   - USK-1116: the upstream socket's peer and the upstream proxy it was
+//     dialed through, if any. Only upstream-leg Layer templates carry
+//     ServerAddr; written once per Stream.
+func (s *RecordStep) projectUpstreamConnInfo(ctx context.Context, env *envelope.Envelope) {
+	if env.Context.TLS != nil {
+		s.updateStreamTLS(ctx, env)
+	}
+	if env.Context.ServerAddr != nil {
+		s.updateStreamServerAddr(ctx, env)
+	}
+}
+
+// updateStreamServerAddr projects env.Context.ServerAddr / UpstreamProxy
+// into Stream.ConnInfo (USK-1116). The values are per upstream socket and
+// the upstream-leg template carries them on every Receive envelope, so
+// only the first Receive per StreamID writes (serverAddrProjected gate,
+// like protocolRetagged). Overlay envelopes built without the upstream
+// template carry no ServerAddr and never reach here, so they do not
+// consume the gate. A failed write forgets the gate so a later envelope
+// retries.
+func (s *RecordStep) updateStreamServerAddr(ctx context.Context, env *envelope.Envelope) {
+	if env.StreamID == "" {
+		return
+	}
+	if _, loaded := s.serverAddrProjected.LoadOrStore(env.StreamID, struct{}{}); loaded {
+		return
+	}
+	update := flow.StreamUpdate{
+		ServerAddr:    env.Context.ServerAddr.String(),
+		UpstreamProxy: env.Context.UpstreamProxy,
+	}
+	if err := s.store.UpdateStream(ctx, env.StreamID, update); err != nil {
+		s.serverAddrProjected.Delete(env.StreamID)
+		s.logger.Error("record step: server address update failed",
+			"stream_id", env.StreamID,
+			"error", err,
+		)
+	}
+}
+
 // updateStreamClientFingerprint projects the client's ClientHello JA3/JA4
 // fingerprints (USK-1015) from env.Context.TLS into Stream.ConnInfo. Fires
 // on any envelope whose snapshot carries a non-empty fingerprint — in
@@ -1050,6 +1094,16 @@ func (s *RecordStep) createStream(ctx context.Context, env *envelope.Envelope) {
 		State:     "active",
 		Timestamp: time.Now(),
 		Origin:    s.origin,
+		// USK-1116: listener name is construction-time configuration
+		// (WithListenerName), never wire data.
+		ListenerName: s.listenerName,
+	}
+	// USK-1116: the accepted client socket's peer, stamped on ctx by the
+	// listener (FullListener.handleConn / tcp_forward handlers) for every
+	// live entry path. Resend / fuzz pipelines carry none and leave
+	// ConnInfo nil.
+	if clientAddr := connector.ClientAddrFromContext(ctx); clientAddr != "" {
+		st.ConnInfo = &flow.ConnectionInfo{ClientAddr: clientAddr}
 	}
 
 	st.Scheme = semanticScheme(env)

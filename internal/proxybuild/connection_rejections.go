@@ -396,6 +396,7 @@ func (c *ConnectionRejections) write(rec rejectionRecord) {
 			ClientAddr: info.RemoteAddr,
 			ServerAddr: rec.authority,
 		},
+		ListenerName: info.Listener,
 	}
 	ctx, cancel := context.WithTimeout(c.ctx, rejectionRecordTimeout)
 	defer cancel()

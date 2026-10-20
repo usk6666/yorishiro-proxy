@@ -263,22 +263,24 @@ func exportToStream(es *ExportStream) (*Stream, error) {
 	}
 
 	st := &Stream{
-		ID:        es.ID,
-		ConnID:    es.ConnID,
-		Protocol:  es.Protocol,
-		Scheme:    es.Scheme,
-		State:     es.State,
-		Timestamp: ts,
-		Duration:  time.Duration(es.DurationMs) * time.Millisecond,
-		Tags:      es.Tags,
-		BlockedBy: es.BlockedBy,
-		Origin:    origin,
+		ID:           es.ID,
+		ConnID:       es.ConnID,
+		Protocol:     es.Protocol,
+		Scheme:       es.Scheme,
+		State:        es.State,
+		Timestamp:    ts,
+		Duration:     time.Duration(es.DurationMs) * time.Millisecond,
+		Tags:         es.Tags,
+		BlockedBy:    es.BlockedBy,
+		Origin:       origin,
+		ListenerName: es.ListenerName,
 	}
 
 	if es.ConnInfo != nil {
 		st.ConnInfo = &ConnectionInfo{
 			ClientAddr:           es.ConnInfo.ClientAddr,
 			ServerAddr:           es.ConnInfo.ServerAddr,
+			UpstreamProxy:        es.ConnInfo.UpstreamProxy,
 			TLSVersion:           es.ConnInfo.TLSVersion,
 			TLSCipher:            es.ConnInfo.TLSCipher,
 			TLSALPN:              es.ConnInfo.TLSALPN,

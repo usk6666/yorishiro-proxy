@@ -861,6 +861,7 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 		opts.State = input.Filter.State
 		opts.Origin = flow.Origin(input.Filter.Origin)
 		opts.ConnID = input.Filter.ConnID
+		opts.ListenerName = input.Filter.ListenerName
 		opts.Host = input.Filter.Host
 	}
 	return opts
@@ -945,6 +946,7 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			Scheme:          fl.Scheme,
 			State:           fl.State,
 			FailureReason:   fl.FailureReason,
+			ListenerName:    fl.ListenerName,
 			Method:          method,
 			URL:             urlStr,
 			StatusCode:      statusCode,
@@ -1632,6 +1634,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		HTTPVersion:                     resolveHTTPVersion(cat),
 		State:                           fl.State,
 		FailureReason:                   fl.FailureReason,
+		ListenerName:                    fl.ListenerName,
 		Method:                          reqSide.method,
 		URL:                             reqSide.url,
 		RequestHeaders:                  reqSide.headers,
@@ -1789,6 +1792,7 @@ func buildConnInfoResult(ci *flow.ConnectionInfo) *connInfoResult {
 	return &connInfoResult{
 		ClientAddr:           ci.ClientAddr,
 		ServerAddr:           ci.ServerAddr,
+		UpstreamProxy:        ci.UpstreamProxy,
 		TLSVersion:           ci.TLSVersion,
 		TLSCipher:            ci.TLSCipher,
 		TLSALPN:              ci.TLSALPN,

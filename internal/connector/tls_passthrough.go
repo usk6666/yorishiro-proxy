@@ -218,7 +218,9 @@ func relayTLSPassthroughWithObserver(
 		LocalAddr:    netAddrString(clientConn.LocalAddr()),
 		RemoteAddr:   netAddrString(clientConn.RemoteAddr()),
 		UpstreamAddr: netAddrString(upstreamConn.RemoteAddr()),
-		TargetHost:   hostOnly(target),
+		// USK-1116: UpstreamAddr is the proxy when one was used.
+		UpstreamProxy: UpstreamProxyOf(upstreamConn),
+		TargetHost:    hostOnly(target),
 	}
 	if observer != nil {
 		observer.OnStart(ctx, obs)

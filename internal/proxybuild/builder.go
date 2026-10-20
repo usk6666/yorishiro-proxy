@@ -633,8 +633,16 @@ func defaultHTTP2WireEncoderRegistry() *pipeline.WireEncoderRegistry {
 // engines and degrade to no-ops; no conditional skipping is required at
 // assembly time.
 func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *slog.Logger) *pipeline.Pipeline {
+	// USK-1116: every Stream this listener records carries the listener's
+	// configured name. tcp_forwards share this Pipeline (parentStack), so
+	// they inherit the parent listener's name.
+	recordListenerName := deps.ListenerName
+	if recordListenerName == "" {
+		recordListenerName = DefaultListenerName
+	}
 	recordOpts := []pipeline.Option{
 		pipeline.WithWireEncoderRegistry(encoders),
+		pipeline.WithListenerName(recordListenerName),
 	}
 	if deps.RecordMaxBodySize > 0 {
 		recordOpts = append(recordOpts, pipeline.WithMaxBodySize(deps.RecordMaxBodySize))
@@ -2399,6 +2407,20 @@ func blockAnnotationTags(ctx context.Context) map[string]string {
 	return tags
 }
 
+// dropStreamListenerName resolves Stream.ListenerName for a Pipeline-Drop
+// audit Stream (USK-1116): the recorder's configured listener when set,
+// else the parent listener name the TCP-forward handlers stamp on ctx
+// (configuration, never wire data), else DefaultListenerName.
+func dropStreamListenerName(ctx context.Context, configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if name := connector.ListenerNameFromContext(ctx); name != "" {
+		return name
+	}
+	return DefaultListenerName
+}
+
 // buildPipelineDropRecorder returns a callback that persists a Pipeline-Drop
 // envelope as a flow.Stream with State="error" and BlockedBy=<reason>. The
 // Stream is intentionally minimal (no Flow rows) for envelopes whose
@@ -2417,6 +2439,10 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 	if store == nil {
 		return nil
 	}
+	// configuredName is the caller's listener; the TCP-forward paths pass
+	// "" and rely on the parent listener name the forward handler stamped
+	// on ctx (connector.ContextWithListenerName — config, not wire).
+	configuredName := listenerName
 	if listenerName == "" {
 		listenerName = DefaultListenerName
 	}
@@ -2442,12 +2468,13 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		clientAddr := connector.ClientAddrFromContext(ctx)
 
 		st := &flow.Stream{
-			ID:        streamID,
-			ConnID:    connID,
-			Protocol:  string(env.Protocol),
-			State:     "error",
-			BlockedBy: blockedBy,
-			Timestamp: time.Now(),
+			ID:           streamID,
+			ConnID:       connID,
+			Protocol:     string(env.Protocol),
+			State:        "error",
+			BlockedBy:    blockedBy,
+			Timestamp:    time.Now(),
+			ListenerName: dropStreamListenerName(ctx, configuredName),
 		}
 		// Project HTTP-typed identity fields when available. Following the
 		// "do not unify across protocols" principle (CLAUDE.md), the Stream
@@ -2629,8 +2656,13 @@ func buildTLSStackBuildErrorRecorder(store flow.Writer, scope *flow.RecordScope,
 			},
 			ConnInfo: &flow.ConnectionInfo{
 				ClientAddr: clientAddr,
+				// NOTE: the dial target, not a socket peer — the stack
+				// build failed before any upstream socket was handed to a
+				// Layer (mixed semantics vs. live streams; see
+				// flow.ConnectionInfo.ServerAddr).
 				ServerAddr: target,
 			},
+			ListenerName: listenerName,
 		}
 		if failureReason == "client_tls_error" && errors.Is(buildErr, context.DeadlineExceeded) {
 			addTLSHandshakeTimeoutTags(st.Tags, buildCfg)

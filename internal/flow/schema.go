@@ -500,6 +500,25 @@ ALTER TABLE streams ADD COLUMN tls_client_ja3 TEXT NOT NULL DEFAULT '';
 ALTER TABLE streams ADD COLUMN tls_client_ja4 TEXT NOT NULL DEFAULT '';
 `
 
+// schemaV19 adds live-stream connection provenance (USK-1116):
+//   - streams.listener_name: the operator-configured name of the listener
+//     that accepted the connection (proxy_start "name" / "default").
+//     Config-sourced, never wire-sourced, so per-Worker listeners make it
+//     an unforgeable worker identity. Indexed for the query tool's
+//     filter.listener_name.
+//   - streams.upstream_proxy: the upstream proxy the upstream socket was
+//     dialed through ("scheme://host:port", userinfo stripped); empty for
+//     a direct dial. server_addr then holds the proxy's socket address.
+//
+// Pre-existing rows keep ” in both columns — we do not fabricate a
+// 'default' listener name for traffic whose listener was never recorded.
+// Additive ALTER TABLE — no FK toggle needed.
+const schemaV19 = `
+ALTER TABLE streams ADD COLUMN listener_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE streams ADD COLUMN upstream_proxy TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_streams_listener_name ON streams(listener_name);
+`
+
 var migrations = map[int]string{
 	1:  schemaV1,
 	2:  schemaV2,
@@ -519,6 +538,7 @@ var migrations = map[int]string{
 	16: schemaV16,
 	17: schemaV17,
 	18: schemaV18,
+	19: schemaV19,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

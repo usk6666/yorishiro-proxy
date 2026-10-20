@@ -75,6 +75,8 @@ export interface ForwardConfig {
 export interface ConnInfo {
   client_addr?: string;
   server_addr?: string;
+  /** Upstream proxy the connection went through ("scheme://host:port", no credentials). */
+  upstream_proxy?: string;
   tls_version?: string;
   tls_cipher?: string;
   tls_alpn?: string;
@@ -430,6 +432,8 @@ export interface FlowEntry {
   scheme?: string;
   flow_type: string;
   state: string;
+  /** Name of the listener that accepted the connection (proxy_start name). */
+  listener_name?: string;
   method: string;
   url: string;
   status_code: number;
@@ -539,6 +543,8 @@ export interface FlowDetailResult {
   scheme?: string;
   flow_type: string;
   state: string;
+  /** Name of the listener that accepted the connection (proxy_start name). */
+  listener_name?: string;
   method: string;
   url: string;
   request_headers: Record<string, string[]> | null;

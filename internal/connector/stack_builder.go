@@ -1757,11 +1757,14 @@ func buildStackFromRoute(
 		TargetHost: target,
 		TLS:        clientSnap,
 	}
-	upstreamEnvCtx := envelope.EnvelopeContext{
+	// USK-1116: the upstream leg also carries its socket peer. On the h2
+	// pool-hit path this template is discarded with the fresh conn and the
+	// pooled Layer's own template (its socket's peer) stays authoritative.
+	upstreamEnvCtx := WithUpstreamPeer(envelope.EnvelopeContext{
 		ConnID:     connID,
 		TargetHost: target,
 		TLS:        upstreamSnap,
-	}
+	}, upstreamConn)
 
 	stack := NewConnectionStack(connID)
 
@@ -2149,11 +2152,11 @@ func buildRawPassthroughStack(
 
 	// Upstream: ByteChunk layer over the upstream TLS conn (reads server→client)
 	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive,
-		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+		bytechunk.WithEnvelopeContext(WithUpstreamPeer(envelope.EnvelopeContext{
 			ConnID:     connID,
 			TargetHost: target,
 			TLS:        upstreamSnap,
-		}),
+		}, upstreamConn)),
 	)
 	stack.PushUpstream(upstreamLayer)
 
