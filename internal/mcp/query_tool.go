@@ -256,8 +256,8 @@ type queryFilter struct {
 	// ListenerName filters flows by the name of the listener that accepted
 	// them (exact match; the proxy_start "name", or "default").
 	ListenerName string `json:"listener_name,omitempty" jsonschema:"listener name filter for flows (exact match on the proxy_start name, e.g. default)"`
-	// Host filters flows by host (matches server_addr or URL host).
-	Host string `json:"host,omitempty" jsonschema:"host filter for flows (matches server_addr or URL host, e.g. example.com)"`
+	// Host filters flows by host (matches server_addr, tags.target or URL host).
+	Host string `json:"host,omitempty" jsonschema:"host filter for flows (matches server_addr, tags.target or URL host, e.g. example.com)"`
 	// BodyContains filters fuzz_results by response body substring.
 	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter (fuzz_results)"`
 	// OutliersOnly filters fuzz_results to return only outlier results.

@@ -401,11 +401,12 @@ func (s *Server) buildResendGRPCPlan(ctx context.Context, input *resendGRPCInput
 //     recorded flow and the outgoing frame stays empty; only the TCP/TLS
 //     handshake differs. Rewriting it would reverse USK-1051.
 //   - plan.authority keeps the recorded value, and so does the dial target
-//     derived from it. Nothing in a persisted flow records the address the
-//     proxy originally connected to (Stream.ConnInfo.ServerAddr is written
-//     only by the TLS-passthrough recorder and the handshake-error audit
-//     path), so there is no better address to substitute — only a warning
-//     to raise, and `target_addr` to pin it with.
+//     derived from it. Stream.ConnInfo.ServerAddr is the upstream socket
+//     peer, which is the upstream proxy when one was used and is empty for
+//     streams that never received an upstream envelope, so it is not a
+//     dependable dial target either — there is no better address to
+//     substitute, only a warning to raise, and `target_addr` to pin it
+//     with.
 //
 // An explicit input.Scheme always wins: it is the caller's own decision,
 // already allowlist-checked by validateResendGRPCStringFields, and is the
