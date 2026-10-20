@@ -238,8 +238,12 @@ func TestProxybuild_PlainHTTP_KeepAliveSlowlorisSecondRequestClosed(t *testing.T
 	if got := len(store.Streams()); got != 2 {
 		t.Errorf("streams = %d, want 2 (request 1 complete + request 2 error): %s", got, summarizeStreamProtocols(store.Streams()))
 	}
+	// Only updates that set State can re-finalise the stream. Partial
+	// updates that leave State empty (e.g. the ServerAddr projection
+	// RecordStep writes on the first Receive) do not change it — the
+	// store skips empty fields.
 	for _, u := range store.StreamUpdates(firstID) {
-		if u.State != "complete" {
+		if u.State != "" && u.State != "complete" {
 			t.Fatalf("request 1 stream re-finalised as %q after the request-head timeout (reason %q)",
 				u.State, u.FailureReason)
 		}
