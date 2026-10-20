@@ -241,11 +241,14 @@ func TestProxybuild_PlainHTTP_KeepAliveSlowlorisSecondRequestClosed(t *testing.T
 	// Only updates that set State can re-finalise the stream. Partial
 	// updates that leave State empty (e.g. the ServerAddr projection
 	// RecordStep writes on the first Receive) do not change it — the
-	// store skips empty fields.
+	// store skips empty fields. A failure attribution (FailureReason /
+	// BlockedBy) is flagged regardless of State: the store would persist
+	// it onto a stream whose state stays "complete", and the completion
+	// update itself never carries one (ClassifyError(nil / io.EOF) == "").
 	for _, u := range store.StreamUpdates(firstID) {
-		if u.State != "" && u.State != "complete" {
-			t.Fatalf("request 1 stream re-finalised as %q after the request-head timeout (reason %q)",
-				u.State, u.FailureReason)
+		if (u.State != "" && u.State != "complete") || u.FailureReason != "" || u.BlockedBy != "" {
+			t.Fatalf("request 1 stream re-finalised after the request-head timeout: state %q, reason %q, blocked_by %q",
+				u.State, u.FailureReason, u.BlockedBy)
 		}
 	}
 }
