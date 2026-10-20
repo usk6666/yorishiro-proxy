@@ -9,7 +9,7 @@
  * holds, never re-parsed or normalized.
  */
 
-import { encodeBase64 } from "../../lib/rawBytes.js";
+import { decodeBase64, encodeBase64 } from "../../lib/rawBytes.js";
 import type {
   HeaderKV,
   InterceptActionParams,
@@ -45,7 +45,11 @@ export interface InterceptEditState {
   /** Raw query string, without a leading "?". */
   rawQuery: string;
   // HTTP response side
-  status: number;
+  /**
+   * Status code as typed into the editor. Kept as a string so a cleared
+   * or non-integer field reads as "unchanged" rather than as status 0.
+   */
+  status: string;
   statusReason: string;
   // HTTP headers (both sides)
   headers: HeaderRow[];
@@ -95,7 +99,7 @@ export function entryToEditState(
     authority: http.authority ?? "",
     path: http.path ?? "",
     rawQuery: http.raw_query ?? "",
-    status: http.status ?? 0,
+    status: http.status !== undefined ? String(http.status) : "",
     statusReason: http.status_reason ?? "",
     headers: (http.headers ?? []).map((h) => ({ id: newId(), name: h.name, value: h.value })),
     body: http.body ?? "",
@@ -155,7 +159,8 @@ function buildHTTPModify(entry: InterceptQueueEntry, edit: InterceptEditState): 
     if (edit.path !== (held.path ?? "")) out.path = edit.path;
     if (edit.rawQuery !== (held.raw_query ?? "")) out.raw_query = edit.rawQuery;
   } else {
-    if (edit.status !== (held.status ?? 0)) out.status = edit.status;
+    const status = parseStatus(edit.status);
+    if (status !== undefined && status !== held.status) out.status = status;
     if (edit.statusReason !== (held.status_reason ?? "")) out.status_reason = edit.statusReason;
   }
   const headers = headerRowsToKVs(edit.headers);
@@ -165,6 +170,18 @@ function buildHTTPModify(entry: InterceptQueueEntry, edit: InterceptEditState): 
     out.body_encoding = edit.bodyEncoding;
   }
   return out;
+}
+
+/**
+ * Editor status field to a status code. Empty or non-integer input yields
+ * undefined (leave the held status unchanged) so a cleared field never
+ * becomes status 0. Out-of-range integers are passed through deliberately:
+ * the intercept tool stays permissive for pentest use.
+ */
+function parseStatus(value: string): number | undefined {
+  if (!/^\d+$/.test(value)) return undefined;
+  const n = Number(value);
+  return Number.isSafeInteger(n) ? n : undefined;
 }
 
 /** Whether Modify & Forward is offered for the entry. */
@@ -189,18 +206,39 @@ export function rawModeAllowed(entry: InterceptQueueEntry): boolean {
  * active (config `safety_filter.output_rules`) and the arguments send
  * headers or a body / payload / bytes, or when the sent content contains
  * the `[MASKED:` token the built-in presets substitute.
+ *
+ * `outputRules > 0` is the authoritative trigger. The token scan is only a
+ * secondary signal (e.g. while the config is still loading); base64
+ * content is decoded before scanning, and content that is not valid
+ * base64 is skipped. This only warns, it never blocks.
  */
 export function maskingWarning(args: InterceptActionParams, outputRules: number): boolean {
   const content: string[] = [];
   if (args.http?.headers) {
     for (const h of args.http.headers) content.push(h.name, h.value);
   }
-  if (args.http?.body !== undefined) content.push(args.http.body);
-  if (args.ws?.payload !== undefined) content.push(args.ws.payload);
-  if (args.raw?.bytes_override !== undefined) content.push(args.raw.bytes_override);
+  if (args.http?.body !== undefined) {
+    content.push(scanText(args.http.body, args.http.body_encoding));
+  }
+  if (args.ws?.payload !== undefined) {
+    content.push(scanText(args.ws.payload, args.ws.body_encoding));
+  }
+  if (args.raw?.bytes_override !== undefined) {
+    content.push(scanText(args.raw.bytes_override, args.raw.bytes_encoding));
+  }
   if (content.length === 0) return false;
   if (outputRules > 0) return true;
   return content.some((c) => c.includes(MASK_TOKEN));
+}
+
+/**
+ * Content as text for the mask-token scan. Base64 is decoded (lossy
+ * UTF-8 is fine: the token is ASCII); invalid base64 scans as "".
+ */
+function scanText(data: string, encoding: string | undefined): string {
+  if (encoding !== "base64") return data;
+  // decodeBase64 wraps atob in try/catch and yields no bytes on bad input.
+  return new TextDecoder().decode(decodeBase64(data));
 }
 
 /**

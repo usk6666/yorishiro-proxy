@@ -387,7 +387,7 @@ function DetailEditor({ entry, edit, onChange }: DetailEditorProps) {
               value={edit.status}
               min={100}
               max={999}
-              onChange={(e) => onChange({ status: Number(e.target.value) })}
+              onChange={(e) => onChange({ status: e.target.value })}
               list="http-status-codes"
               aria-label="Status"
             />

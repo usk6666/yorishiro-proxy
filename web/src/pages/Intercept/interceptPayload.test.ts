@@ -83,7 +83,7 @@ const SCENARIOS: Scenario[] = [
     entry: loadEntry(responseEntryText),
     edit: (s) => ({
       ...s,
-      status: 403,
+      status: "403",
       headers: [...s.headers, row("Set-Cookie", "c=3")],
       body: "/wACAw==",
     }),
@@ -147,7 +147,7 @@ describe("entryToEditState", () => {
   it("maps http + receive to a response with status, reason and base64 body", () => {
     const s = entryToEditState(loadEntry(responseEntryText));
     expect(s.kind).toBe("response");
-    expect(s.status).toBe(200);
+    expect(s.status).toBe("200");
     expect(s.statusReason).toBe("OK");
     expect(headerPairs(s.headers)).toEqual([
       ["Content-Type", "application/octet-stream"],
@@ -253,7 +253,7 @@ describe("buildModifyAndForwardArgs partial updates", () => {
 
   it("carries base64 body_encoding with a changed response body and sends status as a number", () => {
     const s = entryToEditState(resp);
-    const args = buildModifyAndForwardArgs(resp, { ...s, status: 500, body: "AAAA" });
+    const args = buildModifyAndForwardArgs(resp, { ...s, status: "500", body: "AAAA" });
     expect(args.http).toEqual({ status: 500, body: "AAAA", body_encoding: "base64" });
   });
 
