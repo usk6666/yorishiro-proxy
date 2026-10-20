@@ -156,6 +156,20 @@ func TestTargetScope_CheckAuthority(t *testing.T) {
 		{"plain allowed authority passes", ipAllow, deny, "ok.example", "10.0.0.5:443", true},
 		{"lenient port parse kept: non-numeric port takes the default", nil, []TargetRule{{Hostname: "x.example", Ports: []int{443}}}, "x.example:abc", "", false},
 		{"denied authority", ipAllow, deny, "denied.example:8443", "10.0.0.5:443", false},
+
+		// Review F-1 / S-2: the whole authority fails closed on the forms
+		// CheckHostHeader cannot interpret, so the h2 :authority leg (no
+		// host header) does not stay open where the Host leg is closed.
+		// Only a non-numeric or out-of-range port stays lenient.
+		{"multi-colon non-IPv6 authority fails closed", ipAllow, deny, "denied.example:5432:x", "10.0.0.5:443", false},
+		{"multi-colon non-IPv6 authority fails closed, no dial target", nil, deny, "denied.example:5432:x", "", false},
+		{"non-IPv6 bracket with port fails closed", ipAllow, deny, "[denied.example:1]:443", "10.0.0.5:443", false},
+		{"non-IPv6 bracket without port fails closed", ipAllow, deny, "[denied.example]", "10.0.0.5:443", false},
+		{"IPv4 bracket fails closed", ipAllow, deny, "[10.0.0.5]:443", "10.0.0.5:443", false},
+		{"bracketed IPv6 authority passes", ipAllow, deny, "[::2]:443", "10.0.0.5:443", true},
+		{"bracketed IPv6 authority without port passes", ipAllow, deny, "[::2]", "10.0.0.5:443", true},
+		{"bare IPv6 authority passes", ipAllow, deny, "2001:db8::2", "10.0.0.5:443", true},
+		{"lenient port parse kept: non-numeric port passes when not denied", ipAllow, deny, "ok.example:abc", "10.0.0.5:443", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

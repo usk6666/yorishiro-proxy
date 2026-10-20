@@ -113,6 +113,30 @@ func TestHTTPScopeStep_NameLegParsing(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			// Review F-1: the multi-colon reading closed on the Host leg
+			// must not stay open on :authority when no host header is sent.
+			name:      "h2 :authority multi-colon non-IPv6 fails closed",
+			allows:    allowLoopback,
+			denies:    deny,
+			env:       hostLegH2Request("127.0.0.1:443", "denied.example:5432:x"),
+			wantBlock: true,
+		},
+		{
+			// Review S-2: a bracket holding a non-IPv6 value.
+			name:      "h2 :authority non-IPv6 bracket fails closed",
+			allows:    allowLoopback,
+			denies:    deny,
+			env:       hostLegH2Request("127.0.0.1:443", "[denied.example:1]:443"),
+			wantBlock: true,
+		},
+		{
+			name:      "h2 :authority bracketed IPv6 passes (guard)",
+			allows:    allowLoopback,
+			denies:    deny,
+			env:       hostLegH2Request("127.0.0.1:443", "[::2]:443"),
+			wantBlock: false,
+		},
+		{
 			name:      "dial-port deny: neither port matches (guard)",
 			allows:    allowLoopback,
 			denies:    []connector.TargetRule{{Hostname: "portd.example", Ports: []int{9999}}},
