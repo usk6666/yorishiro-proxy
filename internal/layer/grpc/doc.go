@@ -70,13 +70,28 @@
 //     bidirectional streams; the issue spec's unary-only "Start=0,
 //     Data=1..N, Start(resp)=N+1, ..." scheme is intentionally rejected.
 //
-// Trailers-only response (D4):
+// Response ending on its HEADERS frame (D4, USK-1251):
 //
-//   - When a Receive-side H2HeadersEvent arrives with EndStream=true and
-//     Headers carry "grpc-status", the wrapper emits BOTH a
-//     GRPCStartMessage envelope (sequence N) AND a synthetic
-//     GRPCEndMessage envelope (sequence N+1) parsed from the same
-//     headers. The synthetic End envelope has Envelope.Raw=nil.
+//   - When a Receive-side H2HeadersEvent arrives with EndStream=true, the
+//     wrapper emits BOTH a GRPCStartMessage envelope (sequence N) AND a
+//     synthetic GRPCEndMessage envelope (sequence N+1, Envelope.Raw=nil).
+//     For a trailers-only response (Headers carry "grpc-status") the End
+//     is parsed from the same headers; its Trailers list the frame's
+//     other entries, content-type included, because in this form the
+//     HEADERS frame is the trailer block. Without any grpc-status (e.g.
+//     a load balancer's bare 503) the End is a Status=0 placeholder
+//     stamped AnomalyGRPCMissingStatus.
+//   - The opposite-side Send defers that Start's HEADERS and writes it
+//     with the End as ONE HEADERS frame with END_STREAM: the observed
+//     header list, no fabricated content-type or grpc-status. An End
+//     status / message / details edit (detected against a snapshot of the
+//     emitted End kept on the Opaque) is written into the matching
+//     entries in place; a Start-side edit is relayed as edited; an End
+//     Trailers edit falls back to HEADERS + TRAILERS rebuilt from the End.
+//     A Data Send in between flushes the HEADERS first without
+//     END_STREAM. When the Start was Clone()d (no Opaque, not deferred),
+//     an untouched placeholder End is sent as an empty END_STREAM DATA
+//     frame instead of a fabricated grpc-status trailer.
 //
 // Synthetic firstHeaders (D5):
 //
@@ -95,12 +110,29 @@
 //     metadata are preserved.
 //   - GRPCEndMessage.Trailers excludes grpc-status, grpc-message, and
 //     grpc-status-details-bin. Order and case are preserved.
+//   - The stripped control entries' observed names, raw values and
+//     positions (anchored among the retained Metadata) are recorded on the
+//     Start envelope's Opaque together with a snapshot of the parsed
+//     fields (USK-1251, mirroring the gRPC-Web Layer's USK-1219 layout).
 //
 // Send direction:
 //
-//   - GRPCStartMessage / GRPCEndMessage envelopes always rebuild the
-//     HPACK header field list from struct fields; Envelope.Raw on
-//     headers is informational only.
+//   - GRPCStartMessage / GRPCEndMessage envelopes rebuild the HPACK
+//     header field list from struct fields; Envelope.Raw on headers is
+//     informational only.
+//   - A Start carrying this Layer's Opaque gets its observed control
+//     header layout back: verbatim while the structured field is
+//     unchanged (duplicates and unparseable values survive), value
+//     rewritten in place when edited, dropped when cleared, synthesized at
+//     the front only when never observed. No default content-type and no
+//     "te: trailers" is added on this path (the client's omission is not
+//     repaired). A Start without the Opaque (Envelope.Clone — intercept
+//     modify_and_forward — or synthetic producers: resend_grpc, fuzz_grpc,
+//     RESPOND_GRPC) keeps the synthesized layout: content-type (default
+//     application/grpc), grpc-encoding, grpc-accept-encoding,
+//     grpc-timeout, "te: trailers" on requests, then Metadata.
+//   - A Receive Start's :status is GRPCStartMessage.HTTPStatus, the
+//     upstream's observed status (USK-1251); 200 when it is zero.
 //   - GRPCDataMessage envelopes prefer Envelope.Raw verbatim when
 //     non-empty (5-byte LPM prefix + payload). Otherwise the wrapper
 //     re-encodes Payload using Compressed + the negotiated grpc-encoding

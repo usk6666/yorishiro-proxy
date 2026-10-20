@@ -110,10 +110,13 @@ type GRPCStartMessage struct {
 	// HTTPStatus is the HTTP status code of the response that carried
 	// this Start (the HTTP/1.x status line or the HTTP/2 :status
 	// pseudo-header). Populated on the response side (Direction=Receive)
-	// by the gRPC-Web Layer; zero on the request side and on native gRPC,
-	// whose HTTP/2 mapping fixes the response status at 200. A derived
-	// L7 overlay like Authority / Scheme / Path — the wire bytes stay in
-	// Envelope.Raw. USK-1219.
+	// by the gRPC-Web Layer (USK-1219) and the native gRPC Layer
+	// (USK-1251), and relayed by the opposite-side Send — a proxy or load
+	// balancer in front of a gRPC service can answer 503, and that must
+	// not reach the client as 200. Zero on the request side; a zero
+	// Receive Start (synthetic producers, unparseable status) is sent as
+	// 200. A derived L7 overlay like Authority / Scheme / Path — the wire
+	// bytes stay in Envelope.Raw.
 	HTTPStatus int
 
 	// HTTPStatusReason is the HTTP/1.x reason phrase observed alongside
@@ -123,11 +126,12 @@ type GRPCStartMessage struct {
 
 	// Metadata is the gRPC metadata list, order and casing preserved as
 	// observed on the wire. Pseudo-headers are NOT included here: the
-	// request-side ones (and the gRPC-Web response status) are projected
-	// onto the overlay fields above, and their wire bytes stay in
-	// Envelope.Raw. The four control headers parsed into Timeout /
-	// ContentType / Encoding / AcceptEncoding are stripped from it too
-	// (D7); the gRPC-Web Layer restores their observed layout on send.
+	// request-side ones (and the response status) are projected onto the
+	// overlay fields above, and their wire bytes stay in Envelope.Raw. The
+	// four control headers parsed into Timeout / ContentType / Encoding /
+	// AcceptEncoding are stripped from it too (D7); the gRPC-Web and native
+	// gRPC Layers restore their observed layout on send (USK-1219,
+	// USK-1251).
 	Metadata []KeyValue
 
 	// Timeout is the parsed grpc-timeout value. Zero when unset.
@@ -264,7 +268,10 @@ type GRPCEndMessage struct {
 	// (1) a synthetic End synthesized to mark a Receive-direction body
 	// that parsed but lacked a terminating trailer LPM, and (2) a real
 	// End attached to a Send-direction request body whose presence of a
-	// trailer LPM is itself anomalous. Variant-recording comparisons
+	// trailer LPM is itself anomalous. The native gRPC Layer stamps
+	// AnomalyGRPCMissingStatus on the placeholder End it synthesizes for a
+	// response HEADERS frame that carried END_STREAM without grpc-status
+	// (USK-1251). Variant-recording comparisons
 	// must NOT inspect this field — parser-derived state is wire-derived,
 	// not user-mutated.
 	Anomalies []Anomaly

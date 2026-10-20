@@ -266,32 +266,41 @@ type GRPCStartMessage struct {
     Path      string
     RawQuery  string
 
-    // USK-1219: response-side overlay populated by the gRPC-Web Layer —
-    // the upstream's HTTP status line / :status and HTTP/1.x reason
-    // phrase, so the opposite-side Send relays them (instead of 200 OK)
-    // and RecordStep records Flow.StatusCode. Zero on the request side
-    // and on native gRPC (whose HTTP/2 mapping fixes :status at 200).
-    // Carried across plugin rebuilds but not exposed as dict keys.
+    // USK-1219 / USK-1251: response-side overlay — the upstream's HTTP
+    // status line / :status (and, on gRPC-Web over HTTP/1.x, the reason
+    // phrase), populated by both the gRPC-Web and the native gRPC Layer,
+    // so the opposite-side Send relays it (instead of 200) and RecordStep
+    // records Flow.StatusCode. An Envoy / load-balancer 503 in front of a
+    // gRPC service therefore reaches the client as 503. Zero on the
+    // request side; a Start with zero (synthetic producers, unparseable
+    // status) is sent as 200. HTTPStatusReason is always empty on native
+    // gRPC (HTTP/2 has no reason phrase). Carried across plugin rebuilds
+    // but not exposed as dict keys.
     HTTPStatus       int
     HTTPStatusReason string
 
     // gRPC metadata — custom and reserved, order and casing as observed.
     // Pseudo-headers (:method, :path, :status, ...) are NOT included here;
-    // the request-side ones and the gRPC-Web response status are projected
-    // onto the overlay fields above, and their wire bytes stay in
-    // Envelope.Raw.
+    // the request-side ones and the response status are projected onto
+    // the overlay fields above, and their wire bytes stay in Envelope.Raw.
     Metadata []KeyValue
 
     // Parsed gRPC-specific control headers (D7). These four are stripped
     // from Metadata, so the structured fields are the single editable
-    // source. On gRPC-Web the Layer additionally records each observed
-    // entry's name, raw value and position on its per-RPC Opaque, and the
-    // opposite-side Send restores them: verbatim while the field is
-    // unchanged, value rewritten in place when it was edited, dropped when
-    // cleared, synthesized lowercase at the front only when never observed
-    // (USK-1219). An Envelope without that Opaque (Envelope.Clone, e.g.
-    // intercept modify_and_forward, or a synthetic producer) falls back to
-    // the synthesized layout.
+    // source. Both the gRPC-Web Layer (USK-1219) and the native gRPC Layer
+    // (USK-1251) additionally record each observed entry's name, raw value
+    // and position on their Opaque, and the opposite-side Send restores
+    // them: verbatim while the field is unchanged (duplicates and
+    // unparseable values such as "grpc-timeout: soon" survive), value
+    // rewritten in place when it was edited, dropped when cleared,
+    // synthesized lowercase at the front only when never observed. Nothing
+    // the wire did not carry is added on that path — no default
+    // content-type, and on native gRPC no "te: trailers" on a request
+    // whose client sent none. An Envelope without that Opaque
+    // (Envelope.Clone, e.g. intercept modify_and_forward, or a synthetic
+    // producer such as resend_grpc / fuzz_grpc / RESPOND_GRPC) falls back
+    // to the synthesized layout (content-type defaulted to
+    // application/grpc first, "te: trailers" on native gRPC requests).
     Timeout        time.Duration // grpc-timeout parsed (0 = unset)
     ContentType    string        // application/grpc[+proto|+json|...]
     Encoding       string        // grpc-encoding (identity, gzip, deflate, ...)
@@ -349,6 +358,8 @@ type GRPCEndMessage struct {
     Trailers []KeyValue
 }
 ```
+
+**Native gRPC responses that end on their HEADERS frame (USK-1251).** A Receive HEADERS frame carrying END_STREAM is both the Start and the End of the response side, so the native gRPC Layer emits a Start and a synthetic End (`Raw=nil`) for it. For a trailers-only response (grpc-status in the headers) the End is parsed from the frame, and its `Trailers` list the frame's other entries (content-type included — in this form the HEADERS frame *is* the trailer block). With no grpc-status at all (e.g. a load balancer's bare `HEADERS(:status 503, server: lb, END_STREAM)`) the End is a `Status=0` placeholder stamped `GRPCMissingStatus` (recorded as `grpc_anomaly_missing_status`). The opposite-side Send writes either back as the ONE `HEADERS ... END_STREAM` frame the wire carried — the Start's header list, nothing fabricated. An End edit is detected against the End as emitted (a snapshot on the Layer's Opaque, read from the Start's Envelope so an intercept `Clone()` of the End does not lose it): a status / message / details edit is written into the grpc-status / grpc-message / grpc-status-details-bin entries in place (cleared → dropped, never observed → appended), and a Start-side edit is relayed as edited. An End `Trailers` edit cannot be written in place, so that response falls back to HEADERS (no END_STREAM) + a TRAILERS frame rebuilt from the End. When the Start was `Clone()`d (its HEADERS went out without END_STREAM), an untouched placeholder End ends the stream with an empty DATA frame rather than a fabricated grpc-status trailer.
 
 **Envelope.Raw for gRPC envelopes** contains the wire bytes specific to that event:
 - `GRPCStartMessage`: the encoded HPACK block of the HEADERS frame (not the HTTP/2 frame wrapper).
