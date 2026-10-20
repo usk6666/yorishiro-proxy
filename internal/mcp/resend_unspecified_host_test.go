@@ -163,7 +163,7 @@ func TestScopeHelpers_UnspecifiedHostBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveResendHTTPDial: %v", err)
 	}
-	if err := s.checkResendHTTPScopeHostHeaders(msg, addr, "", nil); err == nil {
+	if err := s.checkResendHTTPScopeHostHeaders(msg, addr, "", nil, true); err == nil {
 		t.Errorf("checkResendHTTPScopeHostHeaders(authority ::, dial %q) = nil, want a target scope block", addr)
 	}
 }
