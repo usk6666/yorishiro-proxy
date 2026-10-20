@@ -318,6 +318,21 @@ type grpcChannel struct {
 	// native-gRPC path symmetrically with the USK-897 aggregator-path
 	// coverage. See WithH2DataFrameRecordCallback for the contract.
 	h2DataFrameRecordCallback func(*envelope.Envelope)
+
+	// pendingResp holds the response HEADERS sendStart deferred because
+	// the upstream's HEADERS frame carried END_STREAM (opaqueGRPC.
+	// endStreamEnd): sendEnd writes it back as ONE HEADERS frame with
+	// END_STREAM, folding in any End edit (USK-1251). A sendData in
+	// between flushes it first without END_STREAM. Guarded by sendMu.
+	pendingResp *pendingResponseHeaders
+}
+
+// pendingResponseHeaders is a deferred response HEADERS event (see
+// grpcChannel.pendingResp) plus the End the upstream-side Layer emitted
+// for the same frame, against which an End edit is detected.
+type pendingResponseHeaders struct {
+	env      *envelope.Envelope // inner envelope carrying the *http2.H2HeadersEvent
+	baseline *envelope.GRPCEndMessage
 }
 
 // StreamID returns the inner Channel's stream identifier (one RPC = one
@@ -546,9 +561,9 @@ func (c *grpcChannel) absorb(ev *envelope.Envelope) error {
 }
 
 // absorbHeaders consumes an H2HeadersEvent. It always emits a
-// GRPCStartMessage envelope. If the event is a trailers-only response
-// (Direction=Receive, EndStream=true, headers carry grpc-status), it
-// additionally synthesizes a GRPCEndMessage envelope per D4.
+// GRPCStartMessage envelope. If the event is a Receive HEADERS frame with
+// END_STREAM (a trailers-only response, or one without any grpc-status),
+// it additionally synthesizes a GRPCEndMessage envelope per D4.
 //
 // A second H2HeadersEvent on a direction that already saw Start yields
 // a protocol error per the issue spec.
@@ -565,6 +580,9 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 	}
 
 	startMsg, encoding := buildStartMessage(evt, ev.Direction)
+	// USK-1251: the observed control-header layout rides on the Start so
+	// the opposite-side Channel's sendStart can restore it.
+	opaque := &opaqueGRPC{layout: newHeaderLayout(evt.Headers, startMsg)}
 	dir.service = startMsg.Service
 	dir.method = startMsg.Method
 	dir.encoding = encoding
@@ -580,18 +598,38 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 		Raw:       cloneBytes(ev.Raw),
 		Message:   startMsg,
 		Context:   ev.Context,
+		Opaque:    opaque,
 	}
 	c.nextSeq++
 	c.queued = append(c.queued, pendingEnvelope{env: startEnv})
 
-	// D4: trailers-only response. Receive-side END_STREAM HEADERS that
-	// carry grpc-status are simultaneously the start AND the end of the
-	// RPC's response side. Synthesize a second GRPCEndMessage envelope
-	// from the same headers.
+	// D4: a Receive-side HEADERS frame with END_STREAM is simultaneously
+	// the start AND the end of the RPC's response side, so a second
+	// GRPCEndMessage envelope is synthesized from the same frame:
+	//
+	//   - trailers-only response (grpc-status present): the End is parsed
+	//     from the headers.
+	//   - no grpc-status at all (e.g. a load balancer's bare 503): the End
+	//     is a Status=0 placeholder stamped AnomalyGRPCMissingStatus
+	//     (USK-1251). Without it the client-side Send never learnt the
+	//     response had ended and the client never saw END_STREAM.
+	//
+	// Both share the Start's Opaque, whose endStreamEnd baseline makes the
+	// opposite-side Send write the response back as one END_STREAM
+	// HEADERS frame (sendEnd).
 	var firedEndEnv *envelope.Envelope
 	var firedEndMsg *envelope.GRPCEndMessage
-	if ev.Direction == envelope.Receive && evt.EndStream && hasGRPCStatus(evt.Headers) {
-		endMsg := buildEndMessage(evt.Headers)
+	if ev.Direction == envelope.Receive && evt.EndStream {
+		var endMsg *envelope.GRPCEndMessage
+		if hasGRPCStatus(evt.Headers) {
+			endMsg = buildEndMessage(evt.Headers)
+		} else {
+			endMsg = &envelope.GRPCEndMessage{Anomalies: []envelope.Anomaly{{
+				Type:   envelope.AnomalyGRPCMissingStatus,
+				Detail: "response HEADERS carried END_STREAM without grpc-status",
+			}}}
+		}
+		opaque.endStreamEnd = snapshotEnd(endMsg)
 		endEnv := &envelope.Envelope{
 			StreamID:  ev.StreamID,
 			FlowID:    uuid.New().String(),
@@ -603,6 +641,7 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 			Raw:     nil,
 			Message: endMsg,
 			Context: ev.Context,
+			Opaque:  opaque,
 		}
 		c.nextSeq++
 		c.queued = append(c.queued, pendingEnvelope{env: endEnv})
@@ -1103,10 +1142,11 @@ func (c *grpcChannel) dirStateLocked(d envelope.Direction) *directionState {
 // Channel. The inner Channel is responsible for HPACK encoding +
 // CONTINUATION splitting + flow control.
 //
-// GRPCStartMessage / GRPCEndMessage envelopes always rebuild the HPACK
-// header field list from struct fields; Envelope.Raw on these types is
-// informational only (the wire-observed HPACK block bytes change every
-// time HPACK dynamic tables differ).
+// GRPCStartMessage / GRPCEndMessage envelopes rebuild the HPACK header
+// field list from struct fields (restoring the observed control-header
+// layout when the Start carries this Layer's Opaque, USK-1251);
+// Envelope.Raw on these types is informational only (the wire-observed
+// HPACK block bytes change every time HPACK dynamic tables differ).
 //
 // GRPCDataMessage envelopes prefer Envelope.Raw verbatim when non-empty
 // (to round-trip exact wire bytes). Otherwise the wrapper re-encodes
@@ -1160,7 +1200,18 @@ func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *
 	if m == nil {
 		return errors.New("grpc: Send: nil GRPCStartMessage")
 	}
-	headers := buildStartHeaderKVs(env, m)
+	// USK-1251: a Start this Layer absorbed carries the observed control
+	// header layout on its Opaque; restore it. Without one (Envelope.Clone
+	// — intercept modify_and_forward — or a synthetic producer such as
+	// resend_grpc / fuzz_grpc / RESPOND_GRPC) the synthesized layout is
+	// kept exactly as before.
+	opaque := opaqueFromEnv(env)
+	var headers []envelope.KeyValue
+	if opaque != nil && opaque.layout != nil {
+		headers = rebuildStartHeaders(m, opaque.layout)
+	} else {
+		headers = buildStartHeaderKVs(env, m)
+	}
 
 	// Compute :path from the derived Service/Method view, falling back to
 	// the wire overlay when that view cannot represent the observed :path
@@ -1205,7 +1256,67 @@ func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *
 		Message:   hdrEvt,
 		Context:   env.Context,
 	}
+	if env.Direction == envelope.Receive && opaque != nil && opaque.endStreamEnd != nil {
+		// The upstream's HEADERS frame carried END_STREAM: hold it so
+		// sendEnd can write the response back as that one frame
+		// (USK-1251).
+		c.pendingResp = &pendingResponseHeaders{env: innerEnv, baseline: opaque.endStreamEnd}
+		return nil
+	}
 	return c.inner.Send(ctx, innerEnv)
+}
+
+// flushPendingResponseHeaders sends a deferred response HEADERS frame
+// without END_STREAM. Used when something other than the End follows the
+// deferred Start (e.g. a plugin injected a Data envelope), so the frame
+// order on the wire stays HEADERS, DATA, ... Caller holds c.sendMu.
+func (c *grpcChannel) flushPendingResponseHeaders(ctx context.Context) error {
+	p := c.pendingResp
+	if p == nil {
+		return nil
+	}
+	c.pendingResp = nil
+	return c.inner.Send(ctx, p.env)
+}
+
+// sendEndStreamResponse writes the End of a response whose upstream
+// HEADERS frame carried END_STREAM (pending holds the deferred HEADERS).
+//
+//   - Default: ONE HEADERS frame with END_STREAM carrying the Start's
+//     header list, with any End status edit (detected against the End as
+//     the upstream-side Layer emitted it) written into the grpc-status /
+//     grpc-message / grpc-status-details-bin entries in place. An
+//     untouched response is relayed with its observed header list.
+//   - The End's trailer metadata was edited: that cannot be written in
+//     place, so the response falls back to HEADERS (no END_STREAM) plus a
+//     TRAILERS frame rebuilt from the End — the pre-USK-1251 shape, in
+//     which the edit reaches the wire.
+//
+// Caller holds c.sendMu; the direction's endSent latch is set before the
+// inner Send.
+func (c *grpcChannel) sendEndStreamResponse(ctx context.Context, env *envelope.Envelope, m *envelope.GRPCEndMessage, pending *pendingResponseHeaders) error {
+	c.mu.Lock()
+	c.recv.endSent = true
+	c.mu.Unlock()
+
+	hdr := pending.env.Message.(*http2.H2HeadersEvent)
+	if endTrailersEdited(m, pending.baseline) {
+		if err := c.inner.Send(ctx, pending.env); err != nil {
+			return err
+		}
+		return c.inner.Send(ctx, &envelope.Envelope{
+			StreamID:  env.StreamID,
+			FlowID:    env.FlowID,
+			Sequence:  env.Sequence,
+			Direction: env.Direction,
+			Protocol:  envelope.ProtocolHTTP,
+			Message:   &http2.H2TrailersEvent{Trailers: buildEndTrailerKVs(m)},
+			Context:   env.Context,
+		})
+	}
+	hdr.Headers = withEndStatusInHeaders(hdr.Headers, m, pending.baseline)
+	hdr.EndStream = true
+	return c.inner.Send(ctx, pending.env)
 }
 
 // sendData converts a GRPCDataMessage envelope into an H2DataEvent
@@ -1217,6 +1328,11 @@ func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *
 // !Compressed, EndStream=true — emit an empty H2 DATA payload, matching
 // the canonical gRPC-Go CloseSend wire shape DATA(empty, END_STREAM=1).
 func (c *grpcChannel) sendData(ctx context.Context, env *envelope.Envelope, m *envelope.GRPCDataMessage) error {
+	if env.Direction == envelope.Receive {
+		if err := c.flushPendingResponseHeaders(ctx); err != nil {
+			return err
+		}
+	}
 	var wire []byte
 	switch {
 	case len(env.Raw) > 0:
@@ -1289,9 +1405,45 @@ func (c *grpcChannel) sendData(ctx context.Context, env *envelope.Envelope, m *e
 // frame without :status, which RFC 9113 §8.3.2 makes malformed (USK-1202).
 // The content-type mirrors the request's when one was observed.
 //
+// Two relayed shapes take precedence (USK-1251): when sendStart deferred
+// the response HEADERS because the upstream's frame carried END_STREAM,
+// sendEndStreamResponse writes it back as that one frame; and the
+// AnomalyGRPCMissingStatus placeholder End after an already-sent HEADERS
+// ends the stream with an empty DATA frame, fabricating no grpc-status.
+//
 // Caller (Send) holds c.sendMu. The direction's endSent latch is set before
 // the inner Send so a failed write is not retried with more frames.
 func (c *grpcChannel) sendEnd(ctx context.Context, env *envelope.Envelope, m *envelope.GRPCEndMessage) error {
+	if env.Direction == envelope.Receive {
+		if p := c.pendingResp; p != nil {
+			c.pendingResp = nil
+			return c.sendEndStreamResponse(ctx, env, m, p)
+		}
+		if isMissingStatusPlaceholder(m) {
+			c.mu.Lock()
+			started := c.recv.startEmitted
+			if started {
+				c.recv.endSent = true
+			}
+			c.mu.Unlock()
+			if started {
+				// The response HEADERS already went out (its Start was
+				// Clone()d, so it was not deferred) and the upstream sent
+				// no grpc-status at all: end the stream with an empty
+				// DATA frame rather than fabricate a grpc-status trailer
+				// (USK-1251).
+				return c.inner.Send(ctx, &envelope.Envelope{
+					StreamID:  env.StreamID,
+					FlowID:    env.FlowID,
+					Sequence:  env.Sequence,
+					Direction: env.Direction,
+					Protocol:  envelope.ProtocolHTTP,
+					Message:   &http2.H2DataEvent{EndStream: true},
+					Context:   env.Context,
+				})
+			}
+		}
+	}
 	statusKVs := buildEndTrailerKVs(m)
 
 	c.mu.Lock()
@@ -1379,6 +1531,13 @@ func buildStartMessage(evt *http2.H2HeadersEvent, dir envelope.Direction) (*enve
 	// Flow.URL the same way it does for HTTPMessage. Response-side
 	// HEADERS frames only carry :status (no authority/scheme/path), so we
 	// leave the fields zero in that case.
+	if dir == envelope.Receive {
+		// USK-1251: the response :status, relayed by the opposite-side
+		// sendStart (statusFor) and recorded as Flow.StatusCode. 0 when
+		// the HTTP/2 Layer could not parse it. HTTPStatusReason stays
+		// empty: HTTP/2 has no reason phrase on the wire.
+		msg.HTTPStatus = evt.Status
+	}
 	if dir == envelope.Send {
 		msg.Authority = evt.Authority
 		msg.Scheme = evt.Scheme
@@ -1642,10 +1801,15 @@ func splitCommaTrim(s string) []string {
 }
 
 // buildStartHeaderKVs constructs the wire header list for a Send-side
-// GRPCStartMessage. Conventional ordering: content-type, grpc-encoding,
-// grpc-accept-encoding, grpc-timeout, then user metadata in original
-// order. Pseudo-headers are emitted by BuildHeaderFieldsFromEvent on the
-// inner H2 channel (they are NOT included in evt.Headers).
+// GRPCStartMessage that carries no observed layout (no opaqueGRPC: a
+// synthetic producer, or an Envelope.Clone). Conventional ordering:
+// content-type (defaulting to application/grpc), grpc-encoding,
+// grpc-accept-encoding, grpc-timeout, te: trailers on requests, then user
+// metadata in original order. A Start this Layer absorbed goes through
+// rebuildStartHeaders instead, which restores the observed layout and
+// synthesizes none of these defaults (USK-1251). Pseudo-headers are
+// emitted by BuildHeaderFieldsFromEvent on the inner H2 channel (they are
+// NOT included in evt.Headers).
 func buildStartHeaderKVs(env *envelope.Envelope, m *envelope.GRPCStartMessage) []envelope.KeyValue {
 	const reserveExtra = 4
 	out := make([]envelope.KeyValue, 0, len(m.Metadata)+reserveExtra)
@@ -1813,17 +1977,23 @@ func pathForStart(m *envelope.GRPCStartMessage) string {
 	return buildGRPCPath(m.Service, m.Method)
 }
 
-// statusFor returns a literal 200 for a Receive-side Start envelope, else
-// 0; the message argument is ignored. gRPC's HTTP/2 mapping fixes the
-// response :status at 200 — RPC failures travel in the grpc-status
-// trailer, not the HTTP status — so GRPCStartMessage carries no status
-// field to read. The HTTP/2 Layer's encoder uses Status to choose between
+// statusFor returns the :status for a Receive-side Start envelope, else 0.
+// The upstream's observed status (GRPCStartMessage.HTTPStatus, projected
+// by buildStartMessage) is relayed as is — an Envoy / load balancer 503 in
+// front of a gRPC service must reach the client as 503, not 200
+// (USK-1251). A Start without one (synthetic producers, a nil message such
+// as sendEnd's proxy-synthesized Trailers-Only, or a live :status the
+// HTTP/2 Layer could not parse) gets 200, the status gRPC's HTTP/2 mapping
+// prescribes. The HTTP/2 Layer's encoder uses Status to choose between
 // request and response pseudo-headers when env.Direction is not available.
-func statusFor(env *envelope.Envelope, _ *envelope.GRPCStartMessage) int {
-	if env != nil && env.Direction == envelope.Receive {
-		return 200
+func statusFor(env *envelope.Envelope, m *envelope.GRPCStartMessage) int {
+	if env == nil || env.Direction != envelope.Receive {
+		return 0
 	}
-	return 0
+	if m != nil && m.HTTPStatus > 0 {
+		return m.HTTPStatus
+	}
+	return 200
 }
 
 // gunzip decompresses a gzip-encoded LPM payload. The decompressed length
