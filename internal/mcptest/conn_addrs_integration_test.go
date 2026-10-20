@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,15 +37,24 @@ func newConnAddrsH1TLSUpstream(t *testing.T) *httptest.Server {
 	return s
 }
 
-func newConnAddrsH2TLSUpstream(t *testing.T) *httptest.Server {
+// newConnAddrsH2TLSUpstream starts an h2 TLS upstream and returns a
+// counter of the TCP connections it has accepted, so a test can tell a
+// pooled upstream connection from a fresh dial (both share RemoteAddr).
+func newConnAddrsH2TLSUpstream(t *testing.T) (*httptest.Server, *atomic.Int64) {
 	t.Helper()
+	var accepted atomic.Int64
 	s := httptest.NewUnstartedServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, _ *gohttp.Request) {
 		_, _ = io.WriteString(w, "ok-h2")
 	}))
+	s.Config.ConnState = func(_ net.Conn, st gohttp.ConnState) {
+		if st == gohttp.StateNew {
+			accepted.Add(1)
+		}
+	}
 	s.EnableHTTP2 = true
 	s.StartTLS()
 	t.Cleanup(s.Close)
-	return s
+	return s, &accepted
 }
 
 func newConnAddrsPlainUpstream(t *testing.T) *httptest.Server {
@@ -81,7 +91,7 @@ func TestE2E_ConnAddrs_EntryPaths_Full(t *testing.T) {
 	proxyB := startNamedListener(t, h, "worker-b", nil)
 
 	h1Up := newConnAddrsH1TLSUpstream(t)
-	h2Up := newConnAddrsH2TLSUpstream(t)
+	h2Up, h2Accepted := newConnAddrsH2TLSUpstream(t)
 	plainUp := newConnAddrsPlainUpstream(t)
 
 	var plainStreamID string
@@ -102,8 +112,10 @@ func TestE2E_ConnAddrs_EntryPaths_Full(t *testing.T) {
 	})
 
 	// Two sequential CONNECT h2 clients to the same upstream: the second
-	// may ride a pooled upstream connection, yet each stream must carry
-	// its own client_addr and the (pooled) upstream socket's peer.
+	// rides the pooled upstream connection (asserted via the upstream's
+	// accepted-connection count, since a pooled socket and a fresh dial
+	// share RemoteAddr), yet each stream must carry its own client_addr
+	// and the pooled upstream socket's peer.
 	t.Run("connect_h2_pool", func(t *testing.T) {
 		for i := 0; i < 2; i++ {
 			path := "/ca-connect-h2-" + strconv.Itoa(i)
@@ -111,6 +123,9 @@ func TestE2E_ConnAddrs_EntryPaths_Full(t *testing.T) {
 			connAddrsGet(t, client, h2Up.URL+path)
 			d := waitConnAddrsStream(t, h, nil, urlPathMatch(path))
 			assertConnAddrs(t, d, locals.only(t), h2Up.Listener.Addr().String(), "worker-a")
+		}
+		if n := h2Accepted.Load(); n != 1 {
+			t.Errorf("h2 upstream accepted %d connections, want 1 (second CONNECT must hit the h2 pool)", n)
 		}
 	})
 

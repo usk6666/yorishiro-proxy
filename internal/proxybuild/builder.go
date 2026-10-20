@@ -2443,13 +2443,12 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 	// "" and rely on the parent listener name the forward handler stamped
 	// on ctx (connector.ContextWithListenerName — config, not wire).
 	configuredName := listenerName
-	if listenerName == "" {
-		listenerName = DefaultListenerName
-	}
 	return func(ctx context.Context, env *envelope.Envelope, blockedBy string) {
 		if env == nil || blockedBy == "" {
 			return
 		}
+		// Resolve once so the stored row and the error log agree.
+		streamListenerName := dropStreamListenerName(ctx, configuredName)
 
 		streamID := env.StreamID
 		if streamID == "" {
@@ -2474,7 +2473,7 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 			State:        "error",
 			BlockedBy:    blockedBy,
 			Timestamp:    time.Now(),
-			ListenerName: dropStreamListenerName(ctx, configuredName),
+			ListenerName: streamListenerName,
 		}
 		// Project HTTP-typed identity fields when available. Following the
 		// "do not unify across protocols" principle (CLAUDE.md), the Stream
@@ -2521,7 +2520,7 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		}); uerr != nil {
 			if logger != nil {
 				logger.Error("proxybuild: pipeline-drop stream save failed",
-					"listener", listenerName,
+					"listener", streamListenerName,
 					"stream_id", streamID,
 					"blocked_by", blockedBy,
 					"protocol", string(env.Protocol),

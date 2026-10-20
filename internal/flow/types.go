@@ -100,9 +100,11 @@ type Stream struct {
 	Origin Origin
 	// ListenerName is the operator-configured name of the proxy listener
 	// that accepted the connection this Stream was recorded on (the
-	// proxy_start "name", or "default"). It comes from configuration, never
-	// from the wire, so per-Worker listeners make it an unforgeable worker
-	// identity. tcp_forwards inherit their parent listener's name. Empty
+	// proxy_start "name", or "default"). On live Streams it comes from
+	// configuration, never from the wire, so traffic cannot alter it.
+	// JSONL import preserves whatever the imported file contains, so the
+	// value is only as trustworthy as its source on imported rows.
+	// tcp_forwards inherit their parent listener's name. Empty
 	// for Streams that did not arrive through a listener (resend / fuzz /
 	// budget audit) and for rows recorded before schemaV19.
 	ListenerName string

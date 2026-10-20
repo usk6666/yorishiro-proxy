@@ -503,8 +503,9 @@ ALTER TABLE streams ADD COLUMN tls_client_ja4 TEXT NOT NULL DEFAULT '';
 // schemaV19 adds live-stream connection provenance (USK-1116):
 //   - streams.listener_name: the operator-configured name of the listener
 //     that accepted the connection (proxy_start "name" / "default").
-//     Config-sourced, never wire-sourced, so per-Worker listeners make it
-//     an unforgeable worker identity. Indexed for the query tool's
+//     Config-sourced on live streams, never wire-sourced, so traffic
+//     cannot alter it; JSONL import preserves whatever the file contains.
+//     Indexed for the query tool's
 //     filter.listener_name.
 //   - streams.upstream_proxy: the upstream proxy the upstream socket was
 //     dialed through ("scheme://host:port", userinfo stripped); empty for
