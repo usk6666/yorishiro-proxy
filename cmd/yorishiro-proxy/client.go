@@ -135,25 +135,63 @@ Examples:
 
 Full reference (no server required): yorishiro-proxy docs configure`,
 
-	"intercept": `intercept: Act on intercepted requests in the intercept queue.
+	"intercept": `intercept: Act on an item held in the intercept queue (list held items and
+their ids with: query resource=intercept_queue).
 
-Parameters (key=value):
+Parameters (key=value or --key=value):
   action=<action>                   Action to take (required)
-    release                         Forward the request/response unmodified
-    modify_and_forward              Modify and forward
-    drop                            Drop the request/response
-  params.intercept_id=<id>          Intercept item ID (required)
-  params.override_method=<method>   HTTP method override (request phase)
-  params.override_url=<url>         URL override (request phase)
-  params.override_body=<body>       Body override (request phase)
-  params.override_status=<code>     Status code override (response phase)
-  params.override_response_body=<b> Response body override (response phase)
-  params.mode=structured|raw        Forwarding mode (default: structured)
+    release                         Forward the held item unmodified
+    modify_and_forward              Apply a typed payload (below) and forward
+    drop                            Drop the item (an HTTP client gets 403)
+  params.intercept_id=<id>          Held item id (required for every action)
+  params.mode=structured|raw        raw: forward params.raw_override_base64 (raw TCP holds only)
+  params.raw_override_base64=<b64>  Replacement bytes for params.mode=raw
+
+  Modifications go in the typed payload matching the held item, not in params:
+  http (HTTP request or response), ws, grpc_start, grpc_data, sse, raw.
+  Omitted fields keep the held value.
+
+  http.method=<method>              Request method
+  http.scheme=<scheme>              Request scheme
+  http.authority=<host[:port]>      Request authority
+  http.path=<path>                  Request path
+  http.raw_query=<query>            Raw query without the leading '?'
+  http.status=<code>                Response status code
+  http.status_reason=<text>         Response reason phrase (HTTP/1.x)
+  http.headers=<json>               Ordered [{name, value}] JSON array. A FULL replacement of the held
+                                    headers (copy them from intercept_queue and edit), not a merge
+  http.trailers=<json>              Ordered [{name, value}] trailers; full replacement
+  http.body=<text|base64>           Body replacement, per http.body_encoding
+  http.body_encoding=<enc>          text|base64; default text
+  http.body_patches=<json>          JSON array of {json_path, value} or {regex, replace}, applied after body
+  ws.opcode=<name>                  text|binary|close|ping|pong|continuation (a number: ws.opcode:=1)
+  ws.fin=<bool>                     FIN bit
+  ws.payload=<text|base64>          Frame payload, per ws.body_encoding
+  ws.body_encoding=<enc>            text|base64; default text
+  ws.close_code=<n>                 Close frames: status code
+  ws.close_reason=<text>            Close frames: reason
+  grpc_start.service=<name>         gRPC service (:path is rebuilt from service/method)
+  grpc_start.method=<name>          gRPC method
+  grpc_start.encoding=<enc>         grpc-encoding
+  grpc_start.metadata=<json>        Ordered [{name, value}] metadata; full replacement
+  grpc_data.payload=<text|base64>   Decompressed message, per grpc_data.payload_encoding
+  grpc_data.payload_encoding=<enc>  text|base64; default text
+  grpc_data.compressed=<bool>       Compressed flag in the length prefix
+  grpc_data.end_stream=<bool>       END_STREAM on the carrying DATA frame
+  sse.event=<name>                  SSE event: line
+  sse.id=<id>                       SSE id: line
+  sse.data=<text>                   SSE data (\n splits it into several data: lines)
+  sse.retry_ms=<n>                  SSE retry: line; 0 removes it
+  raw.bytes_override=<text|base64>  Raw TCP replacement bytes, per raw.bytes_encoding
+  raw.bytes_encoding=<enc>          text|base64; default text
+  raw.patches=<json>                Byte patches ({offset, data_base64} or find/replace); not with bytes_override
 
 Examples:
+  yorishiro-proxy client query resource=intercept_queue
   yorishiro-proxy client intercept action=release params.intercept_id=abc123
   yorishiro-proxy client intercept action=drop params.intercept_id=abc123
-  yorishiro-proxy client intercept action=modify_and_forward params.intercept_id=abc123 params.override_body='{"new":"data"}'
+  yorishiro-proxy client intercept action=modify_and_forward params.intercept_id=abc123 http.method=POST http.path=/api/admin http.body='{"role":"admin"}'
+  yorishiro-proxy client intercept action=modify_and_forward params.intercept_id=abc123 http.headers='[{"name":"Host","value":"example.com"},{"name":"Authorization","value":"Bearer injected"}]'
 
 Full reference (no server required): yorishiro-proxy docs intercept`,
 

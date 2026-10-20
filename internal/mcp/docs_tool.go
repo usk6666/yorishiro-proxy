@@ -74,11 +74,8 @@ type docsRegistry struct {
 var docsRegistryOnce = sync.OnceValue(buildDocsRegistry)
 
 // buildDocsRegistry derives the docs topic namespace from helpResources.
-//
-// Help resources only. The 17 schema_* resources are hand-written copies of
-// JSON Schemas that tools/list already delivers in full as each tool's
-// InputSchema, so surfacing them here would add index tokens and force a
-// namespace disambiguator for exactly zero new information.
+// Tool input schemas are not docs topics: tools/list already delivers each
+// tool's InputSchema in full.
 func buildDocsRegistry() *docsRegistry {
 	reg := &docsRegistry{
 		order:  make([]string, 0, len(helpResources)),

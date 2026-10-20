@@ -58,8 +58,7 @@ type securityParams struct {
 // and it narrows a rule in BOTH directions — a deny scoped to "https" does
 // not block the plaintext dial to the same host. An agent that reads it as
 // "the L7 protocol" writes rules that silently never match. The other three
-// fields are self-describing and are documented in help_security.md /
-// schema_security.json.
+// fields are self-describing and are documented in help_security.md.
 type targetRuleInput struct {
 	Hostname   string   `json:"hostname"`
 	Ports      []int    `json:"ports,omitempty"`

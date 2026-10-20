@@ -512,11 +512,7 @@ func helpExampleCoverage(help map[string]string) []string {
 // example matches the entry any more, the exclusion is reported as stale.
 var knownBrokenHelpExamples = []struct {
 	tool, substr, issue string
-}{
-	// intercept has no params.override_body; the modify_and_forward
-	// parameter surface is being reworked in USK-1153.
-	{"intercept", "params.override_body=", "USK-1153"},
-}
+}{}
 
 // knownBrokenHelpExample returns the knownBrokenHelpExamples index that
 // matches the example, or -1.
