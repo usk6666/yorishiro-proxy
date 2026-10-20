@@ -29,9 +29,19 @@ import (
 // form without per-stream lookup tables. Pipeline Steps must not type-
 // assert on Opaque (RFC §3.1) — only the same-package WireEncoder may
 // inspect it.
+//
+// layout records the observed casing / position / raw value of the D7
+// control headers so the opposite-side Send can restore them
+// (rebuildStartHeaders, USK-1219). Only the Start send path reads it.
 type opaqueGRPCWeb struct {
 	wireBase64 bool
 	encoding   string
+	layout     *headerLayout
+	// trailersOnlyEnd snapshots the Status / Message / StatusDetails of
+	// the End emitted for a trailers-only response (grpc-status in the
+	// HTTP headers, empty body); nil otherwise. withEndStatusInHeaders
+	// compares the End being sent against it (USK-1219 review F-R1-1).
+	trailersOnlyEnd *envelope.GRPCEndMessage
 }
 
 // channel is the layer.Channel returned by Wrap. It maintains a small
@@ -330,12 +340,6 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	acceptEnc := splitCSV(headerGet(msg.Headers, "grpc-accept-encoding"))
 	timeout := parseGRPCTimeout(headerGet(msg.Headers, "grpc-timeout"))
 
-	// opaque carries the wire-format signal (binary vs base64) and the
-	// negotiated grpc-encoding so the package-level WireEncoder can re-render
-	// modified envelopes back to wire form. Pipeline Steps must not type-
-	// assert on Opaque (RFC §3.1) — only the same-package WireEncoder does.
-	opaque := &opaqueGRPCWeb{wireBase64: isBase64, encoding: encoding}
-
 	// Service/Method derivation. On the request side (Direction=Send for
 	// RoleServer Next, Direction=Send for assembled outbound) the path is
 	// authoritative. On the response side (Direction=Receive) the path is
@@ -371,6 +375,20 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	}
 	applyRequestOverlay(start, msg, dir)
 	carryTruncatedBody(start, msg)
+	// Before DecodeBody: the malformed-body passthrough Start
+	// (emitAnomalyStart) must carry the status too.
+	applyResponseOverlay(start, msg, dir)
+
+	// opaque carries the wire-format signal (binary vs base64) and the
+	// negotiated grpc-encoding so the package-level WireEncoder can re-render
+	// modified envelopes back to wire form, plus the observed control-header
+	// layout for the opposite-side Send. Pipeline Steps must not type-assert
+	// on Opaque (RFC §3.1) — only same-package code does.
+	opaque := &opaqueGRPCWeb{
+		wireBase64: isBase64,
+		encoding:   encoding,
+		layout:     newHeaderLayout(msg.Headers, start),
+	}
 
 	// Decode body LPMs. Returns ParseResult with DataFrames + optional
 	// TrailerFrame. Empty body → empty result, no error. The cap is the
@@ -490,6 +508,8 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		// the lifecycle hook represents an RPC's terminal status (grpc-status),
 		// which has no analog on the request half. Leaving firedEndEnv nil
 		// preserves observe-only semantics for response terminations.
+	} else {
+		firedEndEnv, firedEndMsg = c.queueEmptyBodyResponseEndLocked(env, msg, opaque)
 	}
 	c.mu.Unlock()
 
@@ -503,8 +523,212 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	return nil
 }
 
+// queueEmptyBodyResponseEndLocked handles a Receive HTTPMessage with an
+// empty body (no data frame, no trailer frame): either a gRPC-Web
+// trailers-only response (grpc-status in the HTTP headers) or a bare HTTP
+// error such as 503 + Content-Length: 0. Without an End the client-side
+// Send never flushed and the client received nothing at all. The End is
+// derived from the HTTP headers; shouldEmbedTrailer keeps it from becoming
+// a trailer frame the wire never carried. See endFromResponseHeaders.
+// Returns the queued End (for on_end), or nils when none was queued.
+//
+// A 1xx informational (100 Continue, 103 Early Hints; both inner HTTP
+// Layers deliver each as its own bodyless HTTPMessage before the final
+// response) emits only its Start (USK-1219 review F-1): it is not the
+// RPC's outcome, so it gets no End and fires no on_end — sync.Once would
+// otherwise latch the 1xx and swallow the real status. The final
+// response's Start supersedes it on the opposite-side Send
+// (sendStartLocked replaces the buffered Start).
+//
+// Caller holds c.mu.
+func (c *channel) queueEmptyBodyResponseEndLocked(env *envelope.Envelope, msg *envelope.HTTPMessage, opaque *opaqueGRPCWeb) (*envelope.Envelope, *envelope.GRPCEndMessage) {
+	if isInformationalStatus(msg.Status, msg.HTTPVersion) {
+		return nil, nil
+	}
+	end := endFromResponseHeaders(msg.Headers)
+	if headerHas(msg.Headers, "grpc-status") {
+		// Trailers-only: remember the End as emitted so the opposite-side
+		// Send can tell an End edit from an untouched End (USK-1219 review
+		// F-R1-1 / F-R1-2). The opaque is shared with the Start.
+		opaque.trailersOnlyEnd = &envelope.GRPCEndMessage{
+			Status:        end.Status,
+			Message:       end.Message,
+			StatusDetails: bytes.Clone(end.StatusDetails),
+		}
+	}
+	endEnv := c.buildEnvelope(env, envelope.Receive, end, nil, opaque)
+	c.emitQueue = append(c.emitQueue, endEnv)
+	return endEnv, end
+}
+
+// endFromResponseHeaders builds the End for an empty-body response
+// (USK-1219 N1).
+//
+// Trailers-only form (the gRPC-Web protocol allows the trailers to be sent
+// with the response headers and no body): grpc-status / grpc-message /
+// grpc-status-details-bin are read from the HTTP headers, so the recorded
+// End and the (grpc-web, on_end) hook report the RPC's actual status. The
+// headers themselves stay in the Start's Metadata, which is how they reach
+// the client.
+//
+// No grpc-status header (e.g. 503 with an empty body): there is no RPC
+// status anywhere on the wire, so the End is the Status=0 placeholder
+// stamped AnomalyMissingGRPCWebTrailer, the same shape the
+// data-without-trailer path uses — a clean grpc-status 0 would be an
+// outcome the peer never sent.
+func endFromResponseHeaders(headers []envelope.KeyValue) *envelope.GRPCEndMessage {
+	if !headerHas(headers, "grpc-status") {
+		return &envelope.GRPCEndMessage{
+			Anomalies: []envelope.Anomaly{{
+				Type:   envelope.AnomalyMissingGRPCWebTrailer,
+				Detail: "gRPC-Web response had an empty body and no grpc-status header",
+			}},
+		}
+	}
+	end := &envelope.GRPCEndMessage{Message: headerGet(headers, "grpc-message")}
+	if n, err := strconv.ParseUint(strings.TrimSpace(headerGet(headers, "grpc-status")), 10, 32); err == nil {
+		end.Status = uint32(n)
+	}
+	if d := headerGet(headers, "grpc-status-details-bin"); d != "" {
+		end.StatusDetails = []byte(d)
+	}
+	return end
+}
+
+// isInformationalStatus reports whether status is a 1xx interim response
+// (100 Continue, 103 Early Hints, ...) that precedes the final response on
+// the same exchange (USK-1219 review F-1), classified the way the inner
+// HTTP Layer that produced it does (review S-R1-1):
+//
+//   - HTTP/1.x (http1 Layer): 101 Switching Protocols ends the HTTP
+//     exchange (the Layer swaps to the upgraded protocol), so it is final.
+//   - HTTP/2 (http2 assembler, httpaggregator): every 1xx, 101 included, is
+//     delivered as an interim message before the real response. 101 is
+//     forbidden in HTTP/2 (RFC 9113 §8.6) but a hostile upstream can send
+//     it; treating it as final would emit two Ends and latch on_end on the
+//     101's placeholder status.
+//
+// An unknown version (synthetic producer) keeps 101 final.
+func isInformationalStatus(status int, httpVersion string) bool {
+	if status < 100 || status >= 200 {
+		return false
+	}
+	if status != 101 {
+		return true
+	}
+	return httpVersion == envelope.HTTPVersionH2 || httpVersion == envelope.HTTPVersionH2C
+}
+
+// trailersOnlyBaseline returns the End a trailers-only response emitted
+// (opaqueGRPCWeb.trailersOnlyEnd), read from the End's Envelope or, when
+// that was Clone()d (intercept modify_and_forward drops Opaque), from the
+// Start's. nil when neither carries one: the response was not
+// trailers-only, or both Envelopes are synthetic / cloned.
+func trailersOnlyBaseline(endEnv, startEnv *envelope.Envelope) *envelope.GRPCEndMessage {
+	for _, e := range []*envelope.Envelope{endEnv, startEnv} {
+		if e == nil {
+			continue
+		}
+		if o, ok := e.Opaque.(*opaqueGRPCWeb); ok && o.trailersOnlyEnd != nil {
+			return o.trailersOnlyEnd
+		}
+	}
+	return nil
+}
+
+// trailersOnlyResponse reports whether the response being sent is the
+// trailers-only form, whose status travels in the HTTP headers, and returns
+// its End baseline (trailersOnlyBaseline).
+//
+// When either Envelope still carries this Layer's Opaque, the decision
+// comes from what was observed: trailers-only exactly when a baseline was
+// recorded (USK-1219 review F-R2-1). A response whose End came from a
+// trailer frame has no baseline even when its headers also carry
+// grpc-status, so an End whose Raw was cleared by an edit (Transform
+// TransformEnd, plugin) falls through to the normal Receive trailer
+// re-encode instead of being dropped.
+//
+// Only when neither Envelope carries the Opaque (synthetic producer, or
+// both Clone()d) is the Start's grpc-status header used as the signal, as
+// before; such a response is relayed without projection (nil baseline).
+func trailersOnlyResponse(endEnv, startEnv *envelope.Envelope, start *envelope.GRPCStartMessage) (*envelope.GRPCEndMessage, bool) {
+	if b := trailersOnlyBaseline(endEnv, startEnv); b != nil {
+		return b, true
+	}
+	for _, e := range []*envelope.Envelope{endEnv, startEnv} {
+		if e == nil {
+			continue
+		}
+		if _, ok := e.Opaque.(*opaqueGRPCWeb); ok {
+			return nil, false
+		}
+	}
+	return nil, headerHas(start.Metadata, "grpc-status")
+}
+
+// withEndStatusInHeaders projects an End edit onto the HTTP headers of a
+// trailers-only response (USK-1219 review F-3). Its End is derived from the
+// grpc-status / grpc-message / grpc-status-details-bin headers
+// (endFromResponseHeaders) and no trailer frame is written for it, so an
+// End edit (Transform set_status / set_status_message, intercept, plugin)
+// must land in those headers or it is silently a no-op on the wire.
+//
+// An edit is detected by comparing m with baseline — the End as the Layer
+// emitted it — never with the headers being sent (review F-R1-1 / F-R1-2):
+// a Start-side edit of grpc-status must reach the wire as edited, and an
+// End that simply disagrees with the headers is not an edit. Only fields
+// that changed are rewritten: every entry of that name in place (casing and
+// position kept), a cleared grpc-message / grpc-status-details-bin drops
+// its entries, and a value the wire never carried is appended lowercase.
+//
+// headers is the final outbound list (control headers already restored by
+// rebuildStartHeaders), so a dropped entry cannot shift a control header's
+// anchor (review F-R1-3). A nil baseline (both the Start and End Envelopes
+// synthetic or Clone()d) means no projection: without the emitted End there
+// is no way to tell an edit from wire reality, and relaying the headers
+// untouched is the wire-faithful default (package doc).
+func withEndStatusInHeaders(headers []envelope.KeyValue, m, baseline *envelope.GRPCEndMessage) []envelope.KeyValue {
+	if baseline == nil {
+		return headers
+	}
+	if m.Status != baseline.Status {
+		headers = setHeaderValues(headers, "grpc-status", strconv.FormatUint(uint64(m.Status), 10))
+	}
+	if m.Message != baseline.Message {
+		headers = setHeaderValues(headers, "grpc-message", m.Message)
+	}
+	if !bytes.Equal(m.StatusDetails, baseline.StatusDetails) {
+		headers = setHeaderValues(headers, "grpc-status-details-bin", string(m.StatusDetails))
+	}
+	return headers
+}
+
+// setHeaderValues returns a copy of kvs with every entry named name
+// (case-insensitive) set to value in place, or dropped when value is empty.
+// When no entry exists and value is non-empty, a lowercase entry is
+// appended. kvs is not modified.
+func setHeaderValues(kvs []envelope.KeyValue, name, value string) []envelope.KeyValue {
+	out := make([]envelope.KeyValue, 0, len(kvs)+1)
+	found := false
+	for _, kv := range kvs {
+		if strings.EqualFold(kv.Name, name) {
+			found = true
+			if value == "" {
+				continue
+			}
+			kv.Value = value
+		}
+		out = append(out, kv)
+	}
+	if !found && value != "" {
+		out = append(out, envelope.KeyValue{Name: name, Value: value})
+	}
+	return out
+}
+
 // applyRequestOverlay projects the request-side pseudo-headers
-// (:authority / :scheme / :path) from the inbound HTTPMessage onto the
+// (:authority / :scheme / :path, plus the query split off :path) from the
+// inbound HTTPMessage onto the
 // derived L7 overlay of the GRPCStartMessage, mirroring the USK-920
 // projection that internal/layer/grpc.buildStartMessage performs for
 // native gRPC.
@@ -535,6 +759,31 @@ func applyRequestOverlay(start *envelope.GRPCStartMessage, msg *envelope.HTTPMes
 	start.Authority = msg.Authority
 	start.Scheme = msg.Scheme
 	start.Path = msg.Path
+	// USK-1110: the query component has its home on the Start (USK-1053),
+	// so it reaches the upstream, Flow.URL, and the Input SafetyFilter's
+	// url / query targets.
+	start.RawQuery = msg.RawQuery
+}
+
+// applyResponseOverlay projects the response status (HTTP/1.x status line
+// or HTTP/2 :status, plus the HTTP/1.x reason phrase) from the inbound
+// HTTPMessage onto GRPCStartMessage.HTTPStatus / HTTPStatusReason, the
+// response-side sibling of applyRequestOverlay (USK-1219).
+//
+// Without it the status had nowhere to live once the HTTPMessage was split
+// into gRPC-Web events, and the opposite-side Send wrote every response as
+// 200 OK — an upstream 503 reached the client as a success.
+//
+// Guarded on dir for the same reason as applyRequestOverlay: a request
+// HTTPMessage carries no status, and projecting unconditionally would
+// fabricate one onto a request overlay the moment a producer changed.
+// Only the overlay changes; Envelope.Raw is untouched.
+func applyResponseOverlay(start *envelope.GRPCStartMessage, msg *envelope.HTTPMessage, dir envelope.Direction) {
+	if dir != envelope.Receive {
+		return
+	}
+	start.HTTPStatus = msg.Status
+	start.HTTPStatusReason = msg.StatusReason
 }
 
 // classifyParseError maps a DecodeBody error to a recoverable Anomaly type.
@@ -757,7 +1006,14 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 
 	isBase64 := IsBase64Encoded(start.ContentType)
 
-	if shouldEmbedTrailer(dir, env, m, passthrough != nil) {
+	// A Receive with no assembled frames that was observed as trailers-only
+	// carries its status in the HTTP headers, so a trailer frame would
+	// duplicate it into a body the wire did not have. See
+	// trailersOnlyResponse for how that is decided.
+	baseline, trailersOnly := trailersOnlyResponse(env, srcEnv, start)
+	statusInHeaders := dir == envelope.Receive && len(dataBytes) == 0 && passthrough == nil && trailersOnly
+
+	if shouldEmbedTrailer(dir, env, m, passthrough != nil || statusInHeaders) {
 		trailer, err := trailerFrameBytes(env, m, isBase64)
 		if err != nil {
 			return err
@@ -783,9 +1039,13 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	default:
 		body = dataBytes
 	}
+	body = emptyResponseBody(body, dir, start.HTTPStatus)
 
 	// Reconstruct HTTPMessage.
 	httpMsg := buildHTTPMessage(start, body, dir, srcEnv)
+	if statusInHeaders && len(env.Raw) == 0 {
+		httpMsg.Headers = withEndStatusInHeaders(httpMsg.Headers, m, baseline)
+	}
 
 	out := &envelope.Envelope{
 		StreamID:  streamID,
@@ -802,6 +1062,20 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	return c.inner.Send(ctx, out)
 }
 
+// emptyResponseBody returns []byte{} for a nil response body (USK-1219
+// N1): a non-nil empty slice makes the HTTP/1.x synthetic send path stamp
+// Content-Length: 0 when the upstream sent none (e.g. an HTTP/2
+// trailers-only response), so a keep-alive client is not left reading
+// until close. HTTP/2 sends END_STREAM on HEADERS for an empty body either
+// way. Never for a 1xx: a server must not send Content-Length in one
+// (RFC 9110 §8.6, USK-1219 review F-1). Any other body is returned as is.
+func emptyResponseBody(body []byte, dir envelope.Direction, status int) []byte {
+	if body != nil || dir != envelope.Receive || (status >= 100 && status < 200) {
+		return body
+	}
+	return []byte{}
+}
+
 // shouldEmbedTrailer decides whether sendEndLocked appends an embedded
 // trailer LPM frame to the body. The rule forwards what the wire carried
 // and never fabricates a trailer the peer did not send (MITM principle 1):
@@ -810,8 +1084,10 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 //     direction. On the request side this is the
 //     AnomalyUnexpectedGRPCWebRequestTrailer case: the frame is recorded as
 //     an anomaly AND relayed, rather than silently stripped (USK-1203).
-//   - Passthrough body: the observed body is already complete; the End is
-//     only the flush sentinel, so nothing is added.
+//   - bodyComplete: the observed body is already complete and the End is
+//     only the flush sentinel, so nothing is added. sendEndLocked sets it for
+//     a passthrough body and for a response observed as trailers-only
+//     (trailersOnlyResponse), whose status already travels in the headers.
 //   - End stamped with a malformed-body anomaly: the emitAnomalyStart
 //     sentinel, standing for "no trailer observed". Nothing is added even
 //     if the passthrough body was lost before this Send.
@@ -822,11 +1098,11 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 //   - Send: only an End flagged AnomalyUnexpectedGRPCWebRequestTrailer whose
 //     Raw was dropped (e.g. by a mutation) is re-encoded from its fields;
 //     the clean synthetic End (USK-780 flush sentinel) adds nothing.
-func shouldEmbedTrailer(dir envelope.Direction, env *envelope.Envelope, m *envelope.GRPCEndMessage, passthrough bool) bool {
+func shouldEmbedTrailer(dir envelope.Direction, env *envelope.Envelope, m *envelope.GRPCEndMessage, bodyComplete bool) bool {
 	switch {
 	case len(env.Raw) > 0:
 		return true
-	case passthrough, hasMalformedBodyAnomaly(m.Anomalies):
+	case bodyComplete, hasMalformedBodyAnomaly(m.Anomalies):
 		return false
 	case dir == envelope.Receive:
 		return !hasAnomaly(m.Anomalies, envelope.AnomalyMissingGRPCWebTrailer)
@@ -914,6 +1190,17 @@ func materializeBody(ctx context.Context, msg *envelope.HTTPMessage) ([]byte, er
 		return b, nil
 	}
 	return nil, nil
+}
+
+// headerHas reports whether any entry of kvs is named name
+// (case-insensitive).
+func headerHas(kvs []envelope.KeyValue, name string) bool {
+	for _, kv := range kvs {
+		if strings.EqualFold(kv.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // headerGet returns the first matching value for name (case-insensitive),
@@ -1211,12 +1498,12 @@ func encodeTrailerPayload(end *envelope.GRPCEndMessage) []byte {
 }
 
 // buildHTTPMessage reconstructs an outbound HTTPMessage for inner.Send. The
-// request side (Send-side from the caller's perspective) sets Method=POST
-// and Path=/Service/Method per gRPC-Web convention, and carries the
+// request side (Send-side from the caller's perspective) sets Method=POST,
+// resolves Path with pathForStart, carries RawQuery, and carries the
 // wire-observed :authority / :scheme forward from the Start message's
-// derived L7 overlay (USK-1057). The response side keeps
-// Status/StatusReason from the original Receive-side context envelope when
-// available.
+// derived L7 overlay (USK-1057). The response side takes Status /
+// StatusReason from the Start's HTTPStatus / HTTPStatusReason overlay
+// (USK-1219).
 //
 // The framing headers carried over from the observed message are reconciled
 // with the re-assembled body (reconcileBodyFraming, USK-1203) — this is the
@@ -1230,7 +1517,7 @@ func buildHTTPMessage(
 ) *envelope.HTTPMessage {
 	msg := &envelope.HTTPMessage{
 		Body:    body,
-		Headers: reconcileBodyFraming(rebuildStartHeaders(start), len(body)),
+		Headers: reconcileBodyFraming(rebuildStartHeaders(start, layoutFromEnv(srcEnv)), len(body)),
 	}
 	if a, ok := httpTruncatedBodyAnomaly(start.Anomalies); ok {
 		msg.Anomalies = append(msg.Anomalies, a)
@@ -1240,9 +1527,14 @@ func buildHTTPMessage(
 	case envelope.Send:
 		// Request side: assemble path + method.
 		msg.Method = "POST"
-		if start.Service != "" || start.Method != "" {
-			msg.Path = "/" + start.Service + "/" + start.Method
-		}
+		// USK-1069 / USK-1110: the observed :path wins when the derived
+		// Service/Method view cannot represent it (pathForStart), and the
+		// query string rides along on RawQuery — the inner HTTP Layer
+		// rejoins it (http1 sendRequestSynthetic, http2
+		// appendRequestPseudoHeaders). Joining here would make a later
+		// parseServiceMethod read the query as part of the method name.
+		msg.Path = pathForStart(start)
+		msg.RawQuery = start.RawQuery
 		// USK-1057: :authority and :scheme come from the derived L7 overlay
 		// only — the fields refillFromHTTPMessage projects from the
 		// wire-observed request (applyRequestOverlay). There is deliberately
@@ -1269,43 +1561,35 @@ func buildHTTPMessage(
 		msg.Authority = start.Authority
 		msg.Scheme = start.Scheme
 	case envelope.Receive:
-		// Response side: status from srcEnv if available; otherwise default
-		// to 200.
-		msg.Status = 200
-		msg.StatusReason = "OK"
-		if srcEnv != nil {
-			if hm, ok := srcEnv.Message.(*envelope.HTTPMessage); ok {
-				if hm.Status != 0 {
-					msg.Status = hm.Status
-				}
-				if hm.StatusReason != "" {
-					msg.StatusReason = hm.StatusReason
-				}
-			}
+		// Response side: the status observed on the upstream response,
+		// carried on the Start overlay (applyResponseOverlay, USK-1219).
+		// An empty reason phrase stays empty — an HTTP/2 upstream has none,
+		// and the HTTP/1.x synthetic send path fills it from statusText.
+		msg.Status = start.HTTPStatus
+		msg.StatusReason = start.HTTPStatusReason
+		if msg.Status == 0 {
+			// Zero-value path for synthetic / test producers that build a
+			// Receive Start without an HTTP status (the same shape as
+			// pathForStart's empty-Path fall-through). Without this an
+			// HTTP/1.x client would see "0 Unknown" and an HTTP/2 client
+			// :status 0.
+			//
+			// Known divergence (USK-1219 review F-2 / S-2; documented,
+			// deliberately not changed): live traffic reaches here too.
+			// The HTTP/1.x parser yields status 0 for an unparseable
+			// status line ("HTTP/1.1 000 X", a non-numeric code, no space)
+			// and the HTTP/2 assembler for a missing / non-numeric
+			// :status. Such a response is relayed to the client as 200 OK
+			// and Flow.StatusCode stays unset. Not a regression — before
+			// USK-1219 every gRPC-Web response was written as 200 OK — and
+			// re-emitting the malformed status would need a verbatim
+			// status-line field the HTTP Layers do not carry; the wire
+			// bytes remain in the recorded Envelope.Raw.
+			msg.Status = 200
+			msg.StatusReason = "OK"
 		}
 	}
 	return msg
-}
-
-// rebuildStartHeaders re-injects content-type / grpc-encoding /
-// grpc-accept-encoding / grpc-timeout (when set on Start) and appends the
-// preserved Metadata in original order.
-func rebuildStartHeaders(start *envelope.GRPCStartMessage) []envelope.KeyValue {
-	out := make([]envelope.KeyValue, 0, len(start.Metadata)+4)
-	if start.ContentType != "" {
-		out = append(out, envelope.KeyValue{Name: "content-type", Value: start.ContentType})
-	}
-	if start.Encoding != "" {
-		out = append(out, envelope.KeyValue{Name: "grpc-encoding", Value: start.Encoding})
-	}
-	if len(start.AcceptEncoding) > 0 {
-		out = append(out, envelope.KeyValue{Name: "grpc-accept-encoding", Value: strings.Join(start.AcceptEncoding, ",")})
-	}
-	if start.Timeout > 0 {
-		out = append(out, envelope.KeyValue{Name: "grpc-timeout", Value: formatGRPCTimeout(start.Timeout)})
-	}
-	out = append(out, start.Metadata...)
-	return out
 }
 
 // reconcileBodyFraming makes the framing headers carried over from the

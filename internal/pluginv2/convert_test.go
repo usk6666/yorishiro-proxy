@@ -221,14 +221,18 @@ def hook(msg):
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &envelope.GRPCStartMessage{
-				Service:     "greeter.Greeter",
-				Method:      "SayHello",
-				Authority:   "vhost.example:8443",
-				Scheme:      "http",
-				Path:        "/greeter.Greeter/SayHello",
-				RawQuery:    "trace=1",
-				Metadata:    []envelope.KeyValue{{Name: "x-token", Value: "abc"}},
-				ContentType: "application/grpc+proto",
+				Service:   "greeter.Greeter",
+				Method:    "SayHello",
+				Authority: "vhost.example:8443",
+				Scheme:    "http",
+				Path:      "/greeter.Greeter/SayHello",
+				RawQuery:  "trace=1",
+				// USK-1219: the gRPC-Web response-side status overlay.
+				// Not a dict key either, so it must be carried too.
+				HTTPStatus:       503,
+				HTTPStatusReason: "Service Unavailable",
+				Metadata:         []envelope.KeyValue{{Name: "x-token", Value: "abc"}},
+				ContentType:      "application/grpc+proto",
 			}
 			env := &envelope.Envelope{Message: m}
 			d, err := runHook(t, env, tc.src)
@@ -261,6 +265,12 @@ def hook(msg):
 			if gm.RawQuery != m.RawQuery {
 				t.Errorf("RawQuery = %q, want %q (must survive rebuild)", gm.RawQuery, m.RawQuery)
 			}
+			if gm.HTTPStatus != m.HTTPStatus {
+				t.Errorf("HTTPStatus = %d, want %d (must survive rebuild)", gm.HTTPStatus, m.HTTPStatus)
+			}
+			if gm.HTTPStatusReason != m.HTTPStatusReason {
+				t.Errorf("HTTPStatusReason = %q, want %q (must survive rebuild)", gm.HTTPStatusReason, m.HTTPStatusReason)
+			}
 		})
 	}
 }
@@ -278,6 +288,9 @@ func TestGRPCStart_PseudoHeadersAreNotPluginMutableKeys(t *testing.T) {
 		Scheme:    "http",
 		Path:      "/greeter.Greeter/SayHello",
 		RawQuery:  "trace=1",
+		// USK-1219: kept off the hook surface like the request overlay.
+		HTTPStatus:       503,
+		HTTPStatusReason: "Service Unavailable",
 	}
 	env := &envelope.Envelope{Message: m}
 	d, err := convertMessageToDict(env)
@@ -288,7 +301,7 @@ func TestGRPCStart_PseudoHeadersAreNotPluginMutableKeys(t *testing.T) {
 	for _, k := range d.sortedKeysForTest() {
 		present[k] = true
 	}
-	for _, key := range []string{"authority", "scheme", "path", "raw_query"} {
+	for _, key := range []string{"authority", "scheme", "path", "raw_query", "http_status", "http_status_reason"} {
 		if present[key] {
 			t.Errorf("dict key %q is present; pseudo-headers must stay off the plugin hook surface", key)
 		}
