@@ -130,8 +130,8 @@ func TestScopeChecks_UnparseablePortFailsClosed(t *testing.T) {
 
 	type checkFn func(scope *TargetScope, target string) bool
 	forward := func(s *TargetScope, tg string) bool { ok, _, _ := forwardScopeCheck(s, tg); return ok }
-	connect := func(s *TargetScope, tg string) bool { ok, _, _ := connectScopeCheck(s, tg); return ok }
-	socks := func(s *TargetScope, tg string) bool { ok, _ := socks5ScopeCheck(s, tg); return ok }
+	connect := func(s *TargetScope, tg string) bool { ok, _, _ := connectScopeCheck(s, tg, false); return ok }
+	socks := func(s *TargetScope, tg string) bool { ok, _ := socks5ScopeCheck(s, tg, false); return ok }
 
 	cases := []struct {
 		name   string
@@ -163,10 +163,10 @@ func TestScopeChecks_UnparseablePortFailsClosed(t *testing.T) {
 	if ok, _, err := forwardScopeCheck(ruled, "h:80"); !ok || err != nil {
 		t.Errorf("forwardScopeCheck(h:80) = %v, %v; want allowed", ok, err)
 	}
-	if ok, _, err := connectScopeCheck(ruled, "h:443"); !ok || err != nil {
+	if ok, _, err := connectScopeCheck(ruled, "h:443", false); !ok || err != nil {
 		t.Errorf("connectScopeCheck(h:443) = %v, %v; want allowed", ok, err)
 	}
-	if ok, _ := socks5ScopeCheck(ruled, "h:1080"); !ok {
+	if ok, _ := socks5ScopeCheck(ruled, "h:1080", false); !ok {
 		t.Error("socks5ScopeCheck(h:1080) denied, want allowed")
 	}
 	if ok, _, _ := forwardScopeCheck(ruled, "other.example:1"); ok {

@@ -60,7 +60,7 @@ func TestTCPForwardScopeCheck_SchemeIsDialLeg(t *testing.T) {
 				rule.Schemes = []string{tc.denyScheme}
 			}
 			scope.SetPolicyRules(nil, []connector.TargetRule{rule})
-			allowed, reason := tcpForwardScopeCheck(scope, target, tc.upstreamTLS)
+			allowed, reason := tcpForwardScopeCheck(scope, target, tc.upstreamTLS, "raw")
 			if allowed != tc.wantAllowed {
 				t.Fatalf("tcpForwardScopeCheck(upstreamTLS=%v) = %v (%q), want %v", tc.upstreamTLS, allowed, reason, tc.wantAllowed)
 			}
@@ -76,13 +76,13 @@ func TestTCPForwardScopeCheck_SchemeIsDialLeg(t *testing.T) {
 func TestTCPForwardScopeCheck_OtherPortAndNilScope(t *testing.T) {
 	scope := connector.NewTargetScope()
 	scope.SetPolicyRules(nil, []connector.TargetRule{{Hostname: "127.0.0.1", Ports: []int{1}}})
-	if ok, reason := tcpForwardScopeCheck(scope, "127.0.0.1:4444", false); !ok {
+	if ok, reason := tcpForwardScopeCheck(scope, "127.0.0.1:4444", false, "raw"); !ok {
 		t.Errorf("deny on port 1 blocked port 4444: %s", reason)
 	}
-	if ok, _ := tcpForwardScopeCheck(nil, "127.0.0.1:4444", false); !ok {
+	if ok, _ := tcpForwardScopeCheck(nil, "127.0.0.1:4444", false, "raw"); !ok {
 		t.Error("nil scope blocked")
 	}
-	if ok, _ := tcpForwardScopeCheck(connector.NewTargetScope(), "127.0.0.1:4444", false); !ok {
+	if ok, _ := tcpForwardScopeCheck(connector.NewTargetScope(), "127.0.0.1:4444", false, "raw"); !ok {
 		t.Error("rule-less scope blocked")
 	}
 }
@@ -94,7 +94,7 @@ func TestTCPForwardScopeCheck_HostCanonicalized(t *testing.T) {
 	scope := connector.NewTargetScope()
 	scope.SetPolicyRules(nil, []connector.TargetRule{{Hostname: "denied.example"}, {Hostname: "::1"}})
 	for _, target := range []string{"DENIED.example:80", "[::1]:8080"} {
-		if ok, _ := tcpForwardScopeCheck(scope, target, false); ok {
+		if ok, _ := tcpForwardScopeCheck(scope, target, false, "raw"); ok {
 			t.Errorf("target %q admitted, want denied", target)
 		}
 	}
@@ -200,7 +200,7 @@ func TestTCPForwardScopeCheck_NonNumericPortFailsClosed(t *testing.T) {
 		"db.internal:",
 		"db.internal",
 	} {
-		allowed, reason := tcpForwardScopeCheck(scope, target, false)
+		allowed, reason := tcpForwardScopeCheck(scope, target, false, "raw")
 		if allowed {
 			t.Errorf("tcpForwardScopeCheck(%q) admitted under a port-scoped deny, want fail-closed", target)
 			continue
@@ -209,10 +209,10 @@ func TestTCPForwardScopeCheck_NonNumericPortFailsClosed(t *testing.T) {
 			t.Errorf("tcpForwardScopeCheck(%q) denied without a reason", target)
 		}
 	}
-	if ok, reason := tcpForwardScopeCheck(scope, "db.internal:05433", false); !ok {
+	if ok, reason := tcpForwardScopeCheck(scope, "db.internal:05433", false, "raw"); !ok {
 		t.Errorf("decimal port 05433 (=5433) denied by a port-5432 rule: %s", reason)
 	}
-	if ok, _ := tcpForwardScopeCheck(connector.NewTargetScope(), "db.internal:postgresql", false); !ok {
+	if ok, _ := tcpForwardScopeCheck(connector.NewTargetScope(), "db.internal:postgresql", false, "raw"); !ok {
 		t.Error("rule-less scope blocked a service-name target")
 	}
 }

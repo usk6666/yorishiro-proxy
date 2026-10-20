@@ -196,7 +196,7 @@ func (m *Manager) startTCPForwardListener(
 	// Advisory — the scope can change at runtime, so the accept-time gate
 	// (admitTCPForwardConn) is the authoritative check.
 	if parent := m.Stack(parentListenerName); parent != nil {
-		if allowed, reason := tcpForwardScopeCheck(parent.Scope, fc.Target, fc.UpstreamTLS); !allowed {
+		if allowed, reason := tcpForwardScopeCheck(parent.Scope, fc.Target, fc.UpstreamTLS, fc.Protocol); !allowed {
 			return nil, fmt.Errorf("tcp forward port %s: %w: target %s (scheme %s): %s",
 				port, ErrTCPForwardTargetBlocked, fc.Target, tcpForwardScheme(fc.UpstreamTLS), reason)
 		}

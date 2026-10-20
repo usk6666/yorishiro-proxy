@@ -166,10 +166,36 @@ Response:
 |---|---|---|
 | `hostname` | string | Required. Exact match or wildcard `*.example.com`. IPv4 and IPv6 literals are accepted; IPv6 may be bare (`::1`) or bracketed (`[::1]`). Hosts are compared in a canonical form, so every spelling that dials the same host matches the rule: any textual form of an IPv6 address, with or without a zone (`[fe80::1%eth0]` matches `fe80::1`; rules cannot carry a zone); IPv4-mapped IPv6 and its IPv4 address in either direction (`::ffff:10.0.0.5` = `10.0.0.5`); one trailing dot (`db.internal.` matches `db.internal` and `*.internal`); and legacy IPv4 spellings (`2130706433`, `0x7f.0.0.1`, `127.1` match `127.0.0.1`). While any rule is set, a target host ending in a number that is not a valid IPv4 address (`1.2.3.4.5`) is blocked. A trailing-dot rule is rejected. A wildcard over an IP literal (`*.10.0.0.1`) is rejected |
 | `ports` | int[] | Optional. Match specific ports. Empty = all ports |
-| `path_prefix` | string | Optional. Literal, case-sensitive prefix of the request path — not a glob. Must start with `/`; `*`, `?` and `#` are rejected (`/api/` already matches everything under `/api/`; the query and fragment are not part of the path). Matches when either the wire-form path or its percent-decoded form starts with the prefix (`/admin` also matches `/%61dmin`; `/a%20b` matches the wire bytes `/a%20b`); dot-segments and `%2F` are not normalized. Empty = all paths |
+| `path_prefix` | string | Optional. Literal, case-sensitive prefix of the request path — not a glob. Must start with `/`; `*`, `?` and `#` are rejected (`/api/` already matches everything under `/api/`; the query and fragment are not part of the path). Matches when either the wire-form path or its percent-decoded form starts with the prefix (`/admin` also matches `/%61dmin`; `/a%20b` matches the wire bytes `/a%20b`); dot-segments and `%2F` are not normalized. Empty = all paths. See "Path-scoped rules" below for which traffic a `path_prefix` rule can cover |
 | `schemes` | string[] | Optional. Match transport confidentiality: `http` = plaintext, `https` = TLS. Only these two values are accepted. Empty = both |
 
 All specified fields must match for a rule to apply (AND logic).
+
+### Path-scoped rules
+
+A connection (CONNECT, SOCKS5, plain-HTTP forward, `tcp_forwards`) is admitted
+before any request path is known, so a rule with `path_prefix` is applied in two
+steps:
+
+- **Allow** `{hostname: X, path_prefix: "/api/"}`: the connection to X is admitted
+  when the proxy will check the path of every request on it — HTTP/1.x, HTTP/2
+  (including h2c) and WebSocket (the upgrade request is path-checked). Each request
+  is then checked with its path: `/api/x` reaches X, `/other` is answered
+  403 `blocked_by: target_scope`. Traffic on which no path is ever seen is refused:
+  a TLS passthrough target (`tls_passthrough`), a `raw_passthrough_hosts` target,
+  `tcp_forwards` with `protocol: raw` or `grpc` (`proxy_start` refuses the entry),
+  non-HTTP bytes inside a tunnel (the connection is closed and a raw Stream is
+  recorded with `blocked_by: target_scope`; the upstream connection may already
+  have been opened, but receives no client byte and none of its bytes reach the
+  client), and gRPC / gRPC-Web requests.
+  `path_prefix: "/"` behaves the same way: it still requires a request path.
+- **Deny** `{hostname: X, path_prefix: "/admin"}`: never refuses or closes a
+  connection; it is enforced per request. It therefore does not cover TLS
+  passthrough or raw traffic to X — deny the host itself for that.
+
+Every request is checked against both the host it names (`Host` / `:authority`)
+and the host the connection actually reaches, each with the request path, so
+naming another host in `Host` does not escape a path rule on the real target.
 
 ### What `schemes` means
 
@@ -215,20 +241,21 @@ recorded request still shows the scheme exactly as the client declared it.
 | Traffic | What the client sees | Recorded |
 |---|---|---|
 | HTTP/1.x, HTTP/2 request | `403` with `X-Blocked-By: target_scope` | Stream with `blocked_by: target_scope`, `state: error` |
-| Raw TCP (bytechunk — CONNECT / SOCKS5 tunnels carrying an unknown protocol, `raw_passthrough_hosts`, `tcp_forwards` with `protocol: raw` or an `auto` fallback to raw) | The connection is closed (EOF) at the first byte the client sends; none of the client's bytes reach the denied host | One raw Stream with `blocked_by: target_scope`, `state: error` |
+| Raw TCP (bytechunk — CONNECT / SOCKS5 tunnels carrying an unknown protocol, `raw_passthrough_hosts`, `tcp_forwards` with `protocol: raw` or an `auto` fallback to raw) | The connection is closed (EOF) when it settles on a raw relay, before any byte is relayed in either direction; none of the client's bytes reach the denied host and none of its bytes reach the client | One raw Stream with `blocked_by: target_scope`, `state: error` |
 | WebSocket, gRPC message | The message is dropped; the connection stays open | Stream with `blocked_by: target_scope` |
 | `tcp_forwards` target denied when `proxy_start` runs | `proxy_start` fails with an error naming the scope, port and target; nothing is bound | Nothing |
 | `tcp_forwards` target denied when a client connects | Plaintext `protocol: http` / `websocket` / `sse`: `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`, then close. Every other protocol and every `tls: true` entry: the connection is closed with no byte (a TLS client's handshake fails). The target is never contacted | Nothing (Info log) |
 
 A raw connection is closed rather than having single chunks dropped because a
 byte stream has no message boundary to drop at: removing some bytes and relaying
-the rest would hand the peer a corrupted stream. An upstream that speaks first
-(an SMTP / FTP / IMAP banner) can still deliver its greeting before the client's
-first byte is checked.
+the rest would hand the peer a corrupted stream. The check runs once, before the
+relay starts, so an upstream that speaks first (an SMTP / FTP / IMAP banner)
+delivers nothing to a client that has not written yet.
 
-The check runs on the client's first byte, not at connect time, so the denied
-host is still *contacted*: the upstream TCP connection is already open when
-that byte is examined, and on `raw_passthrough_hosts`, an unrecognised-ALPN
+The check runs when the raw relay starts — for a CONNECT / SOCKS5 tunnel or a
+`tcp_forwards` `auto` entry, after the inner bytes were classified — not at
+connect time, so the denied host is still *contacted*: the upstream TCP
+connection is already open when it runs, and on `raw_passthrough_hosts`, an unrecognised-ALPN
 tunnel or a `tcp_forwards` entry with `upstream_tls` the upstream TLS handshake
 (SNI included) has already completed too. A CONNECT admitted as `https` and
 then denied by an `http`-scheme rule on its inner plaintext is a case that
