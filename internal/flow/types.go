@@ -98,6 +98,14 @@ type Stream struct {
 	// is treated as OriginProxy by readers that want backward compatibility
 	// with pre-schemaV12 rows; the SQLite column itself defaults to 'proxy'.
 	Origin Origin
+	// ListenerName is the operator-configured name of the proxy listener
+	// that accepted the connection this Stream was recorded on (the
+	// proxy_start "name", or "default"). It comes from configuration, never
+	// from the wire, so per-Worker listeners make it an unforgeable worker
+	// identity. tcp_forwards inherit their parent listener's name. Empty
+	// for Streams that did not arrive through a listener (resend / fuzz /
+	// budget audit) and for rows recorded before schemaV19.
+	ListenerName string
 	// SendMs is the time in milliseconds to send the request (headers + body).
 	// Nil when not measured (e.g., Raw TCP, or legacy streams before this feature).
 	SendMs *int64 `json:"send_ms,omitempty"`
@@ -113,8 +121,19 @@ type Stream struct {
 type ConnectionInfo struct {
 	// ClientAddr is the remote address of the client (e.g., "192.168.1.100:54321").
 	ClientAddr string
-	// ServerAddr is the resolved address of the upstream server (e.g., "93.184.216.34:443").
+	// ServerAddr is the wire-observed TCP peer of the upstream socket
+	// (e.g., "93.184.216.34:443"). When the proxy reached the upstream
+	// through an upstream proxy this is the upstream proxy's address, not
+	// the final destination — see UpstreamProxy. Live streams fill it from
+	// the first upstream Receive envelope, so a stream that never received
+	// anything from upstream leaves it empty. Some audit / error rows
+	// (TLS build errors, request-head records) still store the dial target
+	// here instead of a socket peer.
 	ServerAddr string
+	// UpstreamProxy is the upstream proxy the upstream socket was dialed
+	// through, as "scheme://host:port" with any userinfo stripped so no
+	// credential is ever persisted. Empty for a direct dial.
+	UpstreamProxy string
 	// TLSVersion is the negotiated TLS version (e.g., "TLS 1.3").
 	// Empty for non-TLS connections.
 	TLSVersion string
@@ -248,6 +267,9 @@ type StreamUpdate struct {
 	// ServerAddr sets the upstream server address in ConnInfo.
 	// Only applied when non-empty.
 	ServerAddr string
+	// UpstreamProxy sets ConnInfo.UpstreamProxy (redacted proxy URL).
+	// Only applied when non-empty.
+	UpstreamProxy string
 	// TLSVersion sets the negotiated TLS version in ConnInfo
 	// (e.g., "TLS 1.3"). Only applied when non-empty.
 	TLSVersion string

@@ -283,6 +283,19 @@ type EnvelopeContext struct {
 	// TargetHost is the CONNECT destination or SOCKS5 target.
 	TargetHost string
 
+	// ServerAddr is the wire-observed TCP peer of the upstream socket
+	// (upstreamConn.RemoteAddr()). Set only on the upstream-leg Layer's
+	// template, so it rides on Receive-direction envelopes; nil on the
+	// client leg. When the upstream was dialed through an upstream proxy
+	// this is the proxy's address, never the requested hostname — see
+	// UpstreamProxy. A redial onto a fresh socket overwrites it.
+	ServerAddr net.Addr
+
+	// UpstreamProxy is the upstream proxy the upstream socket was dialed
+	// through, as "scheme://host:port" with userinfo stripped. Empty for
+	// a direct dial. Same per-leg rule as ServerAddr.
+	UpstreamProxy string
+
 	// TLS is non-nil if a TLS layer is in the stack.
 	TLS *TLSSnapshot
 

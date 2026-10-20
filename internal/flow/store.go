@@ -303,6 +303,10 @@ type StreamListOptions struct {
 	Origin Origin
 	// ConnID filters streams by connection ID (exact match).
 	ConnID string
+	// ListenerName filters streams by the name of the listener that
+	// accepted them (exact match on streams.listener_name). Empty
+	// disables the filter.
+	ListenerName string
 	// Host filters streams by host. Matches against the server_addr column
 	// or the host portion of the URL in send flows.
 	Host string

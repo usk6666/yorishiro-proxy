@@ -171,6 +171,18 @@ type RecordStep struct {
 	// any production code path.
 	origin flow.Origin
 
+	// listenerName stamps Stream.ListenerName on every Stream created by
+	// this Step. Construction-time only (WithListenerName) so the value is
+	// always operator configuration, never wire data. Empty for Steps not
+	// bound to a listener (resend / fuzz pipelines).
+	listenerName string
+
+	// serverAddrProjected tracks streamIDs whose ConnInfo.ServerAddr /
+	// UpstreamProxy have already been projected from an upstream-leg
+	// envelope, so the projection costs one UpdateStream per Stream. Same
+	// no-eviction, bounded-by-stream-count rationale as protocolRetagged.
+	serverAddrProjected sync.Map
+
 	// USK-802 per-Stream record caps. grpcMaxPerStream gates
 	// *envelope.GRPCDataMessage envelopes; sseMaxPerStream gates
 	// *envelope.SSEMessage envelopes. Zero (the zero value of the field
@@ -307,6 +319,17 @@ func WithMaxBodySize(n int64) Option {
 func WithOrigin(origin flow.Origin) Option {
 	return func(s *RecordStep) {
 		s.origin = origin
+	}
+}
+
+// WithListenerName stamps Stream.ListenerName on every Stream this
+// RecordStep creates. The live data path passes the listener's normalized
+// name (proxy_start "name" or "default"); tcp_forwards share their parent
+// listener's RecordStep and therefore its name. Empty leaves the column
+// empty (resend / fuzz pipelines).
+func WithListenerName(name string) Option {
+	return func(s *RecordStep) {
+		s.listenerName = name
 	}
 }
 

@@ -101,16 +101,20 @@ type ExportStream struct {
 	// ('proxy' | 'resend' | 'fuzz'). Omitted from the JSONL line when
 	// empty so older exports continue to round-trip unchanged; on import
 	// a missing origin falls back to 'proxy' (USK-785).
-	Origin    string `json:"origin,omitempty"`
-	SendMs    *int64 `json:"send_ms,omitempty"`
-	WaitMs    *int64 `json:"wait_ms,omitempty"`
-	ReceiveMs *int64 `json:"receive_ms,omitempty"`
+	Origin string `json:"origin,omitempty"`
+	// ListenerName is the name of the listener that accepted the Stream's
+	// connection (Stream.ListenerName). Omitted when empty.
+	ListenerName string `json:"listener_name,omitempty"`
+	SendMs       *int64 `json:"send_ms,omitempty"`
+	WaitMs       *int64 `json:"wait_ms,omitempty"`
+	ReceiveMs    *int64 `json:"receive_ms,omitempty"`
 }
 
 // ExportConnInfo is the JSON-serializable representation of ConnectionInfo.
 type ExportConnInfo struct {
 	ClientAddr           string `json:"client_addr,omitempty"`
 	ServerAddr           string `json:"server_addr,omitempty"`
+	UpstreamProxy        string `json:"upstream_proxy,omitempty"`
 	TLSVersion           string `json:"tls_version,omitempty"`
 	TLSCipher            string `json:"tls_cipher,omitempty"`
 	TLSALPN              string `json:"tls_alpn,omitempty"`
