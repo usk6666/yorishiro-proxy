@@ -257,6 +257,26 @@ describe("buildModifyAndForwardArgs partial updates", () => {
     expect(args.http).toEqual({ status: 500, body: "AAAA", body_encoding: "base64" });
   });
 
+  it("treats a cleared status field as unchanged instead of sending status 0", () => {
+    const s = entryToEditState(resp);
+    const args = buildModifyAndForwardArgs(resp, { ...s, status: "" });
+    expect(args.http).toEqual({});
+  });
+
+  it("treats a non-integer status field as unchanged", () => {
+    const s = entryToEditState(resp);
+    for (const status of ["abc", "12.5", " ", "-1"]) {
+      const args = buildModifyAndForwardArgs(resp, { ...s, status });
+      expect(args.http).toEqual({});
+    }
+  });
+
+  it("still sends a deliberately out-of-range integer status", () => {
+    const s = entryToEditState(resp);
+    const args = buildModifyAndForwardArgs(resp, { ...s, status: "42" });
+    expect(args.http).toEqual({ status: 42 });
+  });
+
   it("sends status_reason only when changed", () => {
     const s = entryToEditState(resp);
     const args = buildModifyAndForwardArgs(resp, { ...s, statusReason: "Nope" });
@@ -325,6 +345,37 @@ describe("canModify / rawModeAllowed / maskingWarning", () => {
 
   it("does not warn without Output Filter rules and without mask tokens", () => {
     expect(maskingWarning(withHeaderChange(), 0)).toBe(false);
+  });
+
+  it("finds a [MASKED:...] token inside a base64 HTTP body", () => {
+    const s = entryToEditState(resp);
+    const body = btoa("mail=[MASKED:email]");
+    const args = buildModifyAndForwardArgs(resp, { ...s, body });
+    expect(args.http?.body_encoding).toBe("base64");
+    expect(maskingWarning(args, 0)).toBe(true);
+  });
+
+  it("finds a [MASKED:...] token inside a base64 WS payload", () => {
+    const s = entryToEditState(ws);
+    const args = buildModifyAndForwardArgs(ws, {
+      ...s,
+      body: btoa("[MASKED:credit-card]"),
+      bodyEncoding: "base64",
+    });
+    expect(maskingWarning(args, 0)).toBe(true);
+  });
+
+  it("finds a [MASKED:...] token inside raw bytes_override", () => {
+    const s = entryToEditState(raw);
+    const args = buildModifyAndForwardArgs(raw, { ...s, rawBytes: btoa("x=[MASKED:email]\r\n") });
+    expect(maskingWarning(args, 0)).toBe(true);
+  });
+
+  it("does not throw on invalid base64 content and skips the scan for it", () => {
+    const s = entryToEditState(raw);
+    const args = buildModifyAndForwardArgs(raw, { ...s, rawBytes: "!!not-base64!!" });
+    expect(maskingWarning(args, 0)).toBe(false);
+    expect(maskingWarning(args, 1)).toBe(true);
   });
 
   it("warns when the outgoing content carries a [MASKED:...] token", () => {
