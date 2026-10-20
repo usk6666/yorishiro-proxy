@@ -71,7 +71,7 @@ type channel struct {
 	// error via markTerminated without being shadowed by an io.EOF stamp.
 	recvClosed atomic.Bool
 
-	// closedLocal is set by closeStream (Close / CloseRefused) after the
+	// closedLocal is set by closeStream (Close / CloseWithCode) after the
 	// channel is terminated. Together with the stream being closed on the
 	// wire it lets the channel leave l.channels (USK-1176): whichever of
 	// closeStream (releaseClosedChannel) and the reader's stream cleanup
@@ -83,7 +83,7 @@ type channel struct {
 	// headersHas is set, under mu and before the frame is handed to the
 	// writer queue, when this endpoint first enqueues a HEADERS frame on the
 	// stream — the request HEADERS for a client-role channel, the first
-	// response HEADERS (1xx included) for a server-role channel. CloseRefused
+	// response HEADERS (1xx included) for a server-role channel. CloseWithCode
 	// reads it: once HEADERS is queued the writer will put it on the wire
 	// even if the Send gives up on its ctx, so the peer will see a response
 	// start and REFUSED_STREAM no longer applies. Keying on "enqueued" rather
@@ -400,7 +400,7 @@ func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, 
 	// under mu) either sees the stream closed first — and this Send never
 	// enqueues — or sees headersHas and picks CANCEL over REFUSED_STREAM.
 	// If the enqueue below then fails, headersHas stays true and a later
-	// CloseRefused falls back to CANCEL, the conservative code.
+	// CloseWithCode(REFUSED_STREAM) falls back to CANCEL, the conservative code.
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -627,7 +627,7 @@ func (c *channel) sendTrailersEvent(ctx context.Context, evt *H2TrailersEvent) e
 }
 
 // Close tears down the receive side and, for abnormal terminations, emits
-// RST_STREAM(CANCEL). Idempotent; mutually exclusive with CloseRefused (the
+// RST_STREAM(CANCEL). Idempotent; mutually exclusive with CloseWithCode (the
 // first of the two to run decides the code).
 //
 // USK-740 guard: when h2Stream == 0 we have not yet told the peer this
@@ -641,28 +641,37 @@ func (c *channel) sendTrailersEvent(ctx context.Context, evt *H2TrailersEvent) e
 // reset on the wire or refused by the peer's GOAWAY — see
 // streamAlreadyReset.
 func (c *channel) Close() error {
-	c.closeStream(false)
+	c.closeStream(ErrCodeCancel)
 	return nil
 }
 
-// CloseRefused is Close for a stream the far side of the proxy refused
-// without processing it (upstream GOAWAY above the stream, or upstream
-// RST_STREAM(REFUSED_STREAM)). When this endpoint has not yet queued any
-// HEADERS on the stream, the reset carries REFUSED_STREAM instead of CANCEL
-// so the peer knows the request was not processed and may retry it
-// (RFC 9113 §8.7) — what a browser talking to the origin directly would
-// have been told. Once HEADERS (including a 1xx) went out, the peer has
-// seen a response begin and CloseRefused behaves exactly like Close.
+// CloseWithCode is Close with the RST_STREAM error code the abnormal-close
+// reset carries instead of CANCEL. The session uses it to tell this peer how
+// the far side of the proxy ended the stream, as a direct connection would
+// have; every guard of Close applies unchanged:
+//
+//   - the upstream reset the stream with RST_STREAM(code): the same code,
+//     verbatim, whatever its value (RFC 9113 §7: unknown codes trigger no
+//     special behavior) — USK-1269;
+//   - the upstream refused the stream without processing it (GOAWAY above
+//     the stream, or an OpenStream refusal): REFUSED_STREAM, so the peer
+//     may retry it (RFC 9113 §8.7) — USK-1157.
+//
+// REFUSED_STREAM promises the request was not processed, which no longer
+// holds once this endpoint queued any HEADERS on the stream (a 1xx
+// included): the reset then falls back to CANCEL. Every other code is
+// relayed regardless of HEADERS.
 //
 // Shares Close's sync.Once: whichever of the two runs first decides the
-// code, and the other is a no-op. USK-1157.
-func (c *channel) CloseRefused() error {
-	c.closeStream(true)
+// code, and the other is a no-op.
+func (c *channel) CloseWithCode(code uint32) error {
+	c.closeStream(code)
 	return nil
 }
 
-// closeStream is the single teardown path behind Close and CloseRefused.
-func (c *channel) closeStream(refused bool) {
+// closeStream is the single teardown path behind Close and CloseWithCode;
+// code is the RST_STREAM error code of an abnormal close.
+func (c *channel) closeStream(code uint32) {
 	c.closeSendOnce.Do(func() {
 		c.mu.Lock()
 		c.closed = true
@@ -679,16 +688,17 @@ func (c *channel) closeStream(refused bool) {
 		// the abnormal-close guard preserves the USK-618 bilateral-close
 		// contract.
 		if id := c.h2Stream.Load(); id != 0 && (!sentEnd || !recvEnd) && !rstSent && !c.streamAlreadyReset() {
-			code := ErrCodeCancel
-			if refused && !headersSent {
-				code = ErrCodeRefusedStream
+			requested := code
+			if code == ErrCodeRefusedStream && headersSent {
+				code = ErrCodeCancel
 			}
-			if refused {
-				slog.Debug("http2: closing refused stream",
+			if requested != ErrCodeCancel {
+				slog.Debug("http2: closing stream with relayed reset code",
 					"conn_stream_id", c.layer.streamID,
 					"h2_stream_id", id,
+					"requested_code", ErrCodeString(requested),
 					"rst_code", ErrCodeString(code),
-					"response_headers_sent", headersSent)
+					"headers_sent", headersSent)
 			}
 			c.layer.enqueueWrite(writeRequest{rst: &writeRST{
 				streamID: id,

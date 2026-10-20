@@ -1,0 +1,30 @@
+{
+  "action": "modify_and_forward",
+  "params": {
+    "intercept_id": "INTERCEPT_ID"
+  },
+  "http": {
+    "path": "/admin",
+    "raw_query": "a=2",
+    "headers": [
+      {
+        "name": "Host",
+        "value": "example.com"
+      },
+      {
+        "name": "X-Dup",
+        "value": "1"
+      },
+      {
+        "name": "x-dup",
+        "value": "3"
+      },
+      {
+        "name": "X-Added",
+        "value": "yes"
+      }
+    ],
+    "body": "hello world",
+    "body_encoding": "text"
+  }
+}

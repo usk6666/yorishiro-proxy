@@ -186,11 +186,17 @@ func exchangeRaw(t *testing.T, addr string, req []byte) []byte {
 	return out.Bytes()
 }
 
-// grpcWebRequest builds an HTTP/1.1 gRPC-Web request with the given
+// grpcWebRequest builds an HTTP/1.1 gRPC-Web POST request with the given
 // request-target and extra header lines, wire order preserved.
 func grpcWebRequest(target, host string, headerLines []string, body []byte) []byte {
+	return grpcWebRequestWithMethod("POST", target, host, headerLines, body)
+}
+
+// grpcWebRequestWithMethod is grpcWebRequest with an explicit request
+// method, written to the request line verbatim (USK-1252).
+func grpcWebRequestWithMethod(method, target, host string, headerLines []string, body []byte) []byte {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "POST %s HTTP/1.1\r\n", target)
+	fmt.Fprintf(&b, "%s %s HTTP/1.1\r\n", method, target)
 	fmt.Fprintf(&b, "Host: %s\r\n", host)
 	for _, l := range headerLines {
 		b.WriteString(l + "\r\n")

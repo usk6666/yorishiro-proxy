@@ -403,6 +403,11 @@ func buildGRPCStartDict(d *MessageDict, m *envelope.GRPCStartMessage) {
 			Scheme:    m.Scheme,
 			Path:      m.Path,
 			RawQuery:  m.RawQuery,
+			// USK-1252: the gRPC-Web request-method overlay. Not a dict
+			// key (same hook-surface rule); dropping it would turn a
+			// client's GET into a POST upstream whenever a plugin touched
+			// the Send Start.
+			HTTPMethod: m.HTTPMethod,
 			// USK-1219: the gRPC-Web response-side status overlay. Not a
 			// dict key either (same hook-surface rule); dropping it would
 			// turn an upstream 503 into a 200 on the client whenever a

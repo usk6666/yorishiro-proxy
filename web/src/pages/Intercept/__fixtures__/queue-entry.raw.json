@@ -1,0 +1,17 @@
+{
+  "id": "INTERCEPT_ID",
+  "protocol": "raw",
+  "direction": "send",
+  "held_at": "2026-10-20T00:00:00Z",
+  "matched_rules": ["test-rule"],
+  "flow_id": "f-raw",
+  "stream_id": "s-raw",
+  "raw": {
+    "bytes_encoding": "text",
+    "bytes": "HELLO\r\n"
+  },
+  "raw_bytes_available": true,
+  "raw_bytes_size": 7,
+  "raw_bytes_encoding": "text",
+  "raw_bytes": "HELLO\r\n"
+}

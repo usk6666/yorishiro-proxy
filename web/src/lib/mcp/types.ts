@@ -722,18 +722,6 @@ export interface CACertResult {
   install_hint?: string;
 }
 
-/** Intercept phase: request (pre-send), response (post-receive), or websocket_frame. */
-export type InterceptPhase = "request" | "response" | "websocket_frame";
-
-/** Intercept protocol type. Expanded by RFC-001 N8 to cover all Message families. */
-export type InterceptProtocol =
-  | "http"
-  | "websocket"
-  | "grpc"
-  | "grpc-web"
-  | "sse"
-  | "raw";
-
 // ---------------------------------------------------------------------------
 // Per-protocol Message-typed flow shapes (light-touch discriminated union).
 //
@@ -782,28 +770,105 @@ export type MessageFlow =
   | SSEMessageFlow
   | RawMessageFlow;
 
-/** Intercept queue entry. */
+/**
+ * `protocol` of an intercept queue entry: names which per-Message-type view
+ * is present (`sse` holds currently carry no view).
+ */
+export type InterceptQueueProtocol =
+  | "http"
+  | "websocket"
+  | "grpc_start"
+  | "grpc_data"
+  | "grpc_end"
+  | "sse"
+  | "raw"
+  | "unknown";
+
+/** Body / payload / bytes encoding used by the intercept views and payloads. */
+export type InterceptBodyEncoding = "text" | "base64";
+
+/** HTTP view of a held HTTPMessage (request or response side). */
+export interface InterceptHTTPView {
+  method?: string;
+  scheme?: string;
+  authority?: string;
+  path?: string;
+  raw_query?: string;
+  status?: number;
+  status_reason?: string;
+  headers?: HeaderKV[];
+  trailers?: HeaderKV[];
+  body_encoding?: InterceptBodyEncoding;
+  body?: string;
+}
+
+/** WebSocket view of a held WSMessage. */
+export interface InterceptWSView {
+  opcode?: string;
+  fin?: boolean;
+  masked?: boolean;
+  compressed?: boolean;
+  close_code?: number;
+  close_reason?: string;
+  payload_encoding?: InterceptBodyEncoding;
+  payload?: string;
+}
+
+/** gRPC Start view of a held GRPCStartMessage. */
+export interface InterceptGRPCStartView {
+  service?: string;
+  method?: string;
+  encoding?: string;
+  content_type?: string;
+  metadata?: HeaderKV[];
+}
+
+/** gRPC Data view of a held GRPCDataMessage. */
+export interface InterceptGRPCDataView {
+  service?: string;
+  method?: string;
+  compressed?: boolean;
+  end_stream?: boolean;
+  wire_length?: number;
+  payload_encoding?: InterceptBodyEncoding;
+  payload?: string;
+}
+
+/** gRPC End view of a held GRPCEndMessage. */
+export interface InterceptGRPCEndView {
+  status: number;
+  message?: string;
+  trailers?: HeaderKV[];
+}
+
+/** Raw view of a held RawMessage. */
+export interface InterceptRawView {
+  bytes_encoding?: InterceptBodyEncoding;
+  bytes?: string;
+}
+
+/**
+ * Intercept queue entry, as projected by the server
+ * (internal/mcp/query_tool.go queryInterceptQueueEntry). Exactly one view
+ * matching `protocol` is present.
+ */
 export interface InterceptQueueEntry {
   id: string;
-  phase?: InterceptPhase;
-  protocol?: InterceptProtocol;
-  method?: string; // HTTP-only (omitempty in backend)
-  url?: string; // HTTP-only (omitempty in backend)
-  status_code?: number; // response phase: HTTP status code
-  headers?: Record<string, string[]>; // HTTP-only (omitempty in backend)
-  body_encoding: string;
-  body: string;
-  timestamp: string;
-  matched_rules: string[];
-  metadata?: Record<string, string>; // protocol-specific metadata (e.g. gRPC encoding)
-  // WebSocket frame fields (phase=websocket_frame only)
-  opcode?: string; // e.g. "Text", "Binary"
-  direction?: "client_to_server" | "server_to_client";
+  protocol: InterceptQueueProtocol | (string & {});
+  direction: "send" | "receive" | (string & {});
+  held_at: string;
+  matched_rules?: string[];
   flow_id?: string;
-  upgrade_url?: string;
-  sequence?: number;
-  raw_bytes_available?: boolean;
+  stream_id?: string;
+  http?: InterceptHTTPView;
+  ws?: InterceptWSView;
+  grpc_start?: InterceptGRPCStartView;
+  grpc_data?: InterceptGRPCDataView;
+  grpc_end?: InterceptGRPCEndView;
+  raw?: InterceptRawView;
+  raw_bytes_available: boolean;
   raw_bytes_size?: number;
+  raw_bytes_encoding?: InterceptBodyEncoding;
   raw_bytes?: string;
 }
 
@@ -1391,33 +1456,58 @@ export interface MacroDeleteResult {
 /** Available intercept actions. */
 export type InterceptAction = "release" | "modify_and_forward" | "drop";
 
-/** Parameters for the intercept tool. */
+/**
+ * Typed modify payload for an HTTP hold. Omitted fields keep the held
+ * value; `headers` / `trailers` replace the held list in full.
+ */
+export interface InterceptHTTPModify {
+  method?: string;
+  scheme?: string;
+  authority?: string;
+  path?: string;
+  /** Raw query string, without a leading "?". */
+  raw_query?: string;
+  status?: number;
+  status_reason?: string;
+  headers?: HeaderKV[];
+  trailers?: HeaderKV[];
+  body?: string;
+  body_encoding?: InterceptBodyEncoding;
+}
+
+/** Typed modify payload for a WebSocket frame hold. */
+export interface InterceptWSModify {
+  opcode?: string | number;
+  fin?: boolean;
+  payload?: string;
+  body_encoding?: InterceptBodyEncoding;
+  close_code?: number;
+  close_reason?: string;
+}
+
+/** Typed modify payload for a raw TCP chunk hold. */
+export interface InterceptRawModify {
+  bytes_override?: string;
+  bytes_encoding?: InterceptBodyEncoding;
+}
+
+/**
+ * Arguments for the intercept tool. `params` carries routing only;
+ * modifications travel in the top-level typed payload that matches the
+ * held item (see the `intercept` docs topic).
+ *
+ * The server also accepts `params.mode: "raw"` + `params.raw_override_base64`;
+ * they are deliberately not modelled here because on non-raw holds that
+ * path breaks the connection. Raw holds are edited via `raw.bytes_override`.
+ */
 export interface InterceptActionParams {
   action: InterceptAction;
   params: {
-    intercept_id?: string;
-
-    // Mode: "structured" (default) or "raw"
-    mode?: "structured" | "raw";
-
-    // modify_and_forward mutation parameters — request phase (structured mode)
-    override_method?: string;
-    override_url?: string;
-    override_headers?: Record<string, string>;
-    add_headers?: Record<string, string>;
-    remove_headers?: string[];
-    override_body?: string | null;
-
-    // modify_and_forward mutation parameters — response phase (structured mode)
-    override_status?: number;
-    override_response_headers?: Record<string, string>;
-    add_response_headers?: Record<string, string>;
-    remove_response_headers?: string[];
-    override_response_body?: string | null;
-
-    // modify_and_forward mutation parameters (raw mode)
-    raw_override_base64?: string;
+    intercept_id: string;
   };
+  http?: InterceptHTTPModify;
+  ws?: InterceptWSModify;
+  raw?: InterceptRawModify;
 }
 
 /** Result of intercept actions. */

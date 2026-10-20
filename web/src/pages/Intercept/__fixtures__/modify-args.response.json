@@ -1,0 +1,29 @@
+{
+  "action": "modify_and_forward",
+  "params": {
+    "intercept_id": "INTERCEPT_ID"
+  },
+  "http": {
+    "status": 403,
+    "headers": [
+      {
+        "name": "Content-Type",
+        "value": "application/octet-stream"
+      },
+      {
+        "name": "Set-Cookie",
+        "value": "a=1"
+      },
+      {
+        "name": "set-cookie",
+        "value": "b=2"
+      },
+      {
+        "name": "Set-Cookie",
+        "value": "c=3"
+      }
+    ],
+    "body": "/wACAw==",
+    "body_encoding": "base64"
+  }
+}

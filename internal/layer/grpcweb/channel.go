@@ -236,22 +236,23 @@ func (c *channel) Close() error {
 	return nil
 }
 
-// CloseRefused is Close for a stream the far side of the proxy refused
-// without processing it (USK-1157). It cascades to the inner Channel's
-// CloseRefused when it has one (an aggregator over an HTTP/2 stream, which
-// picks RST_STREAM(REFUSED_STREAM) vs CANCEL from wire state), else to its
-// Close. Shares Close's sync.Once.
-func (c *channel) CloseRefused() error {
+// CloseWithCode is Close with the RST_STREAM error code the session wants
+// the client to see: the upstream's own reset code (USK-1269) or
+// REFUSED_STREAM for an upstream refusal (USK-1157). It cascades to the
+// inner Channel's CloseWithCode when it has one (an aggregator over an
+// HTTP/2 stream, which applies the code subject to its wire state), else to
+// its Close. Shares Close's sync.Once.
+func (c *channel) CloseWithCode(code uint32) error {
 	c.closeWith(func() error {
-		if rc, ok := c.inner.(interface{ CloseRefused() error }); ok {
-			return rc.CloseRefused()
+		if cc, ok := c.inner.(interface{ CloseWithCode(uint32) error }); ok {
+			return cc.CloseWithCode(code)
 		}
 		return c.inner.Close()
 	})
 	return nil
 }
 
-// closeWith is the single teardown path behind Close and CloseRefused;
+// closeWith is the single teardown path behind Close and CloseWithCode;
 // closeInner cascades to the inner Channel.
 func (c *channel) closeWith(closeInner func() error) {
 	c.closeOnce.Do(func() {
@@ -763,6 +764,12 @@ func applyRequestOverlay(start *envelope.GRPCStartMessage, msg *envelope.HTTPMes
 	// so it reaches the upstream, Flow.URL, and the Input SafetyFilter's
 	// url / query targets.
 	start.RawQuery = msg.RawQuery
+	// USK-1252: the observed request method (HTTP/1.x request line /
+	// HTTP/2 :method), verbatim, so the opposite-role Send relays it
+	// instead of forcing POST. Classification is content-type-only, so a
+	// GET / PUT / lowercase "post" carrying a gRPC-Web content-type is a
+	// live input.
+	start.HTTPMethod = msg.Method
 }
 
 // applyResponseOverlay projects the response status (HTTP/1.x status line
@@ -1498,8 +1505,9 @@ func encodeTrailerPayload(end *envelope.GRPCEndMessage) []byte {
 }
 
 // buildHTTPMessage reconstructs an outbound HTTPMessage for inner.Send. The
-// request side (Send-side from the caller's perspective) sets Method=POST,
-// resolves Path with pathForStart, carries RawQuery, and carries the
+// request side (Send-side from the caller's perspective) takes Method from
+// the Start's HTTPMethod overlay (methodForStart, USK-1252; POST when
+// empty), resolves Path with pathForStart, carries RawQuery, and carries the
 // wire-observed :authority / :scheme forward from the Start message's
 // derived L7 overlay (USK-1057). The response side takes Status /
 // StatusReason from the Start's HTTPStatus / HTTPStatusReason overlay
@@ -1526,7 +1534,7 @@ func buildHTTPMessage(
 	switch dir {
 	case envelope.Send:
 		// Request side: assemble path + method.
-		msg.Method = "POST"
+		msg.Method = methodForStart(start)
 		// USK-1069 / USK-1110: the observed :path wins when the derived
 		// Service/Method view cannot represent it (pathForStart), and the
 		// query string rides along on RawQuery — the inner HTTP Layer
@@ -1590,6 +1598,33 @@ func buildHTTPMessage(
 		}
 	}
 	return msg
+}
+
+// methodForStart resolves the request method the Send side hands to the
+// inner HTTP Layer (USK-1252): the method observed on the client's request
+// (GRPCStartMessage.HTTPMethod, projected by applyRequestOverlay) verbatim,
+// with no case folding — RFC 9110 §9.1 methods are case-sensitive, so
+// "post" and "POST" are different requests and both are relayed as sent.
+//
+// An empty overlay falls back to POST, the gRPC-Web request method. That is
+// the zero-value path for synthetic producers (resend / fuzz) and for a
+// Start that lost the overlay, the same shape as pathForStart's empty-Path
+// fall-through and the Receive side's status 0 -> 200.
+//
+// Known divergence (documented, deliberately not changed): live traffic
+// can reach the fallback too. The HTTP/2 assembler accepts a request
+// HEADERS block with no :method (or an empty one) without an anomaly and
+// yields Method "", and the HTTP/1.x parser yields "" for a request line
+// that starts with a space. Such a request is relayed upstream as POST and
+// Flow.Method stays unset; re-emitting the missing / empty method would
+// need the HTTP Layers to carry a "method absent" marker they do not have,
+// and an empty :method / request-line method is itself malformed on the
+// upstream leg. The wire bytes remain in the recorded Envelope.Raw.
+func methodForStart(start *envelope.GRPCStartMessage) string {
+	if start.HTTPMethod != "" {
+		return start.HTTPMethod
+	}
+	return "POST"
 }
 
 // reconcileBodyFraming makes the framing headers carried over from the

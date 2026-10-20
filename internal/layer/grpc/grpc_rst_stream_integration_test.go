@@ -10,8 +10,9 @@
 // and reset the stream half-way through, once from each side:
 //
 //   - upstream: a raw x/net/http2 Framer origin sends response HEADERS and
-//     two LPM messages, then RST_STREAM(INTERNAL_ERROR) once the client has
-//     received both. grpc-go's server cannot emit a non-zero RST_STREAM on
+//     two LPM messages, then RST_STREAM(<code>) once the client has
+//     received both; the proxy relays that exact code to the client
+//     (USK-1269). grpc-go's server cannot emit a non-zero RST_STREAM on
 //     demand, hence the hand-rolled origin.
 //   - client: the grpc-go client cancels its call context after receiving
 //     both messages, which puts RST_STREAM(CANCEL) on the wire.
@@ -51,9 +52,10 @@ var rstOriginMessages = [][]byte{[]byte("msg-0"), []byte("msg-1")}
 type rstOrigin struct {
 	ln net.Listener
 
-	// resetNow, when closed, makes the origin send
-	// RST_STREAM(INTERNAL_ERROR) on the RPC stream.
-	resetNow chan struct{}
+	// resetNow, when closed, makes the origin send RST_STREAM(resetCode)
+	// on the RPC stream.
+	resetNow  chan struct{}
+	resetCode http2.ErrCode
 
 	mu        sync.Mutex
 	conns     []net.Conn
@@ -65,6 +67,13 @@ type rstOrigin struct {
 }
 
 func startRSTOrigin(t *testing.T, issuer *cert.Issuer) *rstOrigin {
+	t.Helper()
+	return startRSTOriginWithCode(t, issuer, http2.ErrCodeInternal)
+}
+
+// startRSTOriginWithCode is startRSTOrigin with the RST_STREAM error code the
+// origin resets the RPC stream with.
+func startRSTOriginWithCode(t *testing.T, issuer *cert.Issuer, resetCode http2.ErrCode) *rstOrigin {
 	t.Helper()
 	leaf, err := issuer.GetCertificate("localhost")
 	if err != nil {
@@ -78,10 +87,11 @@ func startRSTOrigin(t *testing.T, issuer *cert.Issuer) *rstOrigin {
 		t.Fatalf("listen: %v", err)
 	}
 	o := &rstOrigin{
-		ln:       ln,
-		resetNow: make(chan struct{}),
-		rstFrom:  make(map[uint32]http2.ErrCode),
-		gotRST:   make(chan struct{}),
+		ln:        ln,
+		resetNow:  make(chan struct{}),
+		resetCode: resetCode,
+		rstFrom:   make(map[uint32]http2.ErrCode),
+		gotRST:    make(chan struct{}),
 	}
 	o.wg.Add(1)
 	go o.acceptLoop()
@@ -217,7 +227,7 @@ func (o *rstOrigin) respond(fr *http2.Framer, write func(func() error) error, st
 	}
 	select {
 	case <-o.resetNow:
-		_ = write(func() error { return fr.WriteRSTStream(streamID, http2.ErrCodeInternal) })
+		_ = write(func() error { return fr.WriteRSTStream(streamID, o.resetCode) })
 	case <-connDone:
 	}
 }
@@ -308,42 +318,59 @@ func assertRSTRecording(t *testing.T, store *testStore, wantFailureReason string
 
 // TestGRPC_UpstreamRSTStreamMidRPCProducesErrorState: the upstream resets a
 // server-streaming RPC after two messages. The client must observe the
-// abnormal termination as a non-OK status (not a clean io.EOF) and the
-// Stream must be recorded with State=error.
+// abnormal termination with the upstream's own RST_STREAM error code — the
+// proxy relays it verbatim instead of substituting CANCEL (USK-1269) — and
+// the Stream must be recorded with State=error.
 func TestGRPC_UpstreamRSTStreamMidRPCProducesErrorState(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	ca, issuer := makeCA(t)
-	origin := startRSTOrigin(t, issuer)
-	proxyAddr, store := startGRPCMITMProxy(t, ctx, ca, issuer, pipelineOpts{})
-
-	cc := dialGRPCViaProxy(ctx, t, proxyAddr, origin.addr())
-	defer cc.Close()
-
-	cs := startServerStreamWithTwoMessages(t, ctx, cc)
-	close(origin.resetNow)
-
-	var extra []byte
-	err := cs.RecvMsg(&extra)
-	if err == nil {
-		t.Fatalf("RecvMsg after upstream RST_STREAM returned a message %q, want error", extra)
+	tests := []struct {
+		name      string
+		resetCode http2.ErrCode
+		// wantCode is grpc-go's mapping of the RST_STREAM code a client
+		// receives (google.golang.org/grpc/internal/transport http2ErrConvTab).
+		wantCode codes.Code
+		// wantFailureReason: ENHANCE_YOUR_CALM has no dedicated
+		// classification and is recorded as "aborted" (current behaviour).
+		wantFailureReason string
+	}{
+		{name: "INTERNAL_ERROR", resetCode: http2.ErrCodeInternal, wantCode: codes.Internal, wantFailureReason: "internal_error"},
+		{name: "ENHANCE_YOUR_CALM", resetCode: http2.ErrCodeEnhanceYourCalm, wantCode: codes.ResourceExhausted, wantFailureReason: "aborted"},
 	}
-	if errors.Is(err, io.EOF) {
-		t.Fatalf("RecvMsg after upstream RST_STREAM = io.EOF (clean end), want an RST-derived status")
-	}
-	// The proxy resets the client side of the stream; grpc-go reports that
-	// as "stream terminated by RST_STREAM". The proxy maps the upstream
-	// reset to its own client-side reset (session closeClient -> CANCEL);
-	// only the fact of the reset is asserted here, not the error code.
-	if c := status.Code(err); c == codes.OK {
-		t.Fatalf("RecvMsg after upstream RST_STREAM status = OK, want non-OK (err=%v)", err)
-	}
-	if !strings.Contains(err.Error(), "RST_STREAM") {
-		t.Fatalf("RecvMsg after upstream RST_STREAM err = %v, want an RST_STREAM termination", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
 
-	assertRSTRecording(t, store, "internal_error")
+			ca, issuer := makeCA(t)
+			origin := startRSTOriginWithCode(t, issuer, tt.resetCode)
+			proxyAddr, store := startGRPCMITMProxy(t, ctx, ca, issuer, pipelineOpts{})
+
+			cc := dialGRPCViaProxy(ctx, t, proxyAddr, origin.addr())
+			defer cc.Close()
+
+			cs := startServerStreamWithTwoMessages(t, ctx, cc)
+			close(origin.resetNow)
+
+			var extra []byte
+			err := cs.RecvMsg(&extra)
+			if err == nil {
+				t.Fatalf("RecvMsg after upstream RST_STREAM returned a message %q, want error", extra)
+			}
+			if errors.Is(err, io.EOF) {
+				t.Fatalf("RecvMsg after upstream RST_STREAM = io.EOF (clean end), want an RST-derived status")
+			}
+			// grpc-go reports a peer reset as "stream terminated by
+			// RST_STREAM with error code: <CODE>"; the code must be the
+			// upstream's, exactly as a direct connection would show.
+			if c := status.Code(err); c != tt.wantCode {
+				t.Errorf("RecvMsg after upstream RST_STREAM status = %v, want %v (err=%v)", c, tt.wantCode, err)
+			}
+			if want := "RST_STREAM with error code: " + tt.resetCode.String(); !strings.Contains(err.Error(), want) {
+				t.Errorf("RecvMsg after upstream RST_STREAM err = %v, want it to contain %q", err, want)
+			}
+
+			assertRSTRecording(t, store, tt.wantFailureReason)
+		})
+	}
 }
 
 // TestGRPC_ClientRSTStreamMidRPCProducesErrorState: the client cancels a

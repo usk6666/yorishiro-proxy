@@ -462,6 +462,81 @@ func TestRelay_SyntheticStartWithoutPathRebuilds(t *testing.T) {
 	}
 }
 
+// --- USK-1252: the observed request method reaches the upstream ---
+
+// TestRelay_SendStartMethodRoundTrip pins USK-1252: the Send-side Start
+// carries the client's observed HTTP request method on HTTPMethod
+// (verbatim, no case folding), the Receive-side Start carries none, and
+// the opposite-role Send hands that method to its inner HTTP Layer
+// instead of forcing POST. Cases cover both relay directions' inputs
+// and the Clone()d-Start path (intercept modify_and_forward), which drops
+// the per-RPC Opaque — the method must ride on the Message itself.
+func TestRelay_SendStartMethodRoundTrip(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		clone  bool
+	}{
+		{name: "get", method: "GET"},
+		{name: "put", method: "PUT"},
+		{name: "lowercase_post_verbatim", method: "post"},
+		{name: "head", method: "HEAD"},
+		{name: "post_regression", method: "POST"},
+		{name: "get_survives_clone", method: "GET", clone: true},
+	}
+	frame := EncodeFrame(false, false, []byte("ping"))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hdrs := []envelope.KeyValue{{Name: "Content-Type", Value: "application/grpc-web+proto"}}
+			in := requestEnv(hdrs, frame, "/pkg.Svc/Do", "")
+			in.Message.(*envelope.HTTPMessage).Method = tc.method
+			out := relay(t, in, RoleServer, RoleClient, func(envs []*envelope.Envelope) []*envelope.Envelope {
+				if sm := startOf(t, envs); sm.HTTPMethod != tc.method {
+					t.Errorf("Send Start overlay HTTPMethod = %q, want %q", sm.HTTPMethod, tc.method)
+				}
+				if tc.clone {
+					envs[0] = envs[0].Clone()
+				}
+				return envs
+			})
+			if out.Method != tc.method {
+				t.Errorf("HTTPMessage.Method = %q, want %q", out.Method, tc.method)
+			}
+		})
+	}
+}
+
+// TestRelay_ReceiveStartHasNoHTTPMethod — the response-side Start never
+// carries a request method (applyRequestOverlay is Send-only).
+func TestRelay_ReceiveStartHasNoHTTPMethod(t *testing.T) {
+	hdrs := []envelope.KeyValue{{Name: "Content-Type", Value: "application/grpc-web+proto"}}
+	in := responseEnv(hdrs, validResponseBody(), 200, "OK")
+	_ = relay(t, in, RoleClient, RoleServer, func(envs []*envelope.Envelope) []*envelope.Envelope {
+		if sm := startOf(t, envs); sm.HTTPMethod != "" {
+			t.Errorf("Receive Start overlay HTTPMethod = %q, want empty", sm.HTTPMethod)
+		}
+		return envs
+	})
+}
+
+// TestRelay_SyntheticStartWithoutMethodSendsPOST — a Start built without
+// an HTTPMethod (a synthetic producer: resend / fuzz) is still sent as
+// POST, the gRPC-Web request method.
+func TestRelay_SyntheticStartWithoutMethodSendsPOST(t *testing.T) {
+	dst := newMockChannel("s-syn-m")
+	send := Wrap(dst, RoleClient)
+	defer send.Close()
+	out := sendAll(t, send, dst,
+		&envelope.Envelope{StreamID: "s-syn-m", Direction: envelope.Send, Protocol: envelope.ProtocolGRPCWeb,
+			Message: &envelope.GRPCStartMessage{Service: "pkg.Svc", Method: "Do", ContentType: "application/grpc-web+proto"}},
+		&envelope.Envelope{StreamID: "s-syn-m", Direction: envelope.Send, Protocol: envelope.ProtocolGRPCWeb,
+			Message: &envelope.GRPCEndMessage{}},
+	)
+	if out.Method != "POST" {
+		t.Errorf("HTTPMessage.Method = %q, want %q", out.Method, "POST")
+	}
+}
+
 // --- T11 (N1): empty-body responses are delivered ---
 
 func TestRelay_EmptyBodyResponseDelivered(t *testing.T) {

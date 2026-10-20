@@ -494,9 +494,16 @@ func (l *Layer) handleStreamRST(f *frame.Frame) error {
 		l.gracefulCloseStream(f.Header.StreamID)
 		return nil
 	}
+	// The only place a peer wire code is attached (USK-1269): Code is the
+	// lossy classification; PeerWireCode keeps the exact value so the
+	// session can relay it to the other leg verbatim. Proxy-synthesized
+	// terminations (GOAWAY refusals, local resets, MarkTerminatedWithRST)
+	// never set it.
 	se := &layer.StreamError{
-		Code:   translateH2StreamError(code),
-		Reason: ErrCodeString(code),
+		Code:            translateH2StreamError(code),
+		Reason:          ErrCodeString(code),
+		PeerWireCode:    code,
+		HasPeerWireCode: true,
 	}
 	l.resetStreamWrites(f.Header.StreamID, se)
 	l.failStream(f.Header.StreamID, se)
