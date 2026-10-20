@@ -307,6 +307,16 @@ func lastColonIPv6Reading(value string) (string, int, bool) {
 	return h, port, true
 }
 
+// ReasonAbsoluteFormAuthorityUninterpretable is the block reason for an
+// absolute-form request-target whose authority cannot be parsed.
+const ReasonAbsoluteFormAuthorityUninterpretable = "blocked: absolute-form request-target authority is uninterpretable"
+
+// CheckAbsoluteFormAuthority checks the authority of an HTTP/1.x
+// absolute-form request-target as a name leg. Scaffolding (USK-1274).
+func (s *TargetScope) CheckAbsoluteFormAuthority(scheme, authority, path, dialTarget string) (allowed bool, reason string) {
+	return true, ""
+}
+
 // splitHostHeaderValue splits a Host header value into host and port for
 // CheckHostHeader. ok is false when the value cannot be interpreted,
 // including a bracket whose content is not an IPv6 literal.

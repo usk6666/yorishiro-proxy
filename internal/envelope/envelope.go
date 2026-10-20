@@ -352,6 +352,11 @@ type EnvelopeContext struct {
 	// the connection's TargetHost / SNI.
 	RequestAuthority string
 
+	// AbsoluteFormAuthority is the authority of an HTTP/1.x absolute-form
+	// request-target (RFC 9112 §3.2.2), verbatim from the wire. Scaffolding
+	// (USK-1274).
+	AbsoluteFormAuthority string
+
 	// Synthetic is true when this Envelope was synthesized by the proxy
 	// (not observed on the wire). The first and currently only producer is
 	// the USK-854 WS hold-window keepalive injection path in
