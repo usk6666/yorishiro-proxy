@@ -598,3 +598,60 @@ func TestInterceptHoldQueue_Result_Shape(t *testing.T) {
 	}
 	<-actionCh // drain
 }
+
+// TestInterceptHoldQueue_HTTP_AutoContentLength_Rejected guards the removal
+// of http.auto_content_length (USK-1258). The field was accepted but read by
+// nothing: a body change on HTTP/1.x always re-stamps Content-Length. A
+// caller that still sends it must get a loud schema error naming the field,
+// and the held item must stay queued so the caller can retry without it.
+func TestInterceptHoldQueue_HTTP_AutoContentLength_Rejected(t *testing.T) {
+	queue, cs := setupHoldQueueSession(t)
+
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Method:  "POST",
+			Path:    "/",
+			Headers: []envelope.KeyValue{{Name: "Host", Value: "example.com"}},
+			Body:    []byte("orig"),
+		},
+	}
+	_ = holdInBackground(t, queue, env)
+	entry := waitForHeldEntry(t, queue, 2*time.Second)
+
+	args := map[string]any{
+		"action": "modify_and_forward",
+		"params": map[string]any{"intercept_id": entry.ID},
+		"http": map[string]any{
+			"body":                "changed",
+			"auto_content_length": false,
+		},
+	}
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "intercept",
+		Arguments: args,
+	})
+	var msg string
+	switch {
+	case err != nil:
+		msg = err.Error()
+	case res.IsError:
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg += tc.Text
+			}
+		}
+	default:
+		t.Fatal("intercept with http.auto_content_length succeeded; want an unknown-property error")
+	}
+	if !strings.Contains(msg, "auto_content_length") {
+		t.Errorf("error = %q, want it to name auto_content_length", msg)
+	}
+	if queue.Len() != 1 {
+		t.Errorf("queue.Len() after rejected call = %d, want 1 (entry must NOT be consumed)", queue.Len())
+	}
+	if err := queue.Release(entry.ID, &common.HoldAction{Type: common.ActionRelease}); err != nil {
+		t.Errorf("cleanup Release: %v", err)
+	}
+}
