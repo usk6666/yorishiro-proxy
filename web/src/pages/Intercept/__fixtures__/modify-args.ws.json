@@ -1,0 +1,10 @@
+{
+  "action": "modify_and_forward",
+  "params": {
+    "intercept_id": "INTERCEPT_ID"
+  },
+  "ws": {
+    "payload": "pong",
+    "body_encoding": "text"
+  }
+}
