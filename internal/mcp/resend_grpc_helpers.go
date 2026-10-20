@@ -968,10 +968,13 @@ func resendGRPCScopeScheme(plan *resendGRPCPlan) string {
 // (nil, nil) fail-soft for Start and End (HPACK lives in the HTTP/2
 // layer, not regenerable in isolation) and for Compressed=true Data
 // (encoding lives on per-channel directionState). RecordStep preserves
-// the original Raw on fail-soft per the USK-666 contract.
+// the original Raw on fail-soft per the USK-666 contract. The gRPC
+// raw-wins policy refuses a plugin msg["raw"] on Start/End (HPACK header
+// blocks) and honours it on Data (RFC-001 §9.3 D4).
 func buildResendGRPCEncoderRegistry() *pipeline.WireEncoderRegistry {
 	encoders := pipeline.NewWireEncoderRegistry()
 	encoders.Register(envelope.ProtocolGRPC, grpclayer.EncodeWireBytes)
+	encoders.RegisterRawWinsPolicy(envelope.ProtocolGRPC, grpclayer.RawWinsSupported)
 	return encoders
 }
 

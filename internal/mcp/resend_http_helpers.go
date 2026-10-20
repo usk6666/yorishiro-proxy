@@ -699,11 +699,14 @@ func (s *Server) buildResendHTTPPipeline(httpVersion string) *pipeline.Pipeline 
 // PluginStepPost and RecordStep for one resend / fuzz run: HTTP/1 framing
 // for an http/1.1 send, HPACK-encoded HTTP/2 frames for h2 / h2c — the same
 // per-route choice proxybuild makes for the live path
-// (defaultHTTP1WireEncoderRegistry / defaultHTTP2WireEncoderRegistry).
+// (defaultHTTP1WireEncoderRegistry / defaultHTTP2WireEncoderRegistry),
+// including the h2 raw-wins policy that refuses a plugin msg["raw"] on an
+// HTTPMessage (RFC-001 §9.3 D4).
 func resendHTTPEncoderRegistry(httpVersion string) *pipeline.WireEncoderRegistry {
 	encoders := pipeline.NewWireEncoderRegistry()
 	if isResendHTTP2(httpVersion) {
 		encoders.Register(envelope.ProtocolHTTP, httpaggregator.EncodeWireBytes)
+		encoders.RegisterRawWinsPolicy(envelope.ProtocolHTTP, httpaggregator.RawWinsSupported)
 	} else {
 		encoders.Register(envelope.ProtocolHTTP, http1.EncodeWireBytes)
 	}
