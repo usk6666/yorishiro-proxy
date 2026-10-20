@@ -1106,7 +1106,10 @@ func (c *grpcChannel) dirStateLocked(d envelope.Direction) *directionState {
 // GRPCStartMessage / GRPCEndMessage envelopes always rebuild the HPACK
 // header field list from struct fields; Envelope.Raw on these types is
 // informational only (the wire-observed HPACK block bytes change every
-// time HPACK dynamic tables differ).
+// time HPACK dynamic tables differ). A plugin msg["raw"] on them is
+// refused by the Pipeline before RecordStep (RFC-001 §9.3 D4; see
+// RawWinsSupported in raw_wins.go); one that still arrives is logged and
+// sent from its struct fields.
 //
 // GRPCDataMessage envelopes prefer Envelope.Raw verbatim when non-empty
 // (to round-trip exact wire bytes). Otherwise the wrapper re-encodes
@@ -1130,6 +1133,7 @@ func (c *grpcChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 		return fmt.Errorf("grpc: Send %T: %w", env.Message, errSendAfterEnd)
 	}
 
+	warnRawWinsIgnored(ctx, env)
 	switch m := env.Message.(type) {
 	case *envelope.GRPCStartMessage:
 		return c.sendStart(ctx, env, m)

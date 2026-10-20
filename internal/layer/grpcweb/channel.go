@@ -916,7 +916,9 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 // in wire form (base64 text for -text content-types), which sendEndLocked
 // forwards verbatim. Raw on any other Start (e.g. a (grpc-web, on_start)
 // plugin assigning msg["raw"]) is ignored, as it was before USK-1203 — it
-// never becomes a prefix of a re-assembled body (review F-3).
+// never becomes a prefix of a re-assembled body (review F-3). The Pipeline
+// refuses such a plugin raw write before RecordStep (RFC-001 §9.3 D4; see
+// RawWinsSupported), so the recorded variant matches the wire.
 func (c *channel) sendStartLocked(env *envelope.Envelope, m *envelope.GRPCStartMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

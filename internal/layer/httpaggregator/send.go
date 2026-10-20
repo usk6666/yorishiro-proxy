@@ -49,6 +49,13 @@ const sendChunkSize = 64 * 1024
 // rejected as a STREAM_CLOSED stream error (observed against Vercel-hosted
 // origins emitting 103 Early Hints; symptom: page never paints).
 //
+// Envelope.Raw is never written: an h2 HTTPMessage's Raw is unframed HPACK
+// fragments + DATA payloads against the source connection's dynamic table
+// (RFC-001 §9.3 D4 h2 policy; see RawWinsSupported). The Pipeline refuses a
+// plugin msg["raw"] on this route before RecordStep; a raw-authoritative
+// envelope that still arrives here is logged (warnRawWinsIgnored) and
+// rendered from its Message.
+//
 // TODO(USK-637 follow-up / USK-617 perf): Opaque zero-copy fast path
 // dropped for N6.7 — Send always re-encodes via the event path. Restore
 // if profiling warrants.
@@ -57,6 +64,7 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 	if !ok {
 		return fmt.Errorf("httpaggregator: Send requires *HTTPMessage, got %T", env.Message)
 	}
+	warnRawWinsIgnored(ctx, env)
 
 	// USK-833: capture the paired request line on the upstream-side
 	// aggregator (RoleClient.Send transports the Send-direction request

@@ -599,12 +599,16 @@ func validateDeps(deps Deps) error {
 }
 
 // defaultSharedEncoders registers the 4 non-conflicting per-protocol
-// encoders (ws / grpc / grpc-web / sse) on r. The HTTP encoder is left
-// unset; route-specific helpers add it.
+// encoders (ws / grpc / grpc-web / sse) on r, plus the gRPC / gRPC-Web
+// raw-wins policies (RFC-001 §9.3 D4: msg["raw"] on a Start/End header
+// block is refused, on Data honoured). The HTTP encoder is left unset;
+// route-specific helpers add it.
 func defaultSharedEncoders(r *pipeline.WireEncoderRegistry) {
 	r.Register(envelope.ProtocolWebSocket, ws.EncodeWireBytes)
 	r.Register(envelope.ProtocolGRPC, grpclayer.EncodeWireBytes)
+	r.RegisterRawWinsPolicy(envelope.ProtocolGRPC, grpclayer.RawWinsSupported)
 	r.Register(envelope.ProtocolGRPCWeb, grpcweb.EncodeWireBytes)
+	r.RegisterRawWinsPolicy(envelope.ProtocolGRPCWeb, grpcweb.RawWinsSupported)
 	r.Register(envelope.ProtocolSSE, sse.EncodeWireBytes)
 }
 
@@ -620,11 +624,14 @@ func defaultHTTP1WireEncoderRegistry() *pipeline.WireEncoderRegistry {
 // defaultHTTP2WireEncoderRegistry returns a registry for the h2 route:
 // 4 shared encoders plus httpaggregator.EncodeWireBytes for
 // envelope.ProtocolHTTP. Plugin-mutated HTTPMessage envelopes round-trip
-// to wire as HPACK-encoded H2 frames.
+// to wire as HPACK-encoded H2 frames. A plugin msg["raw"] on an
+// HTTPMessage is refused on this route (httpaggregator.RawWinsSupported,
+// RFC-001 §9.3 D4): h2 Raw is unframed HPACK and cannot be written.
 func defaultHTTP2WireEncoderRegistry() *pipeline.WireEncoderRegistry {
 	r := pipeline.NewWireEncoderRegistry()
 	defaultSharedEncoders(r)
 	r.Register(envelope.ProtocolHTTP, httpaggregator.EncodeWireBytes)
+	r.RegisterRawWinsPolicy(envelope.ProtocolHTTP, httpaggregator.RawWinsSupported)
 	return r
 }
 
