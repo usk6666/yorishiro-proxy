@@ -241,6 +241,9 @@ func (c *channel) CloseRefused() error {
 	return nil
 }
 
+// CloseWithCode is a scaffold (USK-1269 red commit).
+func (c *channel) CloseWithCode(code uint32) error { return c.Close() }
+
 // closeWith is the single teardown path behind Close and CloseRefused;
 // closeInner cascades to the inner Channel.
 func (c *channel) closeWith(closeInner func() error) {

@@ -57,6 +57,16 @@ func (c ErrorCode) String() string {
 type StreamError struct {
 	Code   ErrorCode
 	Reason string
+
+	// PeerWireCode is the protocol-native error code the peer itself put on
+	// the wire (HTTP/2: the RST_STREAM error code, RFC 9113 §7), verbatim.
+	// Code is a lossy classification of it; PeerWireCode is what a MITM
+	// relays to the other leg. Valid only when HasPeerWireCode is true:
+	// proxy-synthesized terminations (local resets, GOAWAY refusals,
+	// wrapper-local failures) never set it. USK-1269.
+	PeerWireCode uint32
+	// HasPeerWireCode reports whether PeerWireCode was observed on the wire.
+	HasPeerWireCode bool
 }
 
 // Error implements the error interface.

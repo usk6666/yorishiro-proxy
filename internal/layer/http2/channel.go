@@ -661,6 +661,12 @@ func (c *channel) CloseRefused() error {
 	return nil
 }
 
+// CloseWithCode is a scaffold (USK-1269 red commit).
+func (c *channel) CloseWithCode(code uint32) error {
+	c.closeStream(false)
+	return nil
+}
+
 // closeStream is the single teardown path behind Close and CloseRefused.
 func (c *channel) closeStream(refused bool) {
 	c.closeSendOnce.Do(func() {
