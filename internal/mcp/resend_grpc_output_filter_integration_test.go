@@ -50,9 +50,13 @@ var usk1276GRPCServiceDesc = grpc.ServiceDesc{
 				if err := dec(&req); err != nil {
 					return nil, err
 				}
+				// Two values under one key: grpc-go emits a key's values
+				// in slice order, whereas distinct keys come out in map
+				// order — so duplicate values are the deterministic way
+				// to observe order preservation.
 				if err := grpc.SetHeader(ctx, metadata.Pairs(
 					"x-contact", "alice@example.com",
-					"x-plain", "nothing-here",
+					"x-contact", "nothing-here",
 				)); err != nil {
 					return nil, err
 				}
@@ -109,9 +113,19 @@ func indexOfHeaderKV(list []headerKV, name string) int {
 // order is preserved; the recorded flows keep the cleartext.
 func TestResendGRPC_OutputFilter_MasksMetadataAndTrailers(t *testing.T) {
 	store := newTestStore(t)
+	// Metadata / trailers are masked by header-target rules (the same
+	// FilterOutputHeaders policy query applies to gRPC metadata). The
+	// built-in email preset is body-target only, so declare the rule
+	// with an explicit headers target.
 	engine, err := safety.NewEngine(safety.Config{
 		OutputRules: []safety.RuleConfig{
-			{Preset: "email", Action: "mask", Replacement: "[EMAIL]"},
+			{
+				ID:          "mask-email",
+				Pattern:     `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`,
+				Targets:     []string{"headers"},
+				Action:      "mask",
+				Replacement: "[EMAIL]",
+			},
 		},
 	})
 	if err != nil {
@@ -147,19 +161,20 @@ func TestResendGRPC_OutputFilter_MasksMetadataAndTrailers(t *testing.T) {
 	decodeResendGRPCResult(t, res, &result)
 
 	// start_metadata: masked, order preserved.
-	ci := indexOfHeaderKV(result.StartMetadata, "x-contact")
-	pi := indexOfHeaderKV(result.StartMetadata, "x-plain")
-	if ci < 0 || pi < 0 {
-		t.Fatalf("start_metadata missing x-contact/x-plain: %+v", result.StartMetadata)
+	var contacts []string
+	for _, kv := range result.StartMetadata {
+		if kv.Name == "x-contact" {
+			contacts = append(contacts, kv.Value)
+		}
 	}
-	if ci > pi {
-		t.Errorf("start_metadata order changed: x-contact at %d, x-plain at %d", ci, pi)
+	if len(contacts) != 2 {
+		t.Fatalf("start_metadata x-contact values = %v, want 2 entries: %+v", contacts, result.StartMetadata)
 	}
-	if got := result.StartMetadata[ci].Value; got != "[EMAIL]" {
-		t.Errorf("start_metadata x-contact = %q, want %q", got, "[EMAIL]")
+	if contacts[0] != "[EMAIL]" {
+		t.Errorf("start_metadata x-contact[0] = %q, want %q", contacts[0], "[EMAIL]")
 	}
-	if got := result.StartMetadata[pi].Value; got != "nothing-here" {
-		t.Errorf("start_metadata x-plain = %q, want unchanged %q", got, "nothing-here")
+	if contacts[1] != "nothing-here" {
+		t.Errorf("start_metadata x-contact[1] = %q, want unchanged %q (order preserved)", contacts[1], "nothing-here")
 	}
 
 	// end.trailers: masked.
