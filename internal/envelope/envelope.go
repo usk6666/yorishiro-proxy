@@ -352,6 +352,24 @@ type EnvelopeContext struct {
 	// the connection's TargetHost / SNI.
 	RequestAuthority string
 
+	// AbsoluteFormAuthority is the authority component of an HTTP/1.x
+	// absolute-form request-target ("GET http://u@Host:8080/p HTTP/1.1" →
+	// "u@Host:8080"), verbatim from the wire: userinfo, casing and port
+	// are kept and nothing is validated. Empty for origin-form,
+	// asterisk-form and authority-form targets, for an empty authority,
+	// for every protocol other than HTTP/1.x, and on Receive envelopes.
+	// Set by the client-facing HTTP/1.x Layer on the request envelope only.
+	//
+	// USK-1274: HTTPMessage.Authority carries the Host header when one is
+	// present, but RFC 9112 §3.2.2 has a server that receives absolute-form
+	// route on the URI authority and ignore Host. The request-target is
+	// forwarded verbatim, so HTTPScopeStep judges this value as a name leg
+	// (connector.TargetScope.CheckAbsoluteFormAuthority). It is read-only
+	// diagnostic context: it is never written to the wire or recorded, and
+	// changing it does not change the request-target — that is not a
+	// writable knob (an HTTPMessage field would suggest it is).
+	AbsoluteFormAuthority string
+
 	// Synthetic is true when this Envelope was synthesized by the proxy
 	// (not observed on the wire). The first and currently only producer is
 	// the USK-854 WS hold-window keepalive injection path in

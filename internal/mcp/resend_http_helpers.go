@@ -666,16 +666,23 @@ func resolveDialAuthority(authority string, useTLS bool) (addr, sni string, err 
 // line from msg.Headers and never from msg.Authority, so a `headers` list
 // naming a denied vhost reached it on an allowed authority. The Host legs
 // use the canonical leg's scheme and the wire-form path.
+//
+// USK-1274: an absolute-form path (`http://denied.example/`) is written
+// verbatim as the request-target, and a server routes on its authority,
+// not on Host (RFC 9112 §3.2.2). That authority is judged against addr
+// like a Host value (checkAbsoluteFormPathLeg); the path is not rewritten.
 func (s *Server) checkResendHTTPScope(msg *envelope.HTTPMessage, addr, overrideHost string) error {
-	return s.checkResendHTTPScopeHostHeaders(msg, addr, overrideHost, msg.Headers)
+	return s.checkResendHTTPScopeHostHeaders(msg, addr, overrideHost, msg.Headers, true)
 }
 
 // checkResendHTTPScopeHostHeaders is checkResendHTTPScope with the Host
 // legs judged on hostHeaders instead of msg.Headers. resend_http always
 // passes msg.Headers; fuzz_http's plan check passes the base headers
 // minus the ones every variant rewrites (fuzzHTTPPlanHostHeaders), which
-// checkFuzzHTTPVariantScope judges per variant instead.
-func (s *Server) checkResendHTTPScopeHostHeaders(msg *envelope.HTTPMessage, addr, overrideHost string, hostHeaders []envelope.KeyValue) error {
+// checkFuzzHTTPVariantScope judges per variant instead. checkAbsoluteForm
+// gates the absolute-form request-target leg the same way: fuzz_http's
+// plan check skips it when a position or §var§ rewrites the path.
+func (s *Server) checkResendHTTPScopeHostHeaders(msg *envelope.HTTPMessage, addr, overrideHost string, hostHeaders []envelope.KeyValue, checkAbsoluteForm bool) error {
 	canonical := resendHTTPRequestURL(msg)
 	if err := s.checkTargetScopeURL(canonical); err != nil {
 		return err
@@ -693,7 +700,13 @@ func (s *Server) checkResendHTTPScopeHostHeaders(msg *envelope.HTTPMessage, addr
 	if err := checkAuthorityNameLeg(s.connector.targetScope, scheme, msg.Authority, path, addr); err != nil {
 		return err
 	}
-	return checkHostHeaderLegs(s.connector.targetScope, scheme, hostHeaders, path, addr)
+	if err := checkHostHeaderLegs(s.connector.targetScope, scheme, hostHeaders, path, addr); err != nil {
+		return err
+	}
+	if !checkAbsoluteForm {
+		return nil
+	}
+	return checkAbsoluteFormPathLeg(s.connector.targetScope, scheme, msg, path, addr)
 }
 
 // resendHTTPRequestURL composes the canonical *url.URL used for scope

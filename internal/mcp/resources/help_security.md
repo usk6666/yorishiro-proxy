@@ -214,8 +214,10 @@ naming another host in `Host` does not escape a path rule on the real target.
 ### Host headers and allow rules
 
 The names a request carries — its authority (`Host` as parsed, HTTP/2
-`:authority`) and **every** `Host` header value (all casings, duplicates
-included; HTTP/2's regular `host` header too) — are checked as well, on live
+`:authority`), **every** `Host` header value (all casings, duplicates
+included; HTTP/2's regular `host` header too) and, for an HTTP/1.x
+absolute-form request-target (`GET http://name/path HTTP/1.1`), the URI's
+authority — are checked as well, on live
 traffic, after an intercept `modify_and_forward` or a Transform rule rewrites the
 request, and in `resend_http` / `fuzz_http` (each variant, after positions are
 applied). They are checked with a narrower allow rule than the host the
@@ -236,6 +238,14 @@ connection dials:
   rule that names domains narrows names even when the policy allows an IP.
 - A `Host` value with a port that is not a decimal number in 1–65535
   (`db.internal:abc`) is refused while any rule is set.
+- **Absolute-form request-target.** A server that receives
+  `GET http://other.example/ HTTP/1.1` routes on `other.example` and ignores
+  `Host`, and the proxy forwards the request-target as written — inside a
+  CONNECT / SOCKS5 tunnel, or on a later request of a forward-proxy
+  keep-alive connection. Its authority (userinfo stripped, the connection's
+  transport scheme deciding the default port) is judged like a `Host` value;
+  an authority that cannot be parsed, or that has more than one `@`, is
+  refused while any rule is set. The request-target is never rewritten.
 
 To stop a vhost from being reached on an allowed address, **deny** its name.
 
