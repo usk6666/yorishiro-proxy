@@ -20,6 +20,10 @@ import (
 // host case (see numericHostUnparsable).
 const numericHostReason = "blocked: host ends in a number but is not a valid IPv4 address"
 
+// unspecifiedHostReason is CheckTarget's reason for the fail-closed empty
+// or unspecified dial host case (see unspecifiedOrEmptyHost).
+const unspecifiedHostReason = "blocked: empty or unspecified host (0.0.0.0 / ::) dials the proxy host; use an explicit address such as 127.0.0.1"
+
 // canonicalScopeHost returns the form in which TargetScope compares a rule
 // hostname with a target hostname (matchHostname, hostnameCoveredBy,
 // targetRuleEqual). The steps, in order:
@@ -108,6 +112,12 @@ func numericHostUnparsable(host string) bool {
 		return true
 	}
 	return len(last) >= 2 && last[0] == '0' && last[1] == 'x' && isDigits(last[2:], 16)
+}
+
+// unspecifiedOrEmptyHost reports whether a dial host is empty or an
+// unspecified address. Not yet implemented (USK-1312 red commit).
+func unspecifiedOrEmptyHost(host string) bool {
+	return false
 }
 
 // parseLegacyIPv4 parses s with the inet_aton(3) / WHATWG IPv4 parser
