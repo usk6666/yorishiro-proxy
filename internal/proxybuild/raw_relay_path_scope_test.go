@@ -229,6 +229,11 @@ func TestRunRawRelaySession_NarrowedToPathOnlyCutByReconcile(t *testing.T) {
 		}
 	}()
 
+	// Mirror the production callers (buildOnStack, tcp_forward.go): a
+	// watcher closes the stack when the Register ctx is cancelled, which
+	// is how a revocation reaches both legs.
+	stopWatch := context.AfterFunc(ctx, func() { _ = stack.Close() })
+	defer stopWatch()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
