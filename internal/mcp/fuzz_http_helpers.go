@@ -1315,6 +1315,9 @@ func (s *Server) checkFuzzHTTPVariantScope(plan *fuzzHTTPPlan, variantMsg *envel
 	if err := s.checkTargetScopeAddrPath(connScheme, plan.dialAddr, variantMsg.Path); err != nil {
 		return err
 	}
+	if err := checkAuthorityNameLeg(s.connector.targetScope, connScheme, variantMsg.Authority, variantMsg.Path, plan.dialAddr); err != nil {
+		return err
+	}
 	// USK-1167: the encoder writes the variant's Host header lines, so each
 	// value — after headers[N].value / .name positions and §var§ expansion —
 	// is judged against the dialled address on the connection scheme.

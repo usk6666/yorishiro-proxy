@@ -231,7 +231,10 @@ func (s *Server) buildResendWSPlan(ctx context.Context, input *resendWSInput) (*
 		dialAuthority = input.TargetAddr
 	}
 	plan.useTLS = scheme == "wss"
-	plan.dialAddr, plan.sni = resolveResendWSDialTarget(dialAuthority, plan.useTLS)
+	plan.dialAddr, plan.sni, err = resolveResendWSDialTarget(dialAuthority, plan.useTLS)
+	if err != nil {
+		return nil, err
+	}
 	plan.upgradeURL = resendWSUpgradeURL(scheme, authority, upgradePath, rawQuery)
 
 	if err := populateResendWSFrame(input, plan); err != nil {
@@ -407,22 +410,15 @@ func firstFlowHeaderValue(headers map[string][]string, name string) string {
 }
 
 // resolveResendWSDialTarget produces the (host:port, sni) pair for the
-// upstream connection. authority may be host:port or just host.
-func resolveResendWSDialTarget(authority string, useTLS bool) (addr, sni string) {
-	host := authority
-	port := ""
-	if h, p, err := net.SplitHostPort(authority); err == nil {
-		host = h
-		port = p
+// upstream connection. authority may be host:port or just host; an
+// authority resolveDialAuthority refuses (USK-1264) is an error before
+// any dial.
+func resolveResendWSDialTarget(authority string, useTLS bool) (addr, sni string, err error) {
+	addr, sni, err = resolveDialAuthority(authority, useTLS)
+	if err != nil {
+		return "", "", fmt.Errorf("resend_ws: %w", err)
 	}
-	if port == "" {
-		if useTLS {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	return net.JoinHostPort(host, port), host
+	return addr, sni, nil
 }
 
 // resendWSUpgradeURL builds the canonical *url.URL used for scope and
@@ -470,16 +466,25 @@ func resendWSUpgradeURL(scheme, authority, path, rawQuery string) *url.URL {
 // canonical leg's own value also keeps the two legs of one check from
 // disagreeing on the scheme axis; lowercasing mirrors TargetScope.CheckURL,
 // which lowercases before matching.
+//
+// USK-1304 / USK-1306: the upgrade request's Host header is always
+// plan.upgradeURL.Host (buildResendWSUpgradeHeaders), so it is also
+// checked as a name leg against the dial address (checkHostHeaderLegs):
+// a port-scoped deny matches on the dial port too, and every
+// comma-separated part is deny-checked. fuzz_ws reaches this for its base
+// plan and for every variant.
 func (s *Server) checkResendWSScope(plan *resendWSPlan) error {
 	if err := s.checkTargetScopeURL(plan.upgradeURL); err != nil {
 		return err
 	}
+	scheme := strings.ToLower(plan.upgradeURL.Scheme)
 	if plan.dialAddr != plan.upgradeURL.Host {
-		if err := s.checkTargetScopeAddr(strings.ToLower(plan.upgradeURL.Scheme), plan.dialAddr); err != nil {
+		if err := s.checkTargetScopeAddr(scheme, plan.dialAddr); err != nil {
 			return err
 		}
 	}
-	return nil
+	host := []envelope.KeyValue{{Name: "Host", Value: plan.upgradeURL.Host}}
+	return checkHostHeaderLegs(s.connector.targetScope, scheme, host, envelope.WirePath(plan.upgradeURL), plan.dialAddr)
 }
 
 // buildResendWSEnvelope constructs the Send envelope and the wire bytes

@@ -330,7 +330,11 @@ func (s *Server) buildResendGRPCPlan(ctx context.Context, input *resendGRPCInput
 	if input.TargetAddr != "" {
 		dialAuthority = input.TargetAddr
 	}
-	plan.dialAddr, plan.sni = resolveResendGRPCDialTarget(dialAuthority, plan.useTLS)
+	var dialErr error
+	plan.dialAddr, plan.sni, dialErr = resolveResendGRPCDialTarget(dialAuthority, plan.useTLS)
+	if dialErr != nil {
+		return nil, dialErr
+	}
 	plan.canonicalURL = resendGRPCCanonicalURL(plan.scheme, authority, plan.service, plan.method)
 
 	if len(plan.metadata) == 0 {
@@ -720,22 +724,15 @@ func splitAndTrimComma(s string) []string {
 }
 
 // resolveResendGRPCDialTarget produces the (host:port, sni) pair for the
-// upstream connection. authority may be host:port or just host.
-func resolveResendGRPCDialTarget(authority string, useTLS bool) (addr, sni string) {
-	host := authority
-	port := ""
-	if h, p, err := net.SplitHostPort(authority); err == nil {
-		host = h
-		port = p
+// upstream connection. authority may be host:port or just host; an
+// authority resolveDialAuthority refuses (USK-1264) is an error before
+// any dial.
+func resolveResendGRPCDialTarget(authority string, useTLS bool) (addr, sni string, err error) {
+	addr, sni, err = resolveDialAuthority(authority, useTLS)
+	if err != nil {
+		return "", "", fmt.Errorf("resend_grpc: %w", err)
 	}
-	if port == "" {
-		if useTLS {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	return net.JoinHostPort(host, port), host
+	return addr, sni, nil
 }
 
 // resendGRPCCanonicalURL builds the canonical *url.URL used for scope

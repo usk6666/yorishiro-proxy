@@ -384,7 +384,7 @@ func peekForwardTarget(pc *PeekConn) (string, error) {
 		if host == "" {
 			return "", fmt.Errorf("connector: absolute URI missing authority")
 		}
-		return validForwardTarget(ensurePort(host, "80"))
+		return validForwardTarget(JoinDefaultPort(host, "80"))
 	}
 
 	// Origin-form: Host header is mandatory in HTTP/1.1.
@@ -392,12 +392,15 @@ func peekForwardTarget(pc *PeekConn) (string, error) {
 	if host == "" {
 		return "", fmt.Errorf("connector: missing Host header in origin-form request")
 	}
-	return validForwardTarget(ensurePort(host, "80"))
+	return validForwardTarget(JoinDefaultPort(host, "80"))
 }
 
-// validForwardTarget returns target when its port passes
-// SplitTargetHostPort, and an error otherwise.
-func validForwardTarget(target string) (string, error) {
+// validForwardTarget returns target when joinErr (from JoinDefaultPort) is
+// nil and target passes SplitTargetHostPort, and an error otherwise.
+func validForwardTarget(target string, joinErr error) (string, error) {
+	if joinErr != nil {
+		return "", fmt.Errorf("connector: forward target: %w", joinErr)
+	}
 	if _, _, err := SplitTargetHostPort(target); err != nil {
 		return "", fmt.Errorf("connector: forward target: %w", err)
 	}
@@ -498,16 +501,6 @@ func findHostHeader(headers [][]byte) string {
 		return string(bytes.TrimSpace(line[colon+1:]))
 	}
 	return ""
-}
-
-// ensurePort appends ":<defaultPort>" to host when host has no port suffix.
-// Bracketed IPv6 hosts ("[::1]") without a port are also handled.
-func ensurePort(host, defaultPort string) string {
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return host
-	}
-	// host had no port. JoinHostPort handles bracketed IPv6 correctly.
-	return net.JoinHostPort(host, defaultPort)
 }
 
 // writeForwardErrorResponse writes a minimal HTTP/1.1 error response to the

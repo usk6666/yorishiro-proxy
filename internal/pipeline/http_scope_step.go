@@ -35,7 +35,9 @@ import (
 // wire, would otherwise name a vhost no check saw. HTTP/2 forwards a
 // regular "host" header next to :authority, so it is checked there too.
 // The authority and the Host values are name legs
-// (connector.TargetScope.CheckNameLeg): deny rules always apply, but an
+// (connector.TargetScope.CheckAuthority / CheckHostHeader): deny rules
+// always apply — matched on the name's port or the dial port, and to
+// every comma-separated part of the value (USK-1304, USK-1306) — but an
 // allow layer that admitted the dial target through an IP-literal rule
 // does not require them to be allow-listed — same-IP different-vhost and
 // Host-injection testing stay possible while a denied name is refused.
@@ -111,14 +113,15 @@ func (s *HTTPScopeStep) checkHostPort(scheme, hostPort, path string) bool {
 }
 
 // checkNameLeg checks the request authority as a name leg against the
-// connection's dial target (TargetScope.CheckNameLeg, USK-1167): denies
-// always apply, and an allow layer that admitted the dial target through
-// an IP-literal rule does not require the authority to be allow-listed.
-// With no dial target it is the full checkHostPort check. The authority is
-// split exactly as before (lenient port parse, default port inference).
+// connection's dial target (TargetScope.CheckAuthority, USK-1167): denies
+// always apply — on the authority's port or the dial port (USK-1306), and
+// to every comma-separated part (USK-1304) — and an allow layer that
+// admitted the dial target through an IP-literal rule does not require
+// the authority to be allow-listed. With no dial target it is the full
+// check. The whole authority is split exactly as before (lenient port
+// parse, default port inference).
 func (s *HTTPScopeStep) checkNameLeg(scheme, authority, path, dialTarget string) bool {
-	host, port := splitScopeHostPort(scheme, authority)
-	allowed, _ := s.scope.CheckNameLeg(scheme, host, port, path, dialTarget)
+	allowed, _ := s.scope.CheckAuthority(scheme, authority, path, dialTarget)
 	return allowed
 }
 

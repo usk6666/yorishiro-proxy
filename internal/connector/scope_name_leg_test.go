@@ -196,7 +196,9 @@ func TestTargetScope_CheckHostHeader(t *testing.T) {
 		{"denied bare name", nil, []TargetRule{{Hostname: "denied.example"}}, "http", "denied.example", "127.0.0.1:80", false},
 		{"denied name with port", nil, []TargetRule{{Hostname: "denied.example"}}, "http", "denied.example:8080", "127.0.0.1:80", false},
 		{"denied name, port-scoped deny, default port inferred", nil, []TargetRule{{Hostname: "denied.example", Ports: []int{443}}}, "https", "denied.example", "127.0.0.1:443", false},
-		{"port-scoped deny, other port passes", nil, []TargetRule{{Hostname: "denied.example", Ports: []int{443}}}, "https", "denied.example:8443", "127.0.0.1:443", true},
+		// USK-1306: the dial port joins the deny match, so "other port" must
+		// differ from the dial port too.
+		{"port-scoped deny, other port passes", nil, []TargetRule{{Hostname: "denied.example", Ports: []int{443}}}, "https", "denied.example:8443", "127.0.0.1:8443", true},
 		{"non-decimal port fails closed", nil, []TargetRule{{Hostname: "denied.example", Ports: []int{80}}}, "http", "denied.example:abc", "127.0.0.1:80", false},
 		{"overflowing port fails closed", nil, []TargetRule{{Hostname: "denied.example", Ports: []int{80}}}, "http", "denied.example:99999999999", "127.0.0.1:80", false},
 		{"port zero fails closed", nil, []TargetRule{{Hostname: "other.example"}}, "http", "allowed.example:0", "127.0.0.1:80", false},
