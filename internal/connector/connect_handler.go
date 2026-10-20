@@ -87,7 +87,8 @@ type OnRequestHeadFailureFunc func(ctx context.Context, target string, head *htt
 
 // CONNECTHandlerConfig holds dependencies for the CONNECT handler factory.
 type CONNECTHandlerConfig struct {
-	// Negotiator parses the CONNECT request and sends 200 OK.
+	// Negotiator parses the CONNECT request and, once the target is
+	// admitted, sends 200 Connection Established.
 	Negotiator *CONNECTNegotiator
 
 	// BuildCfg configures ConnectionStack construction (TLS, proxy, host TLS).
@@ -179,7 +180,8 @@ func passDialOpts(ctx context.Context, buildCfg *BuildConfig) (DialRawOpts, erro
 }
 
 // NewCONNECTHandler returns a HandlerFunc that processes CONNECT tunnel
-// connections: negotiate → scope check → rate limit check →
+// connections: parse CONNECT → scope check → rate limit check (a denial
+// is answered 403 / 429, USK-1246) → 200 Connection Established →
 // build ConnectionStack → invoke OnStack callback.
 //
 // The handler does NOT close the underlying PeekConn — FullListener owns
@@ -194,13 +196,14 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 	return func(ctx context.Context, pc *PeekConn) error {
 		connLogger := LoggerFromContext(ctx, logger)
 
-		// Step 1: CONNECT negotiation (parses request, sends 200 OK).
+		// Step 1: parse the CONNECT request (no reply yet — the 200 is
+		// written only after the policy gates admit the target, USK-1246).
 		// USK-1162: bound the CONNECT request head by request_timeout_ms
 		// so a trickling client cannot hold the slot (nil-safe BuildCfg).
 		armed := cfg.BuildCfg.EffectiveRequestHeaderTimeout()
 		started := time.Now()
 		_ = pc.SetReadDeadline(started.Add(armed))
-		target, err := cfg.Negotiator.Negotiate(ctx, pc)
+		target, err := cfg.Negotiator.ReadRequest(ctx, pc)
 		_ = pc.SetReadDeadline(time.Time{})
 		if err != nil {
 			if errors.Is(err, ErrNotCONNECT) {
@@ -214,8 +217,10 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 
 		connLogger = connLogger.With("target", target)
 
-		// Step 2-3: scope and rate-limit policy checks.
-		if !connectPolicyAllow(cfg, target, connLogger) {
+		// Step 2-3: scope and rate-limit policy checks. A denial is
+		// answered with 403 / 429 and the connection closes (USK-1246).
+		if resp := connectPolicyReject(cfg, target, connLogger); resp != nil {
+			writeForwardResponse(pc, resp)
 			return nil
 		}
 
@@ -228,6 +233,13 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		}, connLogger)
 		defer release()
 		if !ok {
+			writeForwardErrorResponse(pc, 403, "Forbidden", connectScopeDenyDetail)
+			return nil
+		}
+
+		// The target is admitted: open the tunnel.
+		if err := cfg.Negotiator.WriteEstablished(pc); err != nil {
+			connLogger.Debug("CONNECT 200 write failed", "error", err)
 			return nil
 		}
 
@@ -266,17 +278,27 @@ func reportCONNECTHeadFailure(ctx context.Context, cfg CONNECTHandlerConfig, err
 	}
 }
 
-// connectPolicyAllow runs the scope and rate-limit gates. Returns false when
-// the connection has been rejected (a log line was emitted; caller returns).
-func connectPolicyAllow(cfg CONNECTHandlerConfig, target string, logger *slog.Logger) bool {
+// Reject-response details for the CONNECT gate. They match the plain-HTTP
+// forward gate so every connector-level gate answers in one shape.
+const (
+	connectScopeDenyDetail     = "yorishiro-proxy: target blocked by scope"
+	connectRateLimitDenyDetail = "yorishiro-proxy: target blocked by rate limit"
+)
+
+// connectPolicyReject runs the scope and rate-limit gates. It returns nil
+// when the target is admitted, otherwise the response the caller must send
+// before closing — 403 for a scope denial, 429 for a rate-limit denial
+// (USK-1246) — after emitting the denial log line. Scope runs first, so a
+// scope-denied CONNECT consumes no rate-limit token.
+func connectPolicyReject(cfg CONNECTHandlerConfig, target string, logger *slog.Logger) []byte {
 	allowed, reason, splitErr := connectScopeCheck(cfg.Scope, target)
 	if splitErr != nil {
 		logger.Debug("invalid CONNECT target", "error", splitErr)
-		return false
+		return forwardErrorResponse(400, "Bad Request", "yorishiro-proxy: invalid CONNECT target")
 	}
 	if !allowed {
 		logger.Info("CONNECT target blocked by scope", "reason", reason)
-		return false
+		return forwardErrorResponse(403, "Forbidden", connectScopeDenyDetail)
 	}
 	if cfg.RateLimiter != nil {
 		host, _, _ := net.SplitHostPort(target)
@@ -284,10 +306,10 @@ func connectPolicyAllow(cfg CONNECTHandlerConfig, target string, logger *slog.Lo
 			logger.Info("CONNECT target blocked by rate limit",
 				"limit_type", denial.LimitType,
 				"effective_rps", denial.EffectiveRPS)
-			return false
+			return forwardErrorResponse(429, "Too Many Requests", connectRateLimitDenyDetail)
 		}
 	}
-	return true
+	return nil
 }
 
 // connectScopeCheck is the CONNECT gate's scope check: scheme "https",

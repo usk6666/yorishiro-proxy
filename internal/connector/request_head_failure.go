@@ -14,7 +14,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
-// connectRequestHeadFailure classifies a CONNECTNegotiator.Negotiate error
+// connectRequestHeadFailure classifies a CONNECTNegotiator.ReadRequest error
 // (USK-1189). It returns the RequestHeadError to report, and the validated
 // host:port target, when the proxy itself ended the CONNECT request read
 // after bytes arrived: the request_timeout_ms deadline (armed) expired, or
@@ -30,7 +30,7 @@ import (
 // maxRaw. The L7 overlay — the verbatim authority and the parsed Headers —
 // is bounded by the parser limits instead (MaxLineLength for the request
 // line, the header-section limit for Headers), not by max_raw_capture_size.
-// The record is made before connectPolicyAllow, so TargetScope and the
+// The record is made before connectPolicyReject, so TargetScope and the
 // rate limiter do not gate it; only capture_scope (applied by the
 // proxybuild recorder) does. The per-record rate is bounded by
 // MaxConnections x request_timeout_ms. This is the same exposure USK-1181

@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net"
 	"sync/atomic"
@@ -65,19 +66,22 @@ const (
 )
 
 // runDeniedCONNECT drives handler with a CONNECT for target over a
-// net.Pipe whose client side then stays silent, and requires the handler
-// to return nil within connectDenialReturnWithin.
-func runDeniedCONNECT(t *testing.T, handler HandlerFunc, target string) {
+// net.Pipe whose client side then stays silent, requires the handler to
+// return nil within connectDenialReturnWithin, and returns every byte the
+// client side read before the connection closed.
+func runDeniedCONNECT(t *testing.T, handler HandlerFunc, target string) string {
 	t.Helper()
 
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
 	defer serverConn.Close()
 
+	read := make(chan []byte, 1)
 	go func() {
 		_, _ = clientConn.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
-		buf := make([]byte, 256)
-		_, _ = clientConn.Read(buf)
+		_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		got, _ := io.ReadAll(clientConn)
+		read <- got
 	}()
 
 	pc := NewPeekConn(serverConn)
@@ -93,6 +97,20 @@ func runDeniedCONNECT(t *testing.T, handler HandlerFunc, target string) {
 		}
 	case <-time.After(connectDenialReturnWithin):
 		t.Fatalf("handler did not return within %v; the denied CONNECT reached the inner peek", connectDenialReturnWithin)
+	}
+	// FullListener closes the conn once the handler returns; do the same
+	// so the client side reads EOF.
+	_ = serverConn.Close()
+	return string(<-read)
+}
+
+// assertCONNECTReject requires got to be exactly the connector's
+// text/plain reject response for status (USK-1246).
+func assertCONNECTReject(t *testing.T, got string, status int, reason, detail string) {
+	t.Helper()
+	want := string(forwardErrorResponse(status, reason, detail))
+	if got != want {
+		t.Errorf("client read %q, want %q", got, want)
 	}
 }
 
@@ -133,7 +151,8 @@ func TestNewCONNECTHandler_ScopeDenial(t *testing.T) {
 		},
 	})
 
-	runDeniedCONNECT(t, handler, "blocked.com:443")
+	got := runDeniedCONNECT(t, handler, "blocked.com:443")
+	assertCONNECTReject(t, got, 403, "Forbidden", "yorishiro-proxy: target blocked by scope")
 
 	assertSingleInfoLog(t, logs, "CONNECT target blocked by scope")
 	if stackCalled.Load() {
@@ -162,7 +181,8 @@ func TestNewCONNECTHandler_RateLimitDenial(t *testing.T) {
 		},
 	})
 
-	runDeniedCONNECT(t, handler, "limited.com:443")
+	got := runDeniedCONNECT(t, handler, "limited.com:443")
+	assertCONNECTReject(t, got, 429, "Too Many Requests", "yorishiro-proxy: target blocked by rate limit")
 
 	assertSingleInfoLog(t, logs, "CONNECT target blocked by rate limit")
 	if stackCalled.Load() {
