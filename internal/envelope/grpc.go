@@ -25,6 +25,16 @@ const (
 	AnomalyGRPCLPMTruncated AnomalyType = "GRPCLPMTruncated"
 )
 
+// AnomalyGRPCMissingStatus marks the GRPCEndMessage the native gRPC Layer
+// synthesizes for a response that ended without any grpc-status (USK-1251):
+// a Receive HEADERS frame carrying END_STREAM but no grpc-status, e.g. a
+// load balancer's bare "HEADERS(:status 503, server: lb, END_STREAM)".
+// There is no RPC status anywhere on the wire, so the End is a Status=0
+// placeholder with Raw=nil, and the opposite-side Send fabricates no
+// grpc-status for it. The native twin of the gRPC-Web
+// AnomalyMissingGRPCWebTrailer.
+const AnomalyGRPCMissingStatus AnomalyType = "GRPCMissingStatus"
+
 // GRPCStartMessage carries the gRPC metadata (HEADERS frame) that opens
 // one direction of a gRPC RPC. See RFC-001 section 3.2.3.
 //
