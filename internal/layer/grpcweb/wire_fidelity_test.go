@@ -1,6 +1,7 @@
 package grpcweb
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
+	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 )
 
 // USK-1219 (⊇ USK-1062), USK-1069 (⊇ USK-1110) and the empty-body
@@ -739,6 +741,57 @@ func TestRelay_TrailerFrameStatusLeavesHeadersAlone(t *testing.T) {
 	}
 	if string(out.Body) != string(body) {
 		t.Errorf("client-side body = %x, want the observed trailer frame %x", out.Body, body)
+	}
+}
+
+// TestRelay_TrailerFrameEndEditReachesWire pins review F-R2-1: on the
+// F-R1-1 fixture (header grpc-status 0, trailer frame grpc-status 7, no
+// data frames) a Transform set_status on the End clears env.Raw
+// (TransformEnd). The response is not trailers-only, so the edit must be
+// re-encoded into a trailer frame, with the headers left byte-identical,
+// instead of being silently dropped. The edit is driven through the real
+// rules/grpc TransformEngine and also hand-set.
+func TestRelay_TrailerFrameEndEditReachesWire(t *testing.T) {
+	observed := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "application/grpc-web+proto"},
+		{Name: "Grpc-Status", Value: "0"},
+		{Name: "X-A", Value: "1"},
+	}
+	body := EncodeFrame(true, false, []byte("grpc-status: 7\r\ngrpc-message: boom\r\n"))
+	engine := grpcrules.NewTransformEngine()
+	engine.AddRule(grpcrules.TransformRule{
+		ID: "set13", Enabled: true, Direction: grpcrules.DirectionReceive,
+		ActionType: grpcrules.TransformSetStatus, StatusValue: 13,
+	})
+	edits := map[string]func(env *envelope.Envelope, end *envelope.GRPCEndMessage){
+		"transform_engine": func(env *envelope.Envelope, end *envelope.GRPCEndMessage) {
+			if !engine.TransformEnd(context.Background(), env, end) {
+				t.Fatal("TransformEnd reported no modification")
+			}
+		},
+		"hand_set": func(env *envelope.Envelope, end *envelope.GRPCEndMessage) {
+			end.Status = 13
+			env.Raw = nil
+		},
+	}
+	for name, edit := range edits {
+		t.Run(name, func(t *testing.T) {
+			out := relay(t, responseEnv(observed, body, 200, "OK"), RoleClient, RoleServer, func(envs []*envelope.Envelope) []*envelope.Envelope {
+				last := envs[len(envs)-1]
+				edit(last, last.Message.(*envelope.GRPCEndMessage))
+				return envs
+			})
+			if got := withoutContentLength(out.Headers); !kvEqual(got, observed) {
+				t.Errorf("client-side headers:\n got  %v\n want %v", got, observed)
+			}
+			parsed, err := DecodeBody(out.Body, false)
+			if err != nil {
+				t.Fatalf("decode client-side body %x: %v", out.Body, err)
+			}
+			if parsed.TrailerFrame == nil || parsed.Trailers["grpc-status"] != "13" {
+				t.Errorf("client-side body = %x (trailers %v), want a trailer frame with grpc-status: 13", out.Body, parsed.Trailers)
+			}
+		})
 	}
 }
 
