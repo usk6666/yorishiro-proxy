@@ -1837,6 +1837,51 @@ func TestRecordStep_FlowFieldsGRPCStart_ReceiveHTTPStatus(t *testing.T) {
 	}
 }
 
+// TestRecordStep_FlowFieldsGRPCStart_SendHTTPMethod pins USK-1252: the
+// request-side Start of a gRPC-Web RPC carries the observed HTTP request
+// method on GRPCStartMessage.HTTPMethod, and the recorded Send start flow
+// must report it verbatim as Flow.Method. A Start without one (response
+// side, native gRPC, synthetic producers) leaves Method empty.
+func TestRecordStep_FlowFieldsGRPCStart_SendHTTPMethod(t *testing.T) {
+	tests := []struct {
+		name   string
+		dir    envelope.Direction
+		method string
+		want   string
+	}{
+		{"send_get", envelope.Send, "GET", "GET"},
+		{"send_post", envelope.Send, "POST", "POST"},
+		{"send_lowercase_verbatim", envelope.Send, "put", "put"},
+		{"send_without_method", envelope.Send, "", ""},
+		{"receive_has_none", envelope.Receive, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &mockWriter{}
+			step := NewRecordStep(w, nil)
+			env := &envelope.Envelope{
+				StreamID:  "rpc-method",
+				FlowID:    "rpc-method-start",
+				Direction: tt.dir,
+				Protocol:  envelope.ProtocolGRPCWeb,
+				Message: &envelope.GRPCStartMessage{
+					Service:     "pkg.Svc",
+					Method:      "Do",
+					ContentType: "application/grpc-web+proto",
+					HTTPMethod:  tt.method,
+				},
+			}
+			step.Process(context.Background(), env)
+			if len(w.flows) != 1 {
+				t.Fatalf("expected 1 flow, got %d", len(w.flows))
+			}
+			if got := w.flows[0].Method; got != tt.want {
+				t.Errorf("Flow.Method = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRecordStep_FlowFieldsGRPCStartOptionalsOmitted(t *testing.T) {
 	w := &mockWriter{}
 	step := NewRecordStep(w, nil)
