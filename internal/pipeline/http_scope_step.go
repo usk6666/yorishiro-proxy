@@ -42,6 +42,14 @@ import (
 // does not require them to be allow-listed — same-IP different-vhost and
 // Host-injection testing stay possible while a denied name is refused.
 //
+// The authority of an HTTP/1.x absolute-form request-target
+// (Envelope.Context.AbsoluteFormAuthority) is a name leg too (USK-1274):
+// the request-target is forwarded verbatim and a server that receives
+// absolute-form routes on its authority and ignores Host (RFC 9112
+// §3.2.2), so `GET http://denied.example/` behind an allowed Host — in a
+// CONNECT / SOCKS5 MITM tunnel, or on a later request of a plain forward
+// keep-alive connection — would otherwise reach a name no check saw.
+//
 // Only Send-direction HTTPMessage envelopes are checked. Receive and
 // non-HTTP messages always pass through.
 type HTTPScopeStep struct {
@@ -90,6 +98,12 @@ func (s *HTTPScopeStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMe
 	}
 	if allowed {
 		allowed = s.checkHostHeaders(scheme, msg.Headers, path, dialTarget)
+	}
+	if allowed && env.Context.AbsoluteFormAuthority != "" {
+		// USK-1274: an HTTP/1.x absolute-form request-target goes out
+		// verbatim, and a server routes on its authority, not on Host
+		// (RFC 9112 §3.2.2).
+		allowed, _ = s.scope.CheckAbsoluteFormAuthority(scheme, env.Context.AbsoluteFormAuthority, path, dialTarget)
 	}
 	if !allowed {
 		// USK-829: emit a 403 terminator on the wire. HTTPScopeStep is

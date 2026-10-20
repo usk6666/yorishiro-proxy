@@ -15,6 +15,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -252,6 +253,30 @@ func checkAuthorityNameLeg(ts *connector.TargetScope, scheme, authority, path, d
 	}
 	if allowed, reason := ts.CheckAuthority(scheme, authority, path, dialAddr); !allowed {
 		return fmt.Errorf("request blocked by target scope: authority %q is %s", authority, reason)
+	}
+	return nil
+}
+
+// checkAbsoluteFormPathLeg checks the URI authority of msg's request-target
+// when the HTTP/1 encoder would write it in absolute form (msg.Path is
+// "scheme://authority..."), as a TargetScope name leg against the dial
+// address dialAddr (connector.TargetScope.CheckAbsoluteFormAuthority,
+// USK-1274). A server that receives absolute-form routes on that authority
+// and ignores Host (RFC 9112 §3.2.2), so it is judged exactly like a Host
+// value: deny rules always apply, and an IP-literal allow on dialAddr
+// waives the allow list. The target is extracted with the HTTP/1 Layer's
+// own splitter (http1.SyntheticAbsoluteFormAuthority) and is never
+// rewritten. Returns nil in open mode and for any other target form.
+func checkAbsoluteFormPathLeg(ts *connector.TargetScope, scheme string, msg *envelope.HTTPMessage, path, dialAddr string) error {
+	if ts == nil || !ts.HasRules() {
+		return nil
+	}
+	authority := http1.SyntheticAbsoluteFormAuthority(msg)
+	if authority == "" {
+		return nil
+	}
+	if allowed, reason := ts.CheckAbsoluteFormAuthority(scheme, authority, path, dialAddr); !allowed {
+		return fmt.Errorf("request blocked by target scope: absolute-form request-target authority %q is %s", authority, reason)
 	}
 	return nil
 }

@@ -233,8 +233,10 @@ func (s *Server) buildFuzzHTTPPlan(ctx context.Context, input *fuzzHTTPInput) (*
 	// placeholder, are not judged here: their sent form only exists per
 	// variant, and checkFuzzHTTPVariantScope judges every variant's Host
 	// values after positions and §var§ expansion, before send.
+	// USK-1274: likewise the absolute-form request-target authority is
+	// judged here only when no position and no §var§ rewrites the path.
 	hostHeaders := fuzzHTTPPlanHostHeaders(baseMsg.Headers, input.Positions, meta.HostInjected)
-	if err := s.checkResendHTTPScopeHostHeaders(baseMsg, addr, input.OverrideHost, hostHeaders); err != nil {
+	if err := s.checkResendHTTPScopeHostHeaders(baseMsg, addr, input.OverrideHost, hostHeaders, !fuzzHTTPPlanPathVaries(baseMsg, input.Positions)); err != nil {
 		return nil, err
 	}
 
@@ -288,6 +290,22 @@ func fuzzHTTPPlanHostHeaders(headers []envelope.KeyValue, positions []fuzzHTTPPo
 		out = append(out, kv)
 	}
 	return out
+}
+
+// fuzzHTTPPlanPathVaries reports whether a variant's request-target path
+// can differ from the base message's: a `path` position replaces it, or it
+// carries a §var§ placeholder. raw_query cannot move the authority of an
+// absolute-form target (it is written after "?"), so it is not counted.
+func fuzzHTTPPlanPathVaries(base *envelope.HTTPMessage, positions []fuzzHTTPPosition) bool {
+	if strings.Contains(base.Path, "§") {
+		return true
+	}
+	for _, p := range positions {
+		if p.Path == "path" {
+			return true
+		}
+	}
+	return false
 }
 
 // runFuzzHTTPVariants iterates the cartesian product of all positions,
@@ -1321,7 +1339,12 @@ func (s *Server) checkFuzzHTTPVariantScope(plan *fuzzHTTPPlan, variantMsg *envel
 	// USK-1167: the encoder writes the variant's Host header lines, so each
 	// value — after headers[N].value / .name positions and §var§ expansion —
 	// is judged against the dialled address on the connection scheme.
-	return checkHostHeaderLegs(s.connector.targetScope, connScheme, variantMsg.Headers, variantMsg.Path, plan.dialAddr)
+	if err := checkHostHeaderLegs(s.connector.targetScope, connScheme, variantMsg.Headers, variantMsg.Path, plan.dialAddr); err != nil {
+		return err
+	}
+	// USK-1274: the variant's path is written verbatim as the
+	// request-target; in absolute form its authority is a name leg.
+	return checkAbsoluteFormPathLeg(s.connector.targetScope, connScheme, variantMsg, variantMsg.Path, plan.dialAddr)
 }
 
 // runFuzzHTTPSingleExchange runs one variant's send/receive cycle and
