@@ -571,14 +571,15 @@ func TestTargetScope_CheckURL_NilURL(t *testing.T) {
 		t.Errorf("CheckURL(nil) with no rules: allowed = false, reason = %q", reason)
 	}
 
-	// With allow rules: nil URL should not match (empty hostname).
+	// With allow rules: nil URL is blocked. Its hostname is empty, which
+	// fails closed before allow evaluation (USK-1312).
 	s.SetAgentRules([]TargetRule{{Hostname: "example.com"}}, nil)
 	allowed, reason = s.CheckURL(nil)
 	if allowed {
 		t.Error("CheckURL(nil) with allow rules should be blocked")
 	}
-	if reason != "not in agent allow list" {
-		t.Errorf("CheckURL(nil) reason = %q, want %q", reason, "not in agent allow list")
+	if reason != unspecifiedHostReason {
+		t.Errorf("CheckURL(nil) reason = %q, want %q", reason, unspecifiedHostReason)
 	}
 }
 

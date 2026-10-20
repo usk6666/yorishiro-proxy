@@ -114,10 +114,25 @@ func numericHostUnparsable(host string) bool {
 	return len(last) >= 2 && last[0] == '0' && last[1] == 'x' && isDigits(last[2:], 16)
 }
 
-// unspecifiedOrEmptyHost reports whether a dial host is empty or an
-// unspecified address. Not yet implemented (USK-1312 red commit).
+// unspecifiedOrEmptyHost reports whether a dial host is empty or, in
+// canonicalScopeHost form, an unspecified address: "0.0.0.0", "::", and
+// every spelling that folds to them ("[::]", "::ffff:0.0.0.0", "0:0::0",
+// "::%lo", the legacy "0" / "0.0" / "0x0" / "00"). Go's net.Dial reads an
+// empty host and an unspecified address as the local system ("[::]"
+// reaches an IPv4 127.0.0.1-only listener too), so no deny rule naming
+// 127.0.0.1 / localhost / ::1 would see such a dial. CheckTarget therefore
+// refuses it whenever rules exist (USK-1312, decision (b)); see
+// TargetScope.dialHostFailClosedLocked.
 func unspecifiedOrEmptyHost(host string) bool {
-	return false
+	if host == "" {
+		return true
+	}
+	c, isIP := canonicalScopeHostIP(host)
+	if !isIP {
+		return false
+	}
+	addr, err := netip.ParseAddr(c)
+	return err == nil && addr.Unmap().IsUnspecified()
 }
 
 // parseLegacyIPv4 parses s with the inet_aton(3) / WHATWG IPv4 parser
