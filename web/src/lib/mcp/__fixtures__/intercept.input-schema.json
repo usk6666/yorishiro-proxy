@@ -104,15 +104,8 @@
             "string"
           ]
         },
-        "auto_content_length": {
-          "description": "accepted but currently has no effect; on HTTP/1.x a body change always re-stamps Content-Length",
-          "type": [
-            "null",
-            "boolean"
-          ]
-        },
         "body": {
-          "description": "body replacement (text or base64 per body_encoding)",
+          "description": "body replacement (text or base64 per body_encoding); on HTTP/1.x a body change always drops Transfer-Encoding and re-stamps Content-Length",
           "type": [
             "null",
             "string"
