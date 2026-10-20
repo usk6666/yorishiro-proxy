@@ -2184,12 +2184,16 @@ func emitSSESyntheticEventTooLarge(
 		outEnv = env
 	}
 
-	// If the Pipeline mutated the envelope (plugin appended fields,
-	// edited the JSON payload, etc.), re-encode so the wire reflects
-	// the post-mutation state. Otherwise use the encoded bytes we
-	// already produced — sse.EncodeWireBytes is pure, so they match.
+	// A plugin msg["raw"] write that is still the last writer goes out
+	// verbatim (RFC-001 §9.3 D4, USK-1239). Otherwise, if the Pipeline
+	// mutated the envelope (plugin appended fields, edited the JSON
+	// payload, etc.), re-encode so the wire reflects the post-mutation
+	// state; else use the encoded bytes we already produced —
+	// sse.EncodeWireBytes is pure, so they match.
 	wireBytes := encoded
-	if cur, ok := outEnv.Message.(*envelope.SSEMessage); ok {
+	if outEnv.RawWins() {
+		wireBytes = outEnv.Raw
+	} else if cur, ok := outEnv.Message.(*envelope.SSEMessage); ok {
 		if cur != msg || cur.Event != "error" || cur.Data != string(payload) {
 			reEncoded, reErr := sse.EncodeWireBytes(outEnv)
 			if reErr == nil {
@@ -2536,7 +2540,9 @@ func runUpgradeSSEOverH2(
 // decide modification — comparing the encoder output to raw bytes would
 // flag every event whose upstream wire order differs from the encoder's
 // canonical order (event → id → retry → data), and a MITM must not
-// rewrite unmutated traffic.
+// rewrite unmutated traffic. A plugin msg["raw"] write that is still the
+// last writer (Envelope.RawWins) takes precedence over both — see
+// sseEventWireBytes.
 func relaySSEEvent(
 	ctx context.Context,
 	p *pipeline.Pipeline,
@@ -2601,12 +2607,30 @@ func relaySSEEvent(
 		outEnv = env
 	}
 
-	// Decide raw-vs-re-encoded payload. If the Pipeline did not touch
-	// the message fields, forward the raw bytes verbatim — preserving
-	// wire fidelity for unchanged events (field order, comments,
-	// unknown fields, "data:value" no-space round-trip).
-	if !sseMessageMutated(&snap, outEnv) {
-		return writeEventToClient(clientWriter, raw, chunkedTE)
+	return writeEventToClient(clientWriter, sseEventWireBytes(&snap, outEnv, raw, streamID), chunkedTE)
+}
+
+// sseEventWireBytes picks the bare event bytes relaySSEEvent writes for
+// a Pipeline output envelope; the caller adds the per-transport framing
+// (h1 chunked via writeEventToClient, h2 DATA via the detach writer).
+//
+//   - RFC-001 §9.3 D4 "Raw wins" (USK-1239): while a plugin's msg["raw"]
+//     write is still the last writer (outEnv.RawWins()), its bytes are
+//     the complete wire event and go out verbatim — no terminator is
+//     appended and nothing is validated. A firing Transform or an
+//     intercept modify clears the marker and hands the wire back to the
+//     Message path.
+//   - Otherwise, if the Pipeline did not touch the message fields, the
+//     upstream bytes go out verbatim — preserving wire fidelity for
+//     unchanged events (field order, comments, unknown fields,
+//     "data:value" no-space round-trip).
+//   - Otherwise the mutated message is re-encoded.
+func sseEventWireBytes(snap *envelope.SSEMessage, outEnv *envelope.Envelope, raw []byte, streamID string) []byte {
+	if outEnv.RawWins() {
+		return outEnv.Raw
+	}
+	if !sseMessageMutated(snap, outEnv) {
+		return raw
 	}
 	encoded, eerr := sse.EncodeWireBytes(outEnv)
 	if eerr != nil {
@@ -2618,9 +2642,9 @@ func relaySSEEvent(
 		slog.Warn("session: SSE re-encode failed; forwarding raw bytes",
 			slog.String("err", eerr.Error()),
 			slog.String("stream_id", streamID))
-		return writeEventToClient(clientWriter, raw, chunkedTE)
+		return raw
 	}
-	return writeEventToClient(clientWriter, encoded, chunkedTE)
+	return encoded
 }
 
 // sseMessageMutated reports whether the Pipeline's output envelope
