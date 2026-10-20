@@ -61,15 +61,20 @@ func rawProxyRequest(t *testing.T, proxyAddr, request string) (int, string) {
 // net/http server it neither rejects duplicate Host headers before
 // counting nor hides that bytes arrived. The plain-forward handler dials
 // the upstream before the Pipeline runs, so received bytes — not accepted
-// connections — tell whether a request reached it.
-func byteCountingHTTPUpstream(t *testing.T) (string, *atomic.Int64) {
+// connections — tell whether a request reached it. lastHead returns the
+// request head (request line and header lines, verbatim) of the most
+// recent request.
+func byteCountingHTTPUpstream(t *testing.T) (string, *atomic.Int64, func() string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	var received atomic.Int64
+	var (
+		received atomic.Int64
+		last     atomic.Pointer[string]
+	)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -79,16 +84,32 @@ func byteCountingHTTPUpstream(t *testing.T) (string, *atomic.Int64) {
 			go func(c net.Conn) {
 				defer c.Close()
 				_ = c.SetDeadline(time.Now().Add(15 * time.Second))
-				buf := make([]byte, 4096)
-				n, _ := c.Read(buf)
-				if n > 0 {
-					received.Add(int64(n))
-					_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+				br := bufio.NewReader(c)
+				var head strings.Builder
+				for {
+					line, err := br.ReadString('\n')
+					received.Add(int64(len(line)))
+					head.WriteString(line)
+					if err != nil {
+						return
+					}
+					if line == "\r\n" {
+						break
+					}
 				}
+				s := head.String()
+				last.Store(&s)
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
 			}(c)
 		}
 	}()
-	return ln.Addr().String(), &received
+	lastHead := func() string {
+		if p := last.Load(); p != nil {
+			return *p
+		}
+		return ""
+	}
+	return ln.Addr().String(), &received, lastHead
 }
 
 // TestE2E_HostHeaderScope_InterceptModifyHostOnly:modify_and_forward that
@@ -214,36 +235,68 @@ func TestE2E_HostHeaderScope_FuzzHTTP(t *testing.T) {
 }
 
 // TestE2E_HostHeaderScope_DuplicateHostLive: a live plain-forward request
-// carrying an allowed Host and a second, denied, `host` header is refused;
-// the recorded request keeps both header lines verbatim.
+// carrying an allowed Host and a second, denied, `host` header is refused
+// and recorded as a blocked audit Stream. A pipeline-blocked request is
+// recorded without Flow rows by design (buildPipelineDropRecorder), so the
+// read-only guarantee — the scope check never rewrites the header list —
+// is asserted on a duplicate-Host request whose values are both allowed:
+// it is forwarded, and both the upstream and the recorded raw request see
+// both Host lines verbatim (casing and order).
 func TestE2E_HostHeaderScope_DuplicateHostLive(t *testing.T) {
-	target, received := byteCountingHTTPUpstream(t)
+	target, received, lastHead := byteCountingHTTPUpstream(t)
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: hostScopePolicyConfig})
 	proxyAddr := startProxyWithPassthrough(t, h)
 
-	req := "GET http://" + target + "/dup HTTP/1.1\r\n" +
-		"Host: " + target + "\r\n" +
-		"host: denied.example\r\n" +
-		"Connection: close\r\n\r\n"
-	code, server := rawProxyRequest(t, proxyAddr, req)
+	dupRequest := func(second, path string) string {
+		return "GET http://" + target + path + " HTTP/1.1\r\n" +
+			"Host: " + target + "\r\n" +
+			"host: " + second + "\r\n" +
+			"Connection: close\r\n\r\n"
+	}
+
+	code, server := rawProxyRequest(t, proxyAddr, dupRequest("denied.example", "/dup-denied"))
 	if code != http.StatusForbidden || server != "yorishiro-proxy" {
 		t.Errorf("duplicate Host request = %d (Server %q), want the proxy's 403", code, server)
 	}
 	if got := received.Load(); got != 0 {
 		t.Errorf("upstream received %d bytes, want 0 — the second Host header reached the denied vhost", got)
 	}
+	waitBlockedHTTPStream(t, h)
 
-	blocked := waitBlockedHTTPStream(t, h)
-	id, _ := blocked["id"].(string)
+	// Guard + wire fidelity: both values allowed (vhost.example is not
+	// denied; the IP-literal allow on the dial target exempts it from the
+	// allow list).
+	code, _ = rawProxyRequest(t, proxyAddr, dupRequest("vhost.example", "/dup-allowed"))
+	if code != http.StatusOK {
+		t.Fatalf("duplicate allowed Host request = %d, want 200", code)
+	}
+	wantLines := "Host: " + target + "\r\nhost: vhost.example\r\n"
+	if head := lastHead(); !strings.Contains(head, wantLines) {
+		t.Errorf("upstream request head %q does not carry both Host lines verbatim (%q)", head, wantLines)
+	}
+	var id string
+	deadline := time.Now().Add(5 * time.Second)
+	for id == "" && time.Now().Before(deadline) {
+		for _, f := range queryHTTPFlows(t, h, map[string]any{"state": "complete"}) {
+			if u, _ := f["url"].(string); strings.Contains(u, "/dup-allowed") {
+				id, _ = f["id"].(string)
+			}
+		}
+		if id == "" {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if id == "" {
+		t.Fatalf("no complete http Stream for /dup-allowed within 5s")
+	}
 	detail := h.MustOK(t, "query", map[string]any{"resource": "flow", "id": id})
 	rawB64, _ := detail.Decoded["raw_request"].(string)
 	raw, err := base64.StdEncoding.DecodeString(rawB64)
 	if err != nil {
 		t.Fatalf("decode raw_request: %v", err)
 	}
-	want := "Host: " + target + "\r\nhost: denied.example\r\n"
-	if !strings.Contains(string(raw), want) {
-		t.Errorf("recorded raw request %q does not contain both Host lines verbatim (%q)", raw, want)
+	if !strings.Contains(string(raw), wantLines) {
+		t.Errorf("recorded raw request %q does not contain both Host lines verbatim (%q)", raw, wantLines)
 	}
 }
 
