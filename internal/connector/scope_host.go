@@ -44,9 +44,14 @@ const numericHostReason = "blocked: host ends in a number but is not a valid IPv
 //     is routed as IPv6 and stays distinct.
 //  5. Otherwise, a host the inet_aton grammar reads as an IPv4 address
 //     (parseLegacyIPv4: "2130706433", "0x7f.0.0.1", "0177.0.0.1", "127.1",
-//     "127.0.0.01") is rewritten to its dotted-quad form. Go's own resolver
-//     rejects these, but a libc resolver (GODEBUG=netdns=cgo) or an upstream
-//     proxy accepts them.
+//     "127.0.0.01") is rewritten to its dotted-quad form. A libc resolver
+//     (GODEBUG=netdns=cgo) or an upstream proxy reads these as that
+//     address. Go's pure resolver (the Linux default) does not parse them
+//     as IPs; it looks them up in DNS, applying the resolv.conf search
+//     list. So the deny side is exact, but an allow for "10.0.0.5" also
+//     admits "10.5" or "0x0a.0.0.5", which under the pure resolver dials
+//     whatever DNS returns for that name — not necessarily the allowed
+//     host. Resolver-aware gating is a follow-up (USK-1250 D2/D3).
 //
 // The input may be an attacker-controlled Host header; nothing here can
 // panic, and the "[", "]" and "[]" length guard keeps those verbatim.
@@ -83,7 +88,7 @@ func canonicalScopeHostIP(h string) (string, bool) {
 
 // numericHostUnparsable reports whether host's last label is a number —
 // the WHATWG URL Standard's "ends in a number" test: all ASCII digits, or
-// "0x" followed by hex digits — while the host as a whole is not an
+// "0x" followed by zero or more hex digits (so a bare "0x" counts) — while the host as a whole is not an
 // address canonicalScopeHost can read ("1.2.3.4.5", "999999999999",
 // "08.0.0.1", "foo.123"). A resolver may still interpret such a host as an
 // address the scope cannot name, so CheckTarget fails closed on it whenever
@@ -107,7 +112,13 @@ func numericHostUnparsable(host string) bool {
 
 // parseLegacyIPv4 parses s with the inet_aton(3) / WHATWG IPv4 parser
 // grammar: one to four dot-separated parts, each decimal, octal (leading
-// "0") or hexadecimal ("0x" / "0X"; "0x" alone is 0). Every part but the
+// "0") or hexadecimal ("0x" / "0X" followed by at least one hex digit).
+// A bare "0x" part is rejected, as glibc inet_aton and getaddrinfo do,
+// even though WHATWG reads it as 0: Go's pure resolver sends such a name
+// to DNS, so folding "1.2.3.0x" into 1.2.3.0 would let an allow for
+// 1.2.3.0 admit whatever DNS returns. CheckTarget still fails closed on
+// it when rules exist, since its last label ends in a number (WHATWG; see
+// numericHostUnparsable). Every part but the
 // last is one byte; the last fills the remaining bytes ("127.1" is
 // 127.0.0.1, "2130706433" is 127.0.0.1). Any out-of-range part, an empty
 // part, an invalid digit, or trailing garbage rejects the whole string;
@@ -161,7 +172,9 @@ func parseLegacyIPv4Part(p string) (uint64, bool) {
 	case len(p) >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X'):
 		base, p = 16, p[2:]
 		if p == "" {
-			return 0, true
+			// glibc inet_aton rejects a bare "0x" (WHATWG reads it as 0);
+			// see parseLegacyIPv4.
+			return 0, false
 		}
 	case len(p) >= 2 && p[0] == '0':
 		base, p = 8, p[1:]

@@ -51,13 +51,16 @@ type TargetRule struct {
 	// Supports wildcard prefix "*.example.com" to match all subdomains.
 	// An IPv6 literal may be written bare ("::1") or bracketed ("[::1]").
 	// Rule and target are compared in canonical form (canonicalScopeHost),
-	// so every spelling that dials the same host matches: any textual form
+	// so every spelling that may dial the same host matches: any textual form
 	// of an IPv6 address, with or without a zone ("[fe80::1%eth0]" matches
 	// "fe80::1"); an IPv4-mapped IPv6 address and its IPv4 address
 	// ("::ffff:10.0.0.5" and "10.0.0.5", in either direction); a single
 	// trailing dot ("db.internal." matches "db.internal" and "*.internal");
 	// and legacy inet_aton IPv4 spellings ("2130706433", "0x7f.0.0.1",
-	// "127.1" match "127.0.0.1") (USK-1129, USK-1250). The stored rule is
+	// "127.1" match "127.0.0.1"; only a libc resolver or an upstream proxy
+	// reads those as the address — Go's pure resolver looks them up in DNS,
+	// so on an allow rule they may admit a different host; see
+	// canonicalScopeHost) (USK-1129, USK-1250). The stored rule is
 	// never rewritten. Empty matches any host (Policy layer only; the Agent
 	// layer requires a hostname).
 	Hostname string `json:"hostname"`
