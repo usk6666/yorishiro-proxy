@@ -641,6 +641,15 @@ func resolveResendHTTPDial(msg *envelope.HTTPMessage, overrideHost string) (addr
 // naming a denied vhost reached it on an allowed authority. The Host legs
 // use the canonical leg's scheme and the wire-form path.
 func (s *Server) checkResendHTTPScope(msg *envelope.HTTPMessage, addr, overrideHost string) error {
+	return s.checkResendHTTPScopeHostHeaders(msg, addr, overrideHost, msg.Headers)
+}
+
+// checkResendHTTPScopeHostHeaders is checkResendHTTPScope with the Host
+// legs judged on hostHeaders instead of msg.Headers. resend_http always
+// passes msg.Headers; fuzz_http's plan check passes the base headers
+// minus the ones every variant rewrites (fuzzHTTPPlanHostHeaders), which
+// checkFuzzHTTPVariantScope judges per variant instead.
+func (s *Server) checkResendHTTPScopeHostHeaders(msg *envelope.HTTPMessage, addr, overrideHost string, hostHeaders []envelope.KeyValue) error {
 	canonical := resendHTTPRequestURL(msg)
 	if err := s.checkTargetScopeURL(canonical); err != nil {
 		return err
@@ -652,7 +661,7 @@ func (s *Server) checkResendHTTPScope(msg *envelope.HTTPMessage, addr, overrideH
 			return err
 		}
 	}
-	return checkHostHeaderLegs(s.connector.targetScope, scheme, msg.Headers, path, addr)
+	return checkHostHeaderLegs(s.connector.targetScope, scheme, hostHeaders, path, addr)
 }
 
 // resendHTTPRequestURL composes the canonical *url.URL used for scope

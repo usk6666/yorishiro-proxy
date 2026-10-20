@@ -3,9 +3,16 @@ package envelope
 import "strings"
 
 // HostHeaderValues returns the value of every header in headers whose name
-// is "host" (ASCII case-insensitive), in wire order, duplicates included,
-// each with surrounding SP / HTAB trimmed. It returns nil when there is
-// none.
+// is "host", in wire order, duplicates included, each with surrounding
+// SP / HTAB trimmed. It returns nil when there is none.
+//
+// The name test is strings.EqualFold (Unicode simple case folding, so it
+// is a superset of an ASCII case-insensitive match: "hoſt" with U+017F
+// also counts) after trimming trailing SP / HTAB from the name. The
+// HTTP/1 parser keeps "Host : v" as the name "Host " (flagged as an
+// anomaly, forwarded verbatim), and lenient upstreams strip that
+// whitespace and route on the value, so it must be judged as Host. The
+// trim is for the comparison only; the stored name is not touched.
 //
 // It is a read-only view for policy checks (TargetScope, USK-1167): the
 // HTTP/1 serializer writes the Host line from the header list, not from
@@ -20,7 +27,7 @@ import "strings"
 func HostHeaderValues(headers []KeyValue) []string {
 	var out []string
 	for _, kv := range headers {
-		if strings.EqualFold(kv.Name, "host") {
+		if strings.EqualFold(strings.TrimRight(kv.Name, " \t"), "host") {
 			out = append(out, strings.Trim(kv.Value, " \t"))
 		}
 	}
