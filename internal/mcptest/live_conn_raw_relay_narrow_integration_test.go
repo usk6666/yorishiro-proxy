@@ -31,8 +31,10 @@ import (
 const (
 	hostOnlyPolicyFile = `{"allows":[{"hostname":"127.0.0.1"}]}`
 	pathOnlyPolicyFile = `{"allows":[{"hostname":"127.0.0.1","path_prefix":"/api/"}]}`
-	// rawNarrowChunk is what the server-first upstream keeps writing.
-	rawNarrowChunk = "220 server-first stream chunk\r\n"
+	// rawNarrowChunk is what the server-first upstream keeps writing, once
+	// every rawNarrowInterval.
+	rawNarrowChunk    = "220 server-first stream chunk\r\n"
+	rawNarrowInterval = 100 * time.Millisecond
 )
 
 // narrowPolicyToPathOnly rewrites the policy file to the path-only allow
@@ -57,12 +59,45 @@ func readRelayedChunk(t *testing.T, c net.Conn, d time.Duration) {
 	_ = c.SetReadDeadline(time.Time{})
 }
 
+// drainRelayed discards upstream bytes already relayed to the client, so
+// that chunks delivered before the narrowing are not counted after it.
+// It returns once the relay has been quiet for half a chunk interval.
+func drainRelayed(t *testing.T, c net.Conn) {
+	t.Helper()
+	buf := make([]byte, 4096)
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(rawNarrowInterval / 2))
+		_, err := c.Read(buf)
+		if err == nil {
+			continue
+		}
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			break
+		}
+		t.Fatalf("raw relay closed before narrowing: %v", err)
+	}
+	_ = c.SetReadDeadline(time.Time{})
+}
+
+// narrowTimed drains the bytes relayed so far, runs narrow, and returns
+// how long narrow took.
+func narrowTimed(t *testing.T, c net.Conn, narrow func()) time.Duration {
+	t.Helper()
+	drainRelayed(t, c)
+	start := time.Now()
+	narrow()
+	return time.Since(start)
+}
+
 // assertRawRelayCutAfterNarrowing asserts that, after the narrowing
-// returned, the proxy closes the client connection within 5s and relays
-// at most one chunk that was already in flight when the cut landed — the
-// upstream keeps writing a chunk every 100ms, so a surviving relay would
-// both stay open and keep delivering.
-func assertRawRelayCutAfterNarrowing(t *testing.T, c net.Conn) {
+// returned, the proxy closes the client connection within 5s. The upstream
+// keeps writing a chunk every rawNarrowInterval, so a surviving relay
+// stays open and keeps delivering; the close-within-deadline check is the
+// essential one. The byte bound allows the chunks the upstream could
+// legitimately have relayed while the narrowing call ran (narrowDur, which
+// can be long under load) plus one chunk in flight on each side of it.
+func assertRawRelayCutAfterNarrowing(t *testing.T, c net.Conn, narrowDur time.Duration) {
 	t.Helper()
 	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 4096)
@@ -79,8 +114,9 @@ func assertRawRelayCutAfterNarrowing(t *testing.T, c net.Conn) {
 		}
 		break
 	}
-	if after > len(rawNarrowChunk) {
-		t.Errorf("client received %d upstream bytes after narrowing, want at most one in-flight %d-byte chunk", after, len(rawNarrowChunk))
+	allowedChunks := int(narrowDur/rawNarrowInterval) + 2
+	if limit := allowedChunks * len(rawNarrowChunk); after > limit {
+		t.Errorf("client received %d upstream bytes after draining (narrowing took %v), want at most %d (%d chunks of %d bytes)", after, narrowDur, limit, allowedChunks, len(rawNarrowChunk))
 	}
 }
 
@@ -94,7 +130,7 @@ func writeNonHTTPBytes(t *testing.T, c net.Conn) {
 }
 
 func TestE2E_LiveConnRawRelayNarrow_CONNECTCutOnReload(t *testing.T) {
-	target := serverFirstStreamUpstream(t, rawNarrowChunk, 200, 100*time.Millisecond)
+	target := serverFirstStreamUpstream(t, rawNarrowChunk, 200, rawNarrowInterval)
 	h, policyPath := bootReloadHarness(t)
 	proxyAddr := startProxyWithPassthrough(t, h)
 
@@ -106,14 +142,14 @@ func TestE2E_LiveConnRawRelayNarrow_CONNECTCutOnReload(t *testing.T) {
 	writeNonHTTPBytes(t, c)
 	readRelayedChunk(t, c, 10*time.Second)
 
-	narrowPolicyToPathOnly(t, h, policyPath)
-	assertRawRelayCutAfterNarrowing(t, c)
+	d := narrowTimed(t, c, func() { narrowPolicyToPathOnly(t, h, policyPath) })
+	assertRawRelayCutAfterNarrowing(t, c, d)
 }
 
 // SOCKS5, narrowed through the agent layer (security tool) instead of a
 // policy reload.
 func TestE2E_LiveConnRawRelayNarrow_SOCKS5CutOnAgentNarrowing(t *testing.T) {
-	target := serverFirstStreamUpstream(t, rawNarrowChunk, 200, 100*time.Millisecond)
+	target := serverFirstStreamUpstream(t, rawNarrowChunk, 200, rawNarrowInterval)
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
 	h.MustOK(t, "security", map[string]any{
 		"action": "set_target_scope",
@@ -127,17 +163,19 @@ func TestE2E_LiveConnRawRelayNarrow_SOCKS5CutOnAgentNarrowing(t *testing.T) {
 	writeNonHTTPBytes(t, c)
 	readRelayedChunk(t, c, 10*time.Second)
 
-	h.MustOK(t, "security", map[string]any{
-		"action": "set_target_scope",
-		"params": map[string]any{"allows": []map[string]any{{"hostname": "127.0.0.1", "path_prefix": "/api/"}}},
+	d := narrowTimed(t, c, func() {
+		h.MustOK(t, "security", map[string]any{
+			"action": "set_target_scope",
+			"params": map[string]any{"allows": []map[string]any{{"hostname": "127.0.0.1", "path_prefix": "/api/"}}},
+		})
 	})
-	assertRawRelayCutAfterNarrowing(t, c)
+	assertRawRelayCutAfterNarrowing(t, c, d)
 }
 
 // tcp_forwards auto with a silent client: the auto peek times out and the
 // connection falls back to a raw relay of the server-first stream.
 func TestE2E_LiveConnRawRelayNarrow_TCPForwardAutoCutOnReload(t *testing.T) {
-	target := serverFirstStreamUpstream(t, rawNarrowChunk, 200, 100*time.Millisecond)
+	target := serverFirstStreamUpstream(t, rawNarrowChunk, 200, rawNarrowInterval)
 	h, policyPath := bootReloadHarness(t)
 	fwd := startForwards(t, h, nil, map[string]any{"target": target, "protocol": "auto"})[0]
 
@@ -149,8 +187,8 @@ func TestE2E_LiveConnRawRelayNarrow_TCPForwardAutoCutOnReload(t *testing.T) {
 	// Stay silent past the 5 s auto peek.
 	readRelayedChunk(t, c, 10*time.Second)
 
-	narrowPolicyToPathOnly(t, h, policyPath)
-	assertRawRelayCutAfterNarrowing(t, c)
+	d := narrowTimed(t, c, func() { narrowPolicyToPathOnly(t, h, policyPath) })
+	assertRawRelayCutAfterNarrowing(t, c, d)
 }
 
 // Guard: a CONNECT TLS MITM connection (HTTP/1.1 inside) is not cut by the
