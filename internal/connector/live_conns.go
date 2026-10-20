@@ -443,6 +443,11 @@ func (h *LiveConnHandle) AdmitOpaque() (allowed bool, reason string) {
 	}
 }
 
+// ResolveOpaque is a not-yet-implemented stub for USK-1283.
+func (h *LiveConnHandle) ResolveOpaque() (allowed bool, reason string) {
+	return h.AdmitOpaque()
+}
+
 // Settle cuts the connection iff it is revoke-pending, no hold is in
 // flight, and its admission check still fails; if the check passes again
 // (the scope was widened meanwhile) the revocation is withdrawn instead.
