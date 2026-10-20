@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -442,5 +443,112 @@ func TestRelayBidirectional_ReturnsCancelCause(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("relay did not stop after cancel")
+	}
+}
+
+// flipOnConnIDCtx flips the scope the first time the connection ID is read
+// from it. The CONNECT handler first reads the connection ID in
+// trackAdmitted, after connectPolicyReject admitted the target and just
+// before LiveConns.Register re-runs the admission check — so the flip lands
+// exactly in the window that re-check exists to close.
+type flipOnConnIDCtx struct {
+	context.Context
+	once sync.Once
+	flip func()
+}
+
+func (c *flipOnConnIDCtx) Value(key any) any {
+	if key == ctxKeyConnID {
+		c.once.Do(c.flip)
+	}
+	return c.Context.Value(key)
+}
+
+// USK-1246 review F-1: a policy change that lands while a CONNECT is being
+// admitted (connectPolicyReject allowed it, Register's re-check does not)
+// is refused with the same 403 as a gate denial — never 200 — the target is
+// never dialed and nothing stays registered.
+func TestCONNECTHandler_LiveConns_DeniedDuringAdmissionGets403(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	t.Cleanup(func() { _ = upstream.Close() })
+	var dials atomic.Int64
+	go func() {
+		for {
+			c, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			dials.Add(1)
+			_ = c.Close()
+		}
+	}()
+
+	scope := NewTargetScope()
+	scope.SetPolicyRules(allowOnly("127.0.0.1"), nil)
+	reg := NewLiveConns(newTestLogger())
+	pl := NewPassthroughList()
+	pl.Add("127.0.0.1") // an admitted tunnel would dial upstream at once
+	handler := NewCONNECTHandler(CONNECTHandlerConfig{
+		Negotiator:      NewCONNECTNegotiator(newTestLogger()),
+		Scope:           scope,
+		LiveConns:       reg,
+		PassthroughList: pl,
+		Logger:          newTestLogger(),
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var flipped atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		ctx := &flipOnConnIDCtx{
+			Context: ContextWithConnID(context.Background(), "live-conn-test"),
+			flip: func() {
+				denyHost(scope, "127.0.0.1")
+				flipped.Store(true)
+			},
+		}
+		_ = handler(ctx, NewPeekConn(c))
+	}()
+	client, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	target := upstream.Addr().String()
+	if _, err := io.WriteString(client, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n\r\n"); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("read CONNECT reply until EOF: %v (got %q)", err, got)
+	}
+	<-done
+	if !flipped.Load() {
+		t.Fatal("scope flip never ran: the handler no longer reads the connection ID in trackAdmitted; fix the test seam")
+	}
+	if want := string(forwardErrorResponse(403, "Forbidden", "yorishiro-proxy: target blocked by scope")); string(got) != want {
+		t.Errorf("CONNECT reply = %q, want %q", got, want)
+	}
+	if got := reg.Len(); got != 0 {
+		t.Errorf("registry Len after admission-time denial = %d, want 0", got)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := dials.Load(); n != 0 {
+		t.Errorf("upstream dialed %d times, want 0", n)
 	}
 }
