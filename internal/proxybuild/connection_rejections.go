@@ -447,11 +447,11 @@ func rejectKindLabel(k connector.ProtocolKind) string {
 }
 
 // rejectAuthority returns the host[:port] the refused connection was bound
-// for, used for capture-scope evaluation. CONNECT and TCP forward targets are already an
-// authority. For an HTTP/1.x absolute-form request-target the authority
-// component is extracted as-is (no case folding, no default port);
-// origin-form targets carry no authority without parsing headers, which
-// the reject path never does.
+// for, used for capture-scope evaluation. CONNECT and TCP forward targets
+// are already an authority. For an HTTP/1.x absolute-form request-target
+// the authority component is extracted as-is (no case folding, no default
+// port); origin-form targets carry no authority without parsing headers,
+// which the reject path never does.
 func rejectAuthority(info connector.RejectInfo) string {
 	switch info.DetectedKind {
 	case connector.ProtocolHTTP1:

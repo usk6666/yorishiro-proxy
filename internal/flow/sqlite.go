@@ -494,7 +494,7 @@ const streamTagsTargetExpr = "(CASE WHEN json_valid(s.tags) THEN json_extract(s.
 // Every value is a bound parameter; LIKE metacharacters in host are
 // escaped.
 func appendStreamHostPredicate(conds []string, args []interface{}, host string) ([]string, []interface{}) {
-	escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(host)
+	escaped := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(host)
 	urlLike := func(col string) string {
 		return col + " LIKE ? ESCAPE '\\' OR " + col + " LIKE ? ESCAPE '\\' OR " +
 			col + " LIKE ? ESCAPE '\\' OR " + col + " LIKE ? ESCAPE '\\'"
