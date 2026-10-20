@@ -66,3 +66,18 @@ func (r *WireEncoderRegistry) Len() int {
 	defer r.mu.RUnlock()
 	return len(r.encoders)
 }
+
+// RawWinsPolicy reports whether the Layer that writes env to the wire can
+// honour a plugin's msg["raw"] verbatim (RFC-001 §9.3 D4 "Raw wins").
+type RawWinsPolicy func(env *envelope.Envelope) bool
+
+// RegisterRawWinsPolicy installs fn as the raw-wins policy for proto.
+// Passing a nil fn removes any prior registration.
+func (r *WireEncoderRegistry) RegisterRawWinsPolicy(proto envelope.Protocol, fn RawWinsPolicy) {
+}
+
+// RawWinsSupported reports whether a plugin-authored Raw on env can be
+// written verbatim by the destination Layer.
+func (r *WireEncoderRegistry) RawWinsSupported(env *envelope.Envelope) bool {
+	return true
+}
