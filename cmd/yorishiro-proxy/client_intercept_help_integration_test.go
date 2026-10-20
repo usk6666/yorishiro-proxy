@@ -30,7 +30,12 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/mcptest"
 )
 
-const interceptHelpUpstreamBody = "upstream-ok"
+const (
+	interceptHelpUpstreamBody = "upstream-ok"
+	// The held request's path and query, before any example modifies it.
+	interceptHelpOrigPath  = "/original"
+	interceptHelpOrigQuery = "x=1"
+)
 
 // observedHTTPRequest is one HTTP/1.x request as the upstream read it off
 // the wire: header names keep their wire casing and order.
@@ -203,9 +208,10 @@ func TestE2E_ClientInterceptHelp_ModifyAndForwardExamples(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 
+			targetPrefix := "http://" + upstream.addr()
 			resCh := make(chan proxiedResult, 1)
 			go func() {
-				resp, err := httpClient.Get("http://" + upstream.addr() + "/original?x=1")
+				resp, err := httpClient.Get(targetPrefix + interceptHelpOrigPath + "?" + interceptHelpOrigQuery)
 				if err != nil {
 					resCh <- proxiedResult{err: err}
 					return
@@ -259,11 +265,27 @@ func TestE2E_ClientInterceptHelp_ModifyAndForwardExamples(t *testing.T) {
 					t.Errorf("upstream method = %q, want %q", got.method, v)
 				}
 			}
+			// The client sends an absolute-form target through the forward
+			// proxy. The HTTP/1.x Layer forwards it verbatim and splices a
+			// rewritten path / raw_query behind the wire "scheme://authority"
+			// prefix (RFC-001 §9.3, USK-1148), so the upstream must see
+			// exactly that target — the untouched original when the example
+			// changes neither field.
+			wantPath, wantQuery := interceptHelpOrigPath, interceptHelpOrigQuery
 			if v, ok := httpMod["path"].(string); ok {
 				checked++
-				if p, _, _ := strings.Cut(got.target, "?"); p != v {
-					t.Errorf("upstream path = %q (target %q), want %q", p, got.target, v)
-				}
+				wantPath = v
+			}
+			if v, ok := httpMod["raw_query"].(string); ok {
+				checked++
+				wantQuery = v
+			}
+			wantTarget := targetPrefix + wantPath
+			if wantQuery != "" {
+				wantTarget += "?" + wantQuery
+			}
+			if got.target != wantTarget {
+				t.Errorf("upstream request-target = %q, want %q", got.target, wantTarget)
 			}
 			if v, ok := httpMod["body"].(string); ok {
 				checked++
@@ -311,7 +333,7 @@ func TestE2E_ClientInterceptHelp_ModifyAndForwardExamples(t *testing.T) {
 				}
 			}
 			if checked == 0 {
-				t.Fatalf("example's http payload %v sets none of method/path/body/headers; extend the assertions", httpMod)
+				t.Fatalf("example's http payload %v sets none of method/path/raw_query/body/headers; extend the assertions", httpMod)
 			}
 
 			select {
