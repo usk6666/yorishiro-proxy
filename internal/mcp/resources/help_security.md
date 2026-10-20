@@ -187,7 +187,11 @@ steps:
   non-HTTP bytes inside a tunnel (the connection is closed and a raw Stream is
   recorded with `blocked_by: target_scope`; the upstream connection may already
   have been opened, but receives no client byte and none of its bytes reach the
-  client), and gRPC / gRPC-Web requests.
+  client), and gRPC / gRPC-Web requests. A raw tunnel that was opened while a
+  host-only allow admitted X is closed when the scope is narrowed to the
+  path-scoped allow (policy reload or this tool), exactly as a new one would be
+  refused; HTTP connections to X stay open and each later request is checked
+  with its path.
   `path_prefix: "/"` behaves the same way: it still requires a request path.
 - **Deny** `{hostname: X, path_prefix: "/admin"}`: never refuses or closes a
   connection; it is enforced per request. It therefore does not cover TLS
