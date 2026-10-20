@@ -54,21 +54,52 @@ func modifiedFlows(store *flowStoreCapture, direction string) []*flow.Flow {
 	return out
 }
 
-// waitAnyFlow polls until the store holds a flow in direction, then lets
-// the pipeline settle so a would-be modified variant has had time to land.
+// waitAnyFlow polls until the store holds a flow in direction AND every
+// recorded Stream has reached a terminal State (complete / error). A
+// Stream's terminal update is written only after its envelopes have been
+// through RecordStep, so a would-be modified variant has landed by then —
+// the absence assertions that follow are not racing the pipeline.
 func waitAnyFlow(t *testing.T, store *flowStoreCapture, direction string) {
 	t.Helper()
 	end := time.Now().Add(5 * time.Second)
 	for time.Now().Before(end) {
-		for _, f := range store.Flows() {
-			if f != nil && f.Direction == direction {
-				time.Sleep(300 * time.Millisecond)
-				return
-			}
+		if hasFlowIn(store, direction) && allStreamsTerminal(store) {
+			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("no %s flow recorded; flows:%s", direction, describeFlows(store))
+	t.Fatalf("no %s flow with all Streams terminal within 5s; flows:%s", direction, describeFlows(store))
+}
+
+func hasFlowIn(store *flowStoreCapture, direction string) bool {
+	for _, f := range store.Flows() {
+		if f != nil && f.Direction == direction {
+			return true
+		}
+	}
+	return false
+}
+
+// allStreamsTerminal reports whether at least one Stream was saved and
+// every saved Stream carries a complete / error StreamUpdate.
+func allStreamsTerminal(store *flowStoreCapture) bool {
+	streams := store.Streams()
+	if len(streams) == 0 {
+		return false
+	}
+	for _, st := range streams {
+		terminal := false
+		for _, upd := range store.StreamUpdates(st.ID) {
+			if upd.State == "complete" || upd.State == "error" {
+				terminal = true
+				break
+			}
+		}
+		if !terminal {
+			return false
+		}
+	}
+	return true
 }
 
 // h2Seen captures what the h2c upstream observed for one request.

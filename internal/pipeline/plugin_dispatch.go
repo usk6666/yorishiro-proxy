@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
@@ -155,6 +156,19 @@ type pluginDispatcher struct {
 	engine   *pluginv2.Engine
 	encoders *WireEncoderRegistry
 	logger   *slog.Logger
+
+	// rawRefusedWarned records the rawRefusedKey tuples whose refused
+	// msg["raw"] write has already been logged at Warn, so a plugin that
+	// writes raw on every h2 envelope warns once and then drops to Debug.
+	// Bounded by the finite set of registered hooks.
+	rawRefusedWarned sync.Map
+}
+
+// rawRefusedKey identifies one hook registration for the once-per-hook
+// refusal Warn.
+type rawRefusedKey struct {
+	plugin, protocol, event string
+	phase                   pluginv2.Phase
 }
 
 // dispatch runs every hook registered for the envelope's (protocol, event,
@@ -291,11 +305,18 @@ func (d *pluginDispatcher) rawWinsSupported(env *envelope.Envelope, outcome *plu
 	return d.encoders.RawWinsSupported(&probe)
 }
 
-// warnRawRefused logs one refused msg["raw"] write. Warn per the plugin
-// misbehaviour row of the log-level table: the proxy continues, but the
-// plugin author's intent did not reach the wire.
+// warnRawRefused logs one refused msg["raw"] write. The first refusal per
+// (plugin, protocol.event, phase) is a Warn per the plugin misbehaviour row
+// of the log-level table: the proxy continues, but the plugin author's
+// intent did not reach the wire. Repeats for the same hook drop to Debug
+// so a plugin that always writes raw does not flood the operator log.
 func (d *pluginDispatcher) warnRawRefused(ctx context.Context, env *envelope.Envelope, hook pluginv2.Hook, phase pluginv2.Phase) {
-	d.logger.WarnContext(ctx, "plugin: msg[\"raw\"] cannot be written verbatim on this envelope; raw write ignored (edit msg[\"headers\"] / msg[\"body\"] / msg[\"metadata\"] instead)",
+	level := slog.LevelWarn
+	key := rawRefusedKey{plugin: hook.PluginName, protocol: hook.Protocol, event: hook.Event, phase: phase}
+	if _, seen := d.rawRefusedWarned.LoadOrStore(key, struct{}{}); seen {
+		level = slog.LevelDebug
+	}
+	d.logger.Log(ctx, level, "plugin: msg[\"raw\"] cannot be written verbatim on this envelope; raw write ignored (edit msg[\"headers\"] / msg[\"body\"] / msg[\"metadata\"] instead)",
 		slog.String("plugin", hook.PluginName),
 		slog.String("hook", hook.Protocol+"."+hook.Event),
 		slog.String("phase", string(phase)),

@@ -104,6 +104,34 @@ func TestPluginRawWinsPolicy_H2_RawOnlyRefused(t *testing.T) {
 	}
 }
 
+// TestPluginRawWinsPolicy_H2_RepeatRefusalLogsDebug: the refusal Warn
+// fires once per (plugin, protocol.event, phase); a second identical
+// refusal on the same Step is logged at Debug, not Warn.
+func TestPluginRawWinsPolicy_H2_RepeatRefusalLogsDebug(t *testing.T) {
+	eng := pluginv2.NewEngine(nil)
+	eng.Registry().Register(rawAndHeaderHook(pluginv2.ProtoHTTP, pluginv2.EventOnRequest, []byte("PLUGIN-RAW"), false))
+	logger, logs := captureLogger()
+	step := NewPluginStepPost(eng, h2PolicyRegistry(), logger)
+
+	step.Process(context.Background(), h2ReqEnv())
+	first := logs.String()
+	if n := strings.Count(first, "level=WARN"); n != 1 {
+		t.Fatalf("first refusal: WARN lines = %d, want 1; logs:\n%s", n, first)
+	}
+	logs.Reset()
+
+	step.Process(context.Background(), h2ReqEnv())
+	second := logs.String()
+	if strings.Contains(second, "level=WARN") {
+		t.Errorf("second identical refusal logged at WARN; want DEBUG. logs:\n%s", second)
+	}
+	for _, want := range []string{"level=DEBUG", "msg[\\\"raw\\\"] cannot be written verbatim", "plugin=h2raw", "hook=http.on_request"} {
+		if !strings.Contains(second, want) {
+			t.Errorf("second refusal log missing %q; logs:\n%s", want, second)
+		}
+	}
+}
+
 // TestPluginRawWinsPolicy_H2_BothBecomesMessageOnly (Test Plan T7).
 func TestPluginRawWinsPolicy_H2_BothBecomesMessageOnly(t *testing.T) {
 	eng := pluginv2.NewEngine(nil)
