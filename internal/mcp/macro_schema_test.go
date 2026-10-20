@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -303,80 +304,70 @@ func TestMacroToolDescription_DocumentsTemplateSyntax(t *testing.T) {
 	}
 }
 
-// readMacroSchemaResource returns the hand-written yorishiro://schema/macro
-// resource decoded as JSON.
-func readMacroSchemaResource(t *testing.T) map[string]any {
-	t.Helper()
-
-	cs := setupResourceTestSession(t)
-	result, err := cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "yorishiro://schema/macro",
-	})
-	if err != nil {
-		t.Fatalf("ReadResource: %v", err)
-	}
-	var schema map[string]any
-	if err := json.Unmarshal([]byte(result.Contents[0].Text), &schema); err != nil {
-		t.Fatalf("unmarshal schema/macro: %v", err)
-	}
-	return schema
-}
-
-// schemaEnum returns the enum values of the named property as strings.
-func schemaEnum(t *testing.T, props map[string]any, field string) []string {
-	t.Helper()
-
-	obj, ok := props[field].(map[string]any)
-	if !ok {
-		t.Fatalf("property %q not found or not an object", field)
-	}
-	rawEnum, ok := obj["enum"].([]any)
-	if !ok {
-		t.Fatalf("property %q has no enum", field)
-	}
-	out := make([]string, 0, len(rawEnum))
-	for _, v := range rawEnum {
-		s, ok := v.(string)
-		if !ok {
-			t.Fatalf("property %q enum element %v is %T, want string", field, v, v)
-		}
-		out = append(out, s)
+// quotedValues returns the values quoted with q (`"` or "`") in text, sorted.
+func quotedValues(text, q string) []string {
+	re := regexp.MustCompile(regexp.QuoteMeta(q) + `([a-z_]+)` + regexp.QuoteMeta(q))
+	var out []string
+	for _, m := range re.FindAllStringSubmatch(text, -1) {
+		out = append(out, m[1])
 	}
 	sort.Strings(out)
 	return out
 }
 
-// TestSchemaMacroResource_EnumsMatchGoConstants asserts that the hand-written
-// yorishiro://schema/macro resource — which carries the enum / minimum
-// constraints Go tags cannot express — still agrees with the macro package
-// constants.
-func TestSchemaMacroResource_EnumsMatchGoConstants(t *testing.T) {
-	schema := readMacroSchemaResource(t)
-	stepProps := navSchema(t, schema, "properties", "params", "properties", "steps", "items", "properties")
-	extractProps := navSchema(t, stepProps, "extract", "items", "properties")
+// TestHelpMacroResource_EnumsMatchGoConstants asserts that the value lists
+// help_macro.md gives for the enum-like macro fields — which the generated
+// InputSchema cannot express — agree with the macro package constants.
+// (Until USK-1153 this guarded a hand-written yorishiro://schema/macro
+// resource; the help resource is now the only place these lists live.)
+func TestHelpMacroResource_EnumsMatchGoConstants(t *testing.T) {
+	cs := setupResourceTestSession(t)
+	result, err := cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
+		URI: "yorishiro://help/macro",
+	})
+	if err != nil {
+		t.Fatalf("ReadResource: %v", err)
+	}
+	text := result.Contents[0].Text
+
+	// match returns the first submatch of pattern in the help text.
+	match := func(t *testing.T, pattern string) string {
+		t.Helper()
+		m := regexp.MustCompile(pattern).FindStringSubmatch(text)
+		if m == nil {
+			t.Fatalf("help/macro has no text matching %q", pattern)
+		}
+		return m[1]
+	}
 
 	tests := []struct {
-		name  string
-		props map[string]any
-		field string
-		want  []string
+		name    string
+		pattern string // the first submatch holds the documented value list
+		quote   string
+		want    []string
 	}{
 		{
-			name:  "on_error",
-			props: stepProps,
-			field: "on_error",
-			want:  []string{string(macro.OnErrorAbort), string(macro.OnErrorSkip), string(macro.OnErrorRetry)},
+			name:    "action",
+			pattern: "(?m)^The action to execute\\. One of: (.*)$",
+			quote:   "`",
+			want:    availableMacroActions,
 		},
 		{
-			name:  "extract.from",
-			props: extractProps,
-			field: "from",
-			want:  []string{string(macro.ExtractionFromRequest), string(macro.ExtractionFromResponse)},
+			name:    "on_error",
+			pattern: `(?m)^\s*- \*\*on_error\*\* \(string, optional\): (.*)$`,
+			quote:   `"`,
+			want:    []string{string(macro.OnErrorAbort), string(macro.OnErrorSkip), string(macro.OnErrorRetry)},
 		},
 		{
-			name:  "extract.source",
-			props: extractProps,
-			field: "source",
+			name:    "extract.from",
+			pattern: "`from` \\(([^)]*)\\)",
+			quote:   `"`,
+			want:    []string{string(macro.ExtractionFromRequest), string(macro.ExtractionFromResponse)},
+		},
+		{
+			name:    "extract.source",
+			pattern: "`source` \\(([^)]*)\\)",
+			quote:   `"`,
 			want: []string{
 				string(macro.ExtractionSourceHeader),
 				string(macro.ExtractionSourceBody),
@@ -385,71 +376,15 @@ func TestSchemaMacroResource_EnumsMatchGoConstants(t *testing.T) {
 				string(macro.ExtractionSourceURL),
 			},
 		},
-		{
-			name:  "action",
-			props: navSchema(t, schema, "properties"),
-			field: "action",
-			want:  availableMacroActions,
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := schemaEnum(t, tc.props, tc.field)
+			got := quotedValues(match(t, tc.pattern), tc.quote)
 			want := append([]string(nil), tc.want...)
 			sort.Strings(want)
 			if strings.Join(got, ",") != strings.Join(want, ",") {
-				t.Errorf("schema/macro %s enum = %v, want %v", tc.field, got, want)
-			}
-		})
-	}
-}
-
-// schemaTypes returns the "type" of the named property as a sorted string
-// slice, accepting both the scalar and the array JSON Schema forms.
-func schemaTypes(t *testing.T, props map[string]any, field string) []string {
-	t.Helper()
-
-	obj, ok := props[field].(map[string]any)
-	if !ok {
-		t.Fatalf("property %q not found or not an object", field)
-	}
-	switch v := obj["type"].(type) {
-	case string:
-		return []string{v}
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, e := range v {
-			s, ok := e.(string)
-			if !ok {
-				t.Fatalf("property %q type element %v is %T, want string", field, e, e)
-			}
-			out = append(out, s)
-		}
-		sort.Strings(out)
-		return out
-	default:
-		t.Fatalf("property %q has no usable type (%T)", field, obj["type"])
-		return nil
-	}
-}
-
-// TestSchemaMacroResource_TypesMatchGeneratedSchema asserts the hand-written
-// resource declares the same JSON types as the generated tool schema for the
-// step fields. Go pointer / slice fields (override_body *string, extract
-// []extractionInput, when *guardInput) generate a nullable type; the resource
-// had drifted to the plain non-nullable form.
-func TestSchemaMacroResource_TypesMatchGeneratedSchema(t *testing.T) {
-	resourceProps := navSchema(t, readMacroSchemaResource(t),
-		"properties", "params", "properties", "steps", "items", "properties")
-	generatedProps := macroStepProperties(t, macroToolSchema(t))
-
-	for _, field := range []string{"override_method", "override_url", "override_headers", "override_body", "extract", "when"} {
-		t.Run(field, func(t *testing.T) {
-			got := schemaTypes(t, resourceProps, field)
-			want := schemaTypes(t, generatedProps, field)
-			if strings.Join(got, ",") != strings.Join(want, ",") {
-				t.Errorf("schema/macro %s type = %v, generated schema = %v", field, got, want)
+				t.Errorf("help/macro %s values = %v, want %v", tc.name, got, want)
 			}
 		})
 	}
