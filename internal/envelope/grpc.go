@@ -167,6 +167,7 @@ func (m *GRPCStartMessage) CloneMessage() Message {
 		Scheme:           m.Scheme,
 		Path:             m.Path,
 		RawQuery:         m.RawQuery,
+		HTTPMethod:       m.HTTPMethod,
 		HTTPStatus:       m.HTTPStatus,
 		HTTPStatusReason: m.HTTPStatusReason,
 		Metadata:         cloneKeyValues(m.Metadata),

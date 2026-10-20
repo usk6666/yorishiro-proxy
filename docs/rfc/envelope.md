@@ -266,6 +266,15 @@ type GRPCStartMessage struct {
     Path      string
     RawQuery  string
 
+    // USK-1252: request-side method overlay populated by the gRPC-Web
+    // Layer — the client's HTTP/1.x request-line method / HTTP/2 :method,
+    // verbatim (no case folding), so the opposite-side Send relays it
+    // instead of forcing POST and RecordStep records Flow.Method. Empty on
+    // the response side and on native gRPC (not populated yet); an empty
+    // value is sent as POST. Carried across plugin rebuilds but not
+    // exposed as a dict key.
+    HTTPMethod string
+
     // USK-1219: response-side overlay populated by the gRPC-Web Layer —
     // the upstream's HTTP status line / :status and HTTP/1.x reason
     // phrase, so the opposite-side Send relays them (instead of 200 OK)
@@ -277,9 +286,10 @@ type GRPCStartMessage struct {
 
     // gRPC metadata — custom and reserved, order and casing as observed.
     // Pseudo-headers (:method, :path, :status, ...) are NOT included here;
-    // the request-side ones and the gRPC-Web response status are projected
-    // onto the overlay fields above, and their wire bytes stay in
-    // Envelope.Raw.
+    // :authority / :scheme / :path are projected onto the overlay fields
+    // above, as are the gRPC-Web request method and response status
+    // (native gRPC does not project :method or :status). Their wire bytes
+    // stay in Envelope.Raw.
     Metadata []KeyValue
 
     // Parsed gRPC-specific control headers (D7). These four are stripped
