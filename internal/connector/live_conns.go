@@ -78,8 +78,10 @@ type LiveConn struct {
 	// AdmitOpaque is the gate's check run strictly, as for a route that
 	// never yields an HTTP request path (CheckOpaqueTarget, USK-1130).
 	// A gate that admits path-scoped allows provisionally sets it so the
-	// raw relay can refuse once the route resolves to raw bytes (see
-	// LiveConnHandle.AdmitOpaque). Nil means Admit is already strict.
+	// raw relay can refuse once the route resolves to raw bytes, and so
+	// Reconcile / Settle re-evaluate the resolved relay strictly from then
+	// on (see LiveConnHandle.ResolveOpaque, USK-1283). Nil means Admit is
+	// already strict.
 	AdmitOpaque LiveConnAdmitFunc
 }
 
@@ -105,6 +107,22 @@ type liveConnEntry struct {
 	// trigger labels the policy change that revoked a pending entry; the
 	// deferred cut logs it. Guarded by LiveConns.mu.
 	trigger string
+	// opaque is set once the connection resolved to a route that never
+	// yields an HTTP request path (LiveConnHandle.ResolveOpaque, USK-1283):
+	// from then on admitFunc returns the strict AdmitOpaque check. Set from
+	// the relay goroutine, read by Reconcile / Settle; never cleared.
+	opaque atomic.Bool
+}
+
+// admitFunc returns the check that decides whether the connection is still
+// admitted: the gate's strict AdmitOpaque once the route resolved to raw
+// bytes (and the gate registered one), its Admit otherwise. Nil means the
+// connection is never cut.
+func (e *liveConnEntry) admitFunc() LiveConnAdmitFunc {
+	if e.opaque.Load() && e.info.AdmitOpaque != nil {
+		return e.info.AdmitOpaque
+	}
+	return e.info.Admit
 }
 
 // LiveConns is the process-wide registry of admitted live connections. The
@@ -238,8 +256,10 @@ func (r *LiveConns) ReconcileWithDeferred(trigger string) (revoked, deferred int
 
 	// The predicates take the TargetScope read lock; evaluate them outside
 	// r.mu so a slow scope read never stalls Register / release / Pin.
+	// admitFunc picks the strict check for a connection a raw relay
+	// resolved (USK-1283); it is non-nil whenever Admit is.
 	for _, e := range snapshot {
-		allowed, reason := e.info.Admit()
+		allowed, reason := e.admitFunc()()
 		r.mu.Lock()
 		if e.cut.Load() {
 			r.mu.Unlock()
@@ -422,30 +442,41 @@ func (h *LiveConnHandle) RevokePending() bool {
 	return h.e.cut.Load()
 }
 
-// AdmitOpaque re-runs the admitting gate's scope check strictly, as for a
-// route that never yields an HTTP request path (USK-1130 review S-1). The
-// raw relay calls it once before relaying: a gate admits a path-scoped
-// allow provisionally on routes that may still carry HTTP, and a route
-// that resolved to raw bytes must then be refused as the strict gate
-// would have refused it. It falls back to the gate's own check when the
-// gate registered no strict variant; a nil handle allows.
-func (h *LiveConnHandle) AdmitOpaque() (allowed bool, reason string) {
+// ResolveOpaque marks the connection as resolved to a route that never
+// yields an HTTP request path, and returns the admitting gate's scope
+// check run strictly for such a route (USK-1130 review S-1). The raw relay
+// calls it once before relaying: a gate admits a path-scoped allow
+// provisionally on routes that may still carry HTTP, and a route that
+// resolved to raw bytes must then be refused as the strict gate would have
+// refused it.
+//
+// From then on every re-evaluation — Reconcile, ReconcileWithDeferred and
+// Settle — runs the strict check too (USK-1283), so narrowing a host-only
+// allow to a path-scoped one cuts the relay just as it refuses an
+// identical new one. Without the mark the provisional check, which a
+// path-scoped allow passes, kept the relay open.
+//
+// Ordering: the mark is stored before the strict check runs, and the relay
+// starts only after this returns. A scope writer changes the rules and
+// then calls Reconcile, which loads the mark per entry. Go's atomics and
+// the scope's RWMutex are sequentially consistent, so either Reconcile's
+// load sees the mark (and evaluates strictly), or it ran before the Store
+// — and then the narrowed rules were already written when the strict check
+// below reads them, so the relay is refused before it relays a byte. There
+// is no window in which a relayed connection is re-evaluated
+// provisionally after an admitting strict check.
+//
+// The check falls back to the gate's own check when the gate registered no
+// strict variant (Admit is then already strict); a nil handle allows.
+func (h *LiveConnHandle) ResolveOpaque() (allowed bool, reason string) {
 	if h == nil {
 		return true, ""
 	}
-	switch {
-	case h.e.info.AdmitOpaque != nil:
-		return h.e.info.AdmitOpaque()
-	case h.e.info.Admit != nil:
-		return h.e.info.Admit()
-	default:
-		return true, ""
+	h.e.opaque.Store(true)
+	if admit := h.e.admitFunc(); admit != nil {
+		return admit()
 	}
-}
-
-// ResolveOpaque is a not-yet-implemented stub for USK-1283.
-func (h *LiveConnHandle) ResolveOpaque() (allowed bool, reason string) {
-	return h.AdmitOpaque()
+	return true, ""
 }
 
 // Settle cuts the connection iff it is revoke-pending, no hold is in
@@ -464,8 +495,8 @@ func (h *LiveConnHandle) Settle() {
 		return
 	}
 	allowed, reason := true, ""
-	if e.info.Admit != nil {
-		allowed, reason = e.info.Admit()
+	if admit := e.admitFunc(); admit != nil {
+		allowed, reason = admit()
 	}
 
 	r.mu.Lock()

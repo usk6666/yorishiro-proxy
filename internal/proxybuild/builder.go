@@ -858,7 +858,11 @@ func runRawRelaySession(ctx context.Context, stack *connector.ConnectionStack, p
 // path, so U1(a)'s strict rule applies once the route is known:
 //
 //   - the admitting gate's check re-run strictly, with the gate's own
-//     scheme (connector.LiveConnHandle.AdmitOpaque);
+//     scheme (connector.LiveConnHandle.ResolveOpaque). It also marks the
+//     live connection resolved, before the check and so before the relay
+//     starts, so every later policy-change re-evaluation (Reconcile /
+//     Settle) is strict too and narrowing the scope to a path-scoped
+//     allow cuts the relay (USK-1283);
 //   - HostScopeStep's verdict on the first client chunk, evaluated now
 //     rather than when the client first writes (Pipeline.AdmitsRawRelay),
 //     since a server-first upstream would otherwise reach a silent client.
@@ -867,7 +871,7 @@ func runRawRelaySession(ctx context.Context, stack *connector.ConnectionStack, p
 // target_scope) through the session's OnPipelineDrop hook; the caller
 // returns without relaying and its deferred stack.Close drops both legs.
 func refuseRawRelay(ctx context.Context, envCtx envelope.EnvelopeContext, p *pipeline.Pipeline, opts session.SessionOptions) bool {
-	allowed, reason := connector.LiveConnFromContext(ctx).AdmitOpaque()
+	allowed, reason := connector.LiveConnFromContext(ctx).ResolveOpaque()
 	if allowed && p.AdmitsRawRelay(ctx, envCtx) {
 		return false
 	}
