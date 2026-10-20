@@ -102,8 +102,11 @@ func NewTargetScope() *TargetScope {
 // Before step 1, when either layer has any rule, a hostname whose last
 // label is a number but that is not a valid IPv4 address ("1.2.3.4.5",
 // "999999999999") is BLOCKED: a resolver may still read it as an address
-// no rule can name (USK-1250, see numericHostUnparsable). With no rules at
-// all (open mode) it is allowed like any other host.
+// no rule can name (USK-1250, see numericHostUnparsable). So is an empty
+// host or an unspecified address ("0.0.0.0", "::" and their spellings),
+// which Go's dialer reads as the proxy host itself (USK-1312, see
+// unspecifiedOrEmptyHost). With no rules at all (open mode) both are
+// allowed like any other host.
 //
 // Returns allowed=true if the target is permitted, and a reason string
 // explaining the decision when blocked.
@@ -115,9 +118,9 @@ func (s *TargetScope) CheckTarget(scheme, hostname string, port int, path string
 
 // checkTargetLocked is CheckTarget for a caller already holding s.mu.
 func (s *TargetScope) checkTargetLocked(scheme, hostname string, port int, path string) (allowed bool, reason string) {
-	// 0. Fail closed on an unparsable numeric host (rules exist only).
-	if s.hasRulesLocked() && numericHostUnparsable(hostname) {
-		return false, numericHostReason
+	// 0. Fail closed on a dial host no rule can name (rules exist only).
+	if reason, blocked := s.dialHostFailClosedLocked(hostname); blocked {
+		return false, reason
 	}
 
 	// 1. Policy denies (highest priority).
@@ -166,6 +169,27 @@ func (s *TargetScope) checkTargetLocked(scheme, hostname string, port int, path 
 	return true, ""
 }
 
+// dialHostFailClosedLocked is step 0 of CheckTarget and CheckHost: when
+// either layer has any rule, a dial host that a resolver or the dialer may
+// read as a destination no rule can name is refused before deny and allow
+// evaluation — an empty or unspecified host, which Go dials as the proxy
+// host itself (USK-1312, unspecifiedOrEmptyHost), and an unparsable
+// numeric host (USK-1250, numericHostUnparsable). With no rules at all
+// (open mode) nothing is refused. Name legs with a known dial target do
+// not come here (nameDenyLocked). Caller holds s.mu.
+func (s *TargetScope) dialHostFailClosedLocked(hostname string) (reason string, blocked bool) {
+	if !s.hasRulesLocked() {
+		return "", false
+	}
+	if unspecifiedOrEmptyHost(hostname) {
+		return unspecifiedHostReason, true
+	}
+	if numericHostUnparsable(hostname) {
+		return numericHostReason, true
+	}
+	return "", false
+}
+
 // ReasonPathRequired is the block reason for a target that only a
 // path-scoped allow admits, checked on a route that never yields an HTTP
 // request path (TLS passthrough relay, raw TCP, gRPC — USK-1130).
@@ -193,10 +217,10 @@ func (s *TargetScope) CheckHost(scheme, hostname string, port int) (allowed, pat
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Fail closed on an unparsable numeric host, as CheckTarget does
-	// (USK-1250).
-	if s.hasRulesLocked() && numericHostUnparsable(hostname) {
-		return false, false, numericHostReason
+	// Fail closed on a dial host no rule can name, as CheckTarget does
+	// (USK-1250, USK-1312).
+	if reason, blocked := s.dialHostFailClosedLocked(hostname); blocked {
+		return false, false, reason
 	}
 
 	for _, rule := range s.policyDenies {

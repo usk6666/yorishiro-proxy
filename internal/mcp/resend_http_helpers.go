@@ -631,7 +631,8 @@ func resolveDialAuthority(authority string, useTLS bool) (addr, sni string, err 
 }
 
 // checkResendHTTPScope enforces TargetScope rules on both the canonical
-// request URL and (when override_host is supplied) the override target. Both
+// request URL and the dial address (the override target when override_host
+// is supplied; since USK-1312 also the authority-derived address). Both
 // must pass; an override that bypasses scope is rejected even when the
 // canonical authority is in-scope.
 //
@@ -688,10 +689,13 @@ func (s *Server) checkResendHTTPScopeHostHeaders(msg *envelope.HTTPMessage, addr
 	}
 	scheme := strings.ToLower(canonical.Scheme)
 	path := envelope.WirePath(canonical)
-	if overrideHost != "" {
-		if err := s.checkTargetScopeAddrPath(scheme, addr, path); err != nil {
-			return err
-		}
+	// The dial address is checked even without override_host (USK-1312):
+	// net/url reads an unbracketed "::" authority as host ":", which the
+	// canonical leg cannot recognise, while the dial goes to "[::]:80" —
+	// the proxy host itself. overrideHost is kept in the signature for the
+	// callers; addr is already the override target when one is set.
+	if err := s.checkTargetScopeAddrPath(scheme, addr, path); err != nil {
+		return err
 	}
 	if err := checkAuthorityNameLeg(s.connector.targetScope, scheme, msg.Authority, path, addr); err != nil {
 		return err

@@ -100,6 +100,24 @@ func TestTCPForwardScopeCheck_HostCanonicalized(t *testing.T) {
 	}
 }
 
+// TestTCPForwardScopeCheck_UnspecifiedTargetFailsClosed (USK-1312): a
+// forward target with an empty or unspecified host dials the proxy host,
+// so with any rule it is refused on every arm; open mode admits it.
+func TestTCPForwardScopeCheck_UnspecifiedTargetFailsClosed(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules(nil, []connector.TargetRule{{Hostname: "127.0.0.1"}, {Hostname: "localhost"}})
+	for _, target := range []string{":4444", "0.0.0.0:4444", "[::]:4444"} {
+		for _, protocol := range []string{"", "raw", "http"} {
+			if ok, _ := tcpForwardScopeCheck(scope, target, false, protocol); ok {
+				t.Errorf("target %q (protocol %q) admitted with rules, want denied", target, protocol)
+			}
+			if ok, reason := tcpForwardScopeCheck(connector.NewTargetScope(), target, false, protocol); !ok {
+				t.Errorf("target %q (protocol %q) denied in open mode: %s", target, protocol, reason)
+			}
+		}
+	}
+}
+
 // TestStartTCPForwards_DeniedTargetRejected is test-plan 1 at the Manager
 // seam: StartTCPForwards refuses a forward whose target the scope denies,
 // with ErrTCPForwardTargetBlocked naming the port, and binds nothing.

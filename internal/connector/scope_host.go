@@ -20,6 +20,10 @@ import (
 // host case (see numericHostUnparsable).
 const numericHostReason = "blocked: host ends in a number but is not a valid IPv4 address"
 
+// unspecifiedHostReason is CheckTarget's reason for the fail-closed empty
+// or unspecified dial host case (see unspecifiedOrEmptyHost).
+const unspecifiedHostReason = "blocked: empty or unspecified host (0.0.0.0 / ::) dials the proxy host; use an explicit address such as 127.0.0.1"
+
 // canonicalScopeHost returns the form in which TargetScope compares a rule
 // hostname with a target hostname (matchHostname, hostnameCoveredBy,
 // targetRuleEqual). The steps, in order:
@@ -108,6 +112,27 @@ func numericHostUnparsable(host string) bool {
 		return true
 	}
 	return len(last) >= 2 && last[0] == '0' && last[1] == 'x' && isDigits(last[2:], 16)
+}
+
+// unspecifiedOrEmptyHost reports whether a dial host is empty or, in
+// canonicalScopeHost form, an unspecified address: "0.0.0.0", "::", and
+// every spelling that folds to them ("[::]", "::ffff:0.0.0.0", "0:0::0",
+// "::%lo", the legacy "0" / "0.0" / "0x0" / "00"). Go's net.Dial reads an
+// empty host and an unspecified address as the local system ("[::]"
+// reaches an IPv4 127.0.0.1-only listener too), so no deny rule naming
+// 127.0.0.1 / localhost / ::1 would see such a dial. CheckTarget therefore
+// refuses it whenever rules exist (USK-1312, decision (b)); see
+// TargetScope.dialHostFailClosedLocked.
+func unspecifiedOrEmptyHost(host string) bool {
+	if host == "" {
+		return true
+	}
+	c, isIP := canonicalScopeHostIP(host)
+	if !isIP {
+		return false
+	}
+	addr, err := netip.ParseAddr(c)
+	return err == nil && addr.Unmap().IsUnspecified()
 }
 
 // parseLegacyIPv4 parses s with the inet_aton(3) / WHATWG IPv4 parser
