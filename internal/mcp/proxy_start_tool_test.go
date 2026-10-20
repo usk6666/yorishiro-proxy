@@ -164,22 +164,91 @@ func TestProxyStart_NilManager(t *testing.T) {
 	}
 }
 
+// TestProxyStart_NonLoopbackAddr verifies that proxy_start accepts a
+// non-loopback (wildcard) bind address (USK-1125). Port 0 keeps the test
+// from claiming a fixed port on every interface.
 func TestProxyStart_NonLoopbackAddr(t *testing.T) {
-	manager := newTestProxybuildManager(t)
-
-	cs := setupProxyStartTestSession(t, manager, nil)
-
-	tests := []struct {
-		name string
-		addr string
-	}{
-		{name: "public IP", addr: "192.168.1.1:8080"},
-		{name: "all interfaces", addr: "0.0.0.0:8080"},
-		{name: "public IPv6", addr: "[::]:8080"},
+	if ln, err := net.Listen("tcp", "0.0.0.0:0"); err != nil {
+		t.Skipf("cannot bind 0.0.0.0 in this environment: %v", err)
+	} else {
+		_ = ln.Close()
 	}
 
+	manager := newTestProxybuildManager(t)
+	t.Cleanup(func() { manager.StopAll(context.Background()) })
+	cs := setupProxyStartTestSession(t, manager, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "0.0.0.0:0",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success for 0.0.0.0:0, got error: %v", proxyStartErrorText(result))
+	}
+	out := unmarshalProxyStartResult(t, result)
+	host, _, err := net.SplitHostPort(out.ListenAddr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", out.ListenAddr, err)
+	}
+	if host != "0.0.0.0" {
+		t.Errorf("bound host = %q, want 0.0.0.0", host)
+	}
+}
+
+// TestProxyStart_IPv6UnspecifiedAddr verifies "[::]:0" is accepted and the
+// listener binds the IPv6 unspecified address.
+func TestProxyStart_IPv6UnspecifiedAddr(t *testing.T) {
+	if ln, err := net.Listen("tcp6", "[::1]:0"); err != nil {
+		t.Skipf("IPv6 not available in this environment: %v", err)
+	} else {
+		_ = ln.Close()
+	}
+
+	manager := newTestProxybuildManager(t)
+	t.Cleanup(func() { manager.StopAll(context.Background()) })
+	cs := setupProxyStartTestSession(t, manager, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "[::]:0",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success for [::]:0, got error: %v", proxyStartErrorText(result))
+	}
+	out := unmarshalProxyStartResult(t, result)
+	host, _, err := net.SplitHostPort(out.ListenAddr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", out.ListenAddr, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsUnspecified() || ip.To4() != nil {
+		t.Errorf("bound host = %q, want the IPv6 unspecified address", host)
+	}
+}
+
+// TestProxyStart_RejectsInvalidListenAddrForms verifies the listen_addr
+// forms proxy_start refuses before any bind is attempted.
+func TestProxyStart_RejectsInvalidListenAddrForms(t *testing.T) {
+	tests := []struct {
+		name    string
+		addr    string
+		wantErr string
+	}{
+		{name: "empty host", addr: ":0", wantErr: "0.0.0.0"},
+		{name: "DNS name", addr: "example.com:0", wantErr: "IP literal"},
+		{name: "short IPv4", addr: "127.1:0", wantErr: "IP literal"},
+		{name: "service-name port", addr: "127.0.0.1:http", wantErr: "port"},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			manager := newTestProxybuildManager(t)
+			t.Cleanup(func() { manager.StopAll(context.Background()) })
+			cs := setupProxyStartTestSession(t, manager, nil)
+
 			result, err := callProxyStart(t, cs, map[string]any{
 				"listen_addr": tt.addr,
 			})
@@ -187,10 +256,25 @@ func TestProxyStart_NonLoopbackAddr(t *testing.T) {
 				t.Fatalf("CallTool: %v", err)
 			}
 			if !result.IsError {
-				t.Fatalf("expected error for non-loopback address %q", tt.addr)
+				t.Fatalf("expected error for listen_addr %q", tt.addr)
+			}
+			text := proxyStartErrorText(result)
+			if !strings.Contains(text, "invalid listen_addr") || !strings.Contains(text, tt.wantErr) {
+				t.Errorf("error = %q, want it to contain %q and %q", text, "invalid listen_addr", tt.wantErr)
 			}
 		})
 	}
+}
+
+// proxyStartErrorText concatenates the text content of a tool result.
+func proxyStartErrorText(result *gomcp.CallToolResult) string {
+	var b strings.Builder
+	for _, c := range result.Content {
+		if tc, ok := c.(*gomcp.TextContent); ok {
+			b.WriteString(tc.Text)
+		}
+	}
+	return b.String()
 }
 
 func TestProxyStart_InvalidAddr(t *testing.T) {
@@ -310,25 +394,37 @@ func TestProxyStart_WithAllConfig(t *testing.T) {
 	}
 }
 
+// TestProxyStart_LoopbackAddresses is the bind-address acceptance table.
+// Non-loopback rows use port 0 so they never claim a fixed port on every
+// interface. "10.0.0.1" is a valid specific IP that is (normally) not
+// assigned to the test host: it must pass listen_addr validation and fail
+// only at bind (EADDRNOTAVAIL), proving validation no longer rejects it.
 func TestProxyStart_LoopbackAddresses(t *testing.T) {
 	tests := []struct {
 		name    string
 		addr    string
 		wantErr bool
+		// bindErr marks rows that must pass validation and fail at bind.
+		bindErr bool
 	}{
 		{name: "IPv4 loopback", addr: "127.0.0.1:0", wantErr: false},
 		{name: "localhost", addr: "localhost:0", wantErr: false},
 		{name: "IPv6 loopback", addr: "[::1]:0", wantErr: false},
 		{name: "empty host", addr: ":0", wantErr: true},
-		{name: "public IPv4", addr: "10.0.0.1:8080", wantErr: true},
-		{name: "all interfaces IPv4", addr: "0.0.0.0:8080", wantErr: true},
-		{name: "all interfaces IPv6", addr: "[::]:8080", wantErr: true},
+		{name: "unassigned specific IPv4", addr: "10.0.0.1:0", wantErr: true, bindErr: true},
+		{name: "all interfaces IPv4", addr: "0.0.0.0:0", wantErr: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.bindErr {
+				if ln, err := net.Listen("tcp", tt.addr); err == nil {
+					_ = ln.Close()
+					t.Skipf("%s is assigned to this host; bind-failure row not applicable", tt.addr)
+				}
+			}
 			manager := newTestProxybuildManager(t)
-			t.Cleanup(func() { manager.Stop(context.Background()) })
+			t.Cleanup(func() { manager.StopAll(context.Background()) })
 
 			cs := setupProxyStartTestSession(t, manager, nil)
 
@@ -343,7 +439,13 @@ func TestProxyStart_LoopbackAddresses(t *testing.T) {
 				t.Fatalf("expected error for addr %q", tt.addr)
 			}
 			if !tt.wantErr && result.IsError {
-				t.Fatalf("expected success for addr %q, got error: %v", tt.addr, result.Content)
+				t.Fatalf("expected success for addr %q, got error: %v", tt.addr, proxyStartErrorText(result))
+			}
+			if tt.bindErr {
+				text := proxyStartErrorText(result)
+				if strings.Contains(text, "invalid listen_addr") || !strings.Contains(text, "proxy start") {
+					t.Errorf("error = %q, want a bind failure (\"proxy start\"), not a validation rejection", text)
+				}
 			}
 		})
 	}
@@ -1786,6 +1888,15 @@ func TestValidateTCPForwardsAgainstListenAddr(t *testing.T) {
 			wantErr:    false,
 		},
 		{
+			// USK-1125: forwards inherit the parent's bound host, so a
+			// wildcard parent and a forward on the same port collide.
+			name:       "wildcard listen_addr collision",
+			listenAddr: "0.0.0.0:9999",
+			forwards:   map[string]any{"9999": "upstream:80"},
+			wantErr:    true,
+			errSubstr:  "9999",
+		},
+		{
 			name:       "ipv6 loopback collision",
 			listenAddr: "[::1]:9999",
 			forwards:   map[string]any{"9999": "upstream:80"},
@@ -1793,10 +1904,10 @@ func TestValidateTCPForwardsAgainstListenAddr(t *testing.T) {
 			errSubstr:  "9999",
 		},
 		{
-			name:       "malformed listen_addr defers to validateLoopbackAddr",
+			name:       "malformed listen_addr defers to config.ValidateListenAddr",
 			listenAddr: "not-a-host-port",
 			forwards:   map[string]any{"8080": "upstream:443"},
-			wantErr:    false, // helper short-circuits; validateLoopbackAddr already rejected
+			wantErr:    false, // helper short-circuits; config.ValidateListenAddr already rejected
 		},
 		{
 			name:       "ephemeral listen_addr and ephemeral forward do not collide",

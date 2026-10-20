@@ -778,7 +778,7 @@ func (s *ConnectionStack) UpstreamTopmostForStream(streamID string) layer.Layer
 
 #### 3.4.2 TCP Forward L7 Dispatch
 
-In addition to the CONNECT / SOCKS5 / transparent paths, `yorishiro-proxy` accepts pre-configured **TCP forward** listeners (`tcp_forwards` in `proxy_start`). Each entry maps a local port to an upstream `host:port` and selects the connection-stack assembly explicitly rather than via peek-based detection.
+In addition to the CONNECT / SOCKS5 / transparent paths, `yorishiro-proxy` accepts pre-configured **TCP forward** listeners (`tcp_forwards` in `proxy_start`). Each entry maps a local port to an upstream `host:port` and selects the connection-stack assembly explicitly rather than via peek-based detection. A forward binds on its parent listener's **bound host** (USK-1125): a `0.0.0.0` parent yields `0.0.0.0:<port>` forwards, a `[::1]` parent yields `[::1]:<port>`; there is no per-forward bind override. `proxybuild.Manager` rejects a bind that overlaps another running listener or forward (equal non-zero port, and equal hosts or either host unspecified) with `ErrBindConflict` before calling `net.Listen`.
 
 Implementation: `internal/proxybuild/tcp_forward.go`. Configuration: `internal/config.ForwardConfig` with three independent axes —
 

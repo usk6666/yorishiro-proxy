@@ -1006,7 +1006,15 @@ type SafetyFilterRuleConfig struct {
 // TargetScopePolicyConfig.Validate even when -target-policy-file shadows it,
 // like every other section — a Policy-layer rule that can never match would
 // otherwise turn an operator deny into a silent no-op.
+//
+// USK-1125: listen_addr (when set) is checked via ValidateListenAddr so a
+// config-file value proxy_start would refuse fails at load time instead.
 func (c *ProxyConfig) Validate() error {
+	if c.ListenAddr != "" {
+		if err := ValidateListenAddr(c.ListenAddr); err != nil {
+			return err
+		}
+	}
 	if err := validateTLSFingerprintField(c.TLSFingerprint); err != nil {
 		return err
 	}

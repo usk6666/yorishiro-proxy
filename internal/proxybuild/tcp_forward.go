@@ -138,6 +138,11 @@ func (o *forwardConnOverride) resolveProtocol(entry *tcpForwardEntry) string {
 // net.Listen is synchronous, so on return the listener is bound (via
 // entry.addr) and the accept goroutine is running.
 //
+// The forward binds on the parent listener's bound host (USK-1125), so a
+// parent on 0.0.0.0 exposes its forwards on 0.0.0.0 and a parent on ::1
+// keeps them on ::1. An address overlapping another running listener or
+// forward fails with a wrapped ErrBindConflict before the bind.
+//
 // Lifecycle:
 //   - The accept goroutine exits when ctx is cancelled or the underlying
 //     net.Listener is closed.
@@ -202,8 +207,19 @@ func (m *Manager) startTCPForwardListener(
 		}
 	}
 
-	bindAddr := fmt.Sprintf("127.0.0.1:%s", port)
-	ln, err := net.Listen("tcp", bindAddr)
+	// USK-1125: bind on the parent listener's bound host, and reject an
+	// overlap with any running listener / forward before binding. m.mu is
+	// held across net.Listen so the conflict check and the bind see the
+	// same registry (no other m.mu holder can start a listener between
+	// them); see checkBindConflictLocked for the remaining window.
+	m.mu.Lock()
+	bindAddr := net.JoinHostPort(m.forwardBindHostLocked(parentListenerName), port)
+	if err := m.checkBindConflictLocked(bindAddr); err != nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("tcp forward port %s: %w", port, err)
+	}
+	ln, err := connector.ListenTCP(bindAddr)
+	m.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("tcp forward listen on %s: %w", bindAddr, err)
 	}

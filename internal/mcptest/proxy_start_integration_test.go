@@ -27,12 +27,14 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/mcptest"
 )
 
-// TestE2E_ProxyStart_ListenAddrValidation exercises the loopback / port
+// TestE2E_ProxyStart_ListenAddrValidation exercises the listen_addr
 // checks performed by proxy_start before it hands off to
-// proxybuild.Manager. The three sub-cases are:
+// proxybuild.Manager. The sub-cases are:
 //
 //   - Valid loopback bind succeeds (sanity).
-//   - Non-loopback bind is rejected with the documented error message.
+//   - An empty host and a DNS host name are rejected with the documented
+//     error messages (USK-1125: non-loopback IPs are accepted; see
+//     TestE2E_ProxyStart_WildcardListenRecordsTraffic).
 //   - Re-using the same listener port races into a bind error and the
 //     second proxy_start call surfaces it cleanly.
 func TestE2E_ProxyStart_ListenAddrValidation(t *testing.T) {
@@ -44,13 +46,22 @@ func TestE2E_ProxyStart_ListenAddrValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("non_loopback_rejected", func(t *testing.T) {
+	// USK-1125: non-loopback binds are allowed, but the wildcard must be
+	// spelled out — an empty host is refused with a hint naming 0.0.0.0.
+	t.Run("empty_host_rejected", func(t *testing.T) {
 		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
-		// validateLoopbackAddr emits "only loopback addresses are
-		// allowed" for non-loopback IPs — match a stable substring.
 		h.ExpectError(t, "proxy_start",
-			map[string]any{"listen_addr": "192.168.0.1:8080"},
-			"loopback")
+			map[string]any{"listen_addr": ":0"},
+			"0.0.0.0")
+	})
+
+	// Host names other than the literal "localhost" are refused: the
+	// bound interface must not depend on DNS resolution.
+	t.Run("hostname_rejected", func(t *testing.T) {
+		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
+		h.ExpectError(t, "proxy_start",
+			map[string]any{"listen_addr": "example.com:0"},
+			"IP literal")
 	})
 
 	t.Run("port_conflict_surfaces_error", func(t *testing.T) {
