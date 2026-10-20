@@ -1502,6 +1502,8 @@ func grpcAnomalyMetadataKey(t envelope.AnomalyType) string {
 		return "grpc_anomaly_lpm_too_large"
 	case envelope.AnomalyGRPCLPMTruncated:
 		return "grpc_anomaly_lpm_truncated"
+	case envelope.AnomalyGRPCMissingStatus:
+		return "grpc_anomaly_missing_status"
 	default:
 		return ""
 	}

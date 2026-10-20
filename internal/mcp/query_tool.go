@@ -629,6 +629,9 @@ var flowMetadataAnomalyKeyToType = map[string]string{
 	// wire_level=grpc-lpm-frame overlay rows.
 	"grpc_anomaly_lpm_too_large": string(envelope.AnomalyGRPCLPMTooLarge),
 	"grpc_anomaly_lpm_truncated": string(envelope.AnomalyGRPCLPMTruncated),
+	// Native gRPC response that ended without any grpc-status (USK-1251);
+	// recorded on the placeholder End.
+	"grpc_anomaly_missing_status": string(envelope.AnomalyGRPCMissingStatus),
 	// SSE anomalies (USK-656).
 	"sse_anomaly_missing_data": string(envelope.AnomalySSEMissingData),
 	"sse_anomaly_truncated":    string(envelope.AnomalySSETruncated),
