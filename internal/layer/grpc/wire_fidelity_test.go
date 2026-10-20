@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
@@ -55,6 +56,20 @@ type relayMutate func(i int, env *envelope.Envelope) *envelope.Envelope
 // RoleServer Channel handed its inner HTTP/2 Channel.
 func relayResponse(t *testing.T, push func(*stubInner), mutate relayMutate) ([]*envelope.Envelope, []*envelope.Envelope) {
 	t.Helper()
+	envs, sent, errs := relayResponseErrs(t, push, mutate)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("client Send #%d (%T): %v", i, envs[i].Message, err)
+		}
+	}
+	return envs, sent
+}
+
+// relayResponseErrs is relayResponse returning each client Send's error
+// (indexed like the drained envelopes; nil for a dropped one) instead of
+// failing the test on it.
+func relayResponseErrs(t *testing.T, push func(*stubInner), mutate relayMutate) ([]*envelope.Envelope, []*envelope.Envelope, []error) {
+	t.Helper()
 	upStub := newStubInner("up")
 	push(upStub)
 	up := Wrap(upStub, nil, RoleClient)
@@ -67,6 +82,7 @@ func relayResponse(t *testing.T, push func(*stubInner), mutate relayMutate) ([]*
 	drainNext(t, client, 1)
 
 	envs := drainAll(t, up)
+	errs := make([]error, len(envs))
 	for i, env := range envs {
 		out := env
 		if mutate != nil {
@@ -75,11 +91,9 @@ func relayResponse(t *testing.T, push func(*stubInner), mutate relayMutate) ([]*
 		if out == nil {
 			continue
 		}
-		if err := client.Send(context.Background(), out); err != nil {
-			t.Fatalf("client Send #%d (%T): %v", i, out.Message, err)
-		}
+		errs[i] = client.Send(context.Background(), out)
 	}
-	return envs, clientStub.sentSnapshot()
+	return envs, clientStub.sentSnapshot(), errs
 }
 
 // relayRequest pushes the client's request events onto a RoleServer
@@ -792,4 +806,205 @@ func TestRelay_EndStreamResponseWithoutGRPCStatusEdits(t *testing.T) {
 			t.Errorf("client-side send #1 = %v, want empty DATA with END_STREAM", describeSent(sent))
 		}
 	})
+}
+
+// sentHasGRPCStatus reports whether any frame the client-side Channel
+// handed its inner HTTP/2 Channel carries a grpc-status entry.
+func sentHasGRPCStatus(sent []*envelope.Envelope) bool {
+	for _, e := range sent {
+		var kvs []envelope.KeyValue
+		switch m := e.Message.(type) {
+		case *http2.H2HeadersEvent:
+			kvs = m.Headers
+		case *http2.H2TrailersEvent:
+			kvs = m.Trailers
+		}
+		if hasHeader(kvs, "grpc-status") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRelay_MissingStatusPlaceholderFabricatesNoStatus: the Status=0
+// placeholder End of a response without grpc-status must never reach the
+// client as a made-up grpc-status: 0 (OK).
+//
+//   - start_dropped: a Step dropped the Receive Start, so no response
+//     HEADERS went out. A proxy-built Trailers-Only would fabricate
+//     :status 200 + grpc-status 0 and turn the upstream's 503 into a
+//     successful RPC; the Send fails with a StreamError instead, so the
+//     session resets the client stream.
+//   - trailers_edited: an End trailer edit forces the HEADERS + TRAILERS
+//     fallback; the TRAILERS frame carries the edited trailers but no
+//     grpc-status the upstream never sent.
+//   - start_cloned_trailers_edited: the same edit after a Clone()d Start
+//     (HEADERS already sent) — TRAILERS without grpc-status.
+func TestRelay_MissingStatusPlaceholderFabricatesNoStatus(t *testing.T) {
+	t.Parallel()
+	push := func(s *stubInner) {
+		s.pushHeaders(envelope.Receive, []byte("HPACK-resp"), &http2.H2HeadersEvent{
+			Status:    503,
+			EndStream: true,
+			Headers:   []envelope.KeyValue{{Name: "server", Value: "lb"}},
+		})
+	}
+	added := envelope.KeyValue{Name: "x-added", Value: "v"}
+	editTrailers := func(env *envelope.Envelope) {
+		if m, ok := env.Message.(*envelope.GRPCEndMessage); ok {
+			m.Trailers = append(m.Trailers, added)
+		}
+	}
+
+	t.Run("start_dropped", func(t *testing.T) {
+		t.Parallel()
+		envs, sent, errs := relayResponseErrs(t, push, func(_ int, env *envelope.Envelope) *envelope.Envelope {
+			if _, ok := env.Message.(*envelope.GRPCStartMessage); ok {
+				return nil
+			}
+			return env
+		})
+		if sentHasGRPCStatus(sent) {
+			t.Errorf("client-side sends = %v, want no fabricated grpc-status", describeSent(sent))
+		}
+		if len(headersEvents(sent)) != 0 {
+			t.Errorf("client-side sends = %v, want no proxy-built response HEADERS", describeSent(sent))
+		}
+		var endErr error
+		for i, e := range envs {
+			if _, ok := e.Message.(*envelope.GRPCEndMessage); ok {
+				endErr = errs[i]
+			}
+		}
+		var se *layer.StreamError
+		if !errors.As(endErr, &se) {
+			t.Errorf("End Send err = %v, want a *layer.StreamError so the client stream is reset", endErr)
+		}
+	})
+
+	t.Run("trailers_edited", func(t *testing.T) {
+		t.Parallel()
+		_, sent := relayResponse(t, push, func(_ int, env *envelope.Envelope) *envelope.Envelope {
+			editTrailers(env)
+			return env
+		})
+		if len(sent) != 2 {
+			t.Fatalf("client-side sends = %v, want HEADERS + TRAILERS", describeSent(sent))
+		}
+		if h, ok := sent[0].Message.(*http2.H2HeadersEvent); !ok || h.Status != 503 || h.EndStream {
+			t.Errorf("client-side send #0 = %v, want HEADERS(503) without END_STREAM", describeSent(sent))
+		}
+		tr, ok := sent[1].Message.(*http2.H2TrailersEvent)
+		if !ok {
+			t.Fatalf("client-side send #1 = %v, want TRAILERS", describeSent(sent))
+		}
+		if want := []envelope.KeyValue{added}; !slices.Equal(tr.Trailers, want) {
+			t.Errorf("client trailers:\n got  %s\n want %s", kvString(tr.Trailers), kvString(want))
+		}
+	})
+
+	t.Run("start_cloned_trailers_edited", func(t *testing.T) {
+		t.Parallel()
+		_, sent := relayResponse(t, push, func(_ int, env *envelope.Envelope) *envelope.Envelope {
+			if _, ok := env.Message.(*envelope.GRPCStartMessage); ok {
+				return env.Clone()
+			}
+			editTrailers(env)
+			return env
+		})
+		if len(sent) != 2 {
+			t.Fatalf("client-side sends = %v, want HEADERS + TRAILERS", describeSent(sent))
+		}
+		tr, ok := sent[1].Message.(*http2.H2TrailersEvent)
+		if !ok {
+			t.Fatalf("client-side send #1 = %v, want TRAILERS", describeSent(sent))
+		}
+		if want := []envelope.KeyValue{added}; !slices.Equal(tr.Trailers, want) {
+			t.Errorf("client trailers:\n got  %s\n want %s", kvString(tr.Trailers), kvString(want))
+		}
+	})
+}
+
+// TestRelay_DataBetweenHeldStartAndEnd: a Receive Data Sent between a
+// deferred END_STREAM response Start and its End (e.g. a plugin-injected
+// message) flushes the held HEADERS first, without END_STREAM, so the wire
+// order stays HEADERS, DATA, then the End's frame.
+func TestRelay_DataBetweenHeldStartAndEnd(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		headers []envelope.KeyValue
+		// wantEnd checks the frame the End produced.
+		wantEnd func(t *testing.T, e *envelope.Envelope, sent []*envelope.Envelope)
+	}{
+		{
+			name:    "trailers_only",
+			headers: trailersOnlyHeaders(),
+			wantEnd: func(t *testing.T, e *envelope.Envelope, sent []*envelope.Envelope) {
+				tr, ok := e.Message.(*http2.H2TrailersEvent)
+				if !ok || !hasHeader(tr.Trailers, "grpc-status") {
+					t.Errorf("client-side send #2 = %v, want TRAILERS carrying grpc-status", describeSent(sent))
+				}
+			},
+		},
+		{
+			name:    "missing_status",
+			headers: []envelope.KeyValue{{Name: "server", Value: "lb"}},
+			wantEnd: func(t *testing.T, e *envelope.Envelope, sent []*envelope.Envelope) {
+				d, ok := e.Message.(*http2.H2DataEvent)
+				if !ok || !d.EndStream || len(d.Payload) != 0 {
+					t.Errorf("client-side send #2 = %v, want empty DATA with END_STREAM (no fabricated grpc-status)", describeSent(sent))
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			upStub := newStubInner("up")
+			upStub.pushHeaders(envelope.Receive, []byte("HPACK-resp"), &http2.H2HeadersEvent{
+				Status:    200,
+				EndStream: true,
+				Headers:   slices.Clone(tt.headers),
+			})
+			up := Wrap(upStub, nil, RoleClient)
+			defer up.Close()
+
+			clientStub := newStubInner("client")
+			clientStub.pushHeaders(envelope.Send, []byte("HPACK-req"), requestStartHeaders("/svc.S/M"))
+			client := Wrap(clientStub, nil, RoleServer)
+			defer client.Close()
+			drainNext(t, client, 1)
+
+			ctx := context.Background()
+			for i, env := range drainAll(t, up) {
+				if _, ok := env.Message.(*envelope.GRPCEndMessage); ok {
+					inj := &envelope.Envelope{
+						StreamID:  env.StreamID,
+						Direction: envelope.Receive,
+						Protocol:  envelope.ProtocolGRPC,
+						Message:   &envelope.GRPCDataMessage{Payload: []byte("inj")},
+					}
+					if err := client.Send(ctx, inj); err != nil {
+						t.Fatalf("client Send (injected Data): %v", err)
+					}
+				}
+				if err := client.Send(ctx, env); err != nil {
+					t.Fatalf("client Send #%d (%T): %v", i, env.Message, err)
+				}
+			}
+
+			sent := clientStub.sentSnapshot()
+			if len(sent) != 3 {
+				t.Fatalf("client-side sends = %v, want HEADERS, DATA, End frame", describeSent(sent))
+			}
+			if h, ok := sent[0].Message.(*http2.H2HeadersEvent); !ok || h.EndStream || h.Status != 200 {
+				t.Errorf("client-side send #0 = %v, want HEADERS(200) without END_STREAM", describeSent(sent))
+			}
+			if d, ok := sent[1].Message.(*http2.H2DataEvent); !ok || d.EndStream || len(d.Payload) != 5+len("inj") {
+				t.Errorf("client-side send #1 = %v, want the injected LPM DATA without END_STREAM", describeSent(sent))
+			}
+			tt.wantEnd(t, sent[2], sent)
+		})
+	}
 }
