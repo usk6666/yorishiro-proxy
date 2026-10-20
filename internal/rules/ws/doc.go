@@ -72,7 +72,9 @@
 //   - TargetPayload — full decompressed payload bytes
 //   - TargetOpcode  — numeric opcode rendered as "0xN" (e.g. "0x1" for Text)
 //
-// HTTP presets are NOT auto-loaded into the WS SafetyEngine. Operators
-// who want payload regex rules should add them with explicit
-// Targets: []common.Target{TargetPayload}.
+// common.TargetBody is accepted as an alias for TargetPayload (mirroring
+// the gRPC engine), so the built-in presets and custom `body` rules gate
+// WS frames. url / query / headers targets are skipped per frame: they
+// are evaluated on the WebSocket Upgrade request by the HTTP engine.
+// Presets are NOT auto-loaded; NewSafetyEngine starts empty.
 package ws
