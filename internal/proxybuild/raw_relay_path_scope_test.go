@@ -2,6 +2,7 @@ package proxybuild
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -186,5 +187,92 @@ func TestRunSingleChannelSession_UnconditionalAllowRawRelayRelays(t *testing.T) 
 	n, err := clientPeer.Read(got)
 	if err != nil || string(got[:n]) != string(banner) {
 		t.Errorf("client read %q, %v; want the banner %q", got[:n], err, banner)
+	}
+}
+
+// USK-1283: a raw relay that started under a host-only allow must be cut by
+// the live-connection registry when the scope is narrowed to a path-scoped
+// allow only — an identical new relay would be refused (refuseRawRelay), so
+// the live one must not survive. Before the fix Reconcile kept re-running
+// the gate's provisional check, which a path-scoped allow passes, and a
+// server-first upstream kept relaying to the client.
+func TestRunRawRelaySession_NarrowedToPathOnlyCutByReconcile(t *testing.T) {
+	const target = "127.0.0.1:2525"
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules([]connector.TargetRule{{Hostname: "127.0.0.1"}}, nil)
+	stack, clientPeer, upstreamPeer := newRawRelayTestStack(t, target)
+
+	// The tcp_forwards gate's predicates (tcp_forward_scope.go): the auto
+	// arm is admitted provisionally, the raw fallback strictly.
+	reg := connector.NewLiveConns(nil)
+	ctx, release, err := reg.Register(context.Background(), connector.LiveConn{
+		Via: "tcp-forward", Target: target,
+		Admit: func() (bool, string) {
+			allowed, _, reason := scope.CheckHost("", "127.0.0.1", 2525)
+			return allowed, reason
+		},
+		AdmitOpaque: func() (bool, string) { return scope.CheckOpaqueTarget("", "127.0.0.1", 2525) },
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	defer release()
+
+	// Server-first upstream that keeps writing until the leg closes.
+	chunk := []byte("220 stream chunk\r\n")
+	go func() {
+		for {
+			if _, err := upstreamPeer.Write(chunk); err != nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	// Mirror the production callers (buildOnStack, tcp_forward.go): a
+	// watcher closes the stack when the Register ctx is cancelled, which
+	// is how a revocation reaches both legs.
+	stopWatch := context.AfterFunc(ctx, func() { _ = stack.Close() })
+	defer stopWatch()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = runRawRelaySession(ctx, stack, pipeline.New(pipeline.NewHostScopeStep(scope)), session.SessionOptions{})
+	}()
+	defer func() {
+		_ = stack.Close()
+		<-done
+	}()
+
+	// The relay runs under the host-only allow.
+	_ = clientPeer.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 4096)
+	if n, err := clientPeer.Read(buf); err != nil || n == 0 {
+		t.Fatalf("client read before narrowing = %d, %v; want upstream bytes", n, err)
+	}
+
+	scope.ReplacePolicyRules([]connector.TargetRule{{Hostname: "127.0.0.1", PathPrefix: "/api/"}}, nil,
+		connector.PolicyOrigin{Source: "test"})
+	if got := reg.Reconcile("test"); got != 1 {
+		t.Errorf("Reconcile after narrowing to a path-only allow = %d revoked, want 1", got)
+	}
+
+	// At most the chunk already in flight on the synchronous pipe may
+	// arrive; then the client leg must close.
+	_ = clientPeer.SetReadDeadline(time.Now().Add(2 * time.Second))
+	after := 0
+	for {
+		n, err := clientPeer.Read(buf)
+		after += n
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				t.Errorf("client leg still open 2s after Reconcile (%d upstream bytes relayed after narrowing)", after)
+			}
+			break
+		}
+	}
+	if after > len(chunk) {
+		t.Errorf("client received %d upstream bytes after narrowing, want at most the %d-byte chunk in flight", after, len(chunk))
 	}
 }

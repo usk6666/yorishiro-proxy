@@ -35,3 +35,14 @@ var ErrTCPForwardsNotSupported = errors.New("proxybuild: tcp forward listeners n
 // (USK-1161). The wrapping error names the forward port, the target and
 // the scope's reason.
 var ErrTCPForwardTargetBlocked = errors.New("tcp forward target blocked by target scope")
+
+// ErrBindConflict is returned (wrapped) by StartNamed and
+// StartTCPForwardsNamed when the requested bind address overlaps an
+// address already bound by another listener or TCP forward under the same
+// Manager. Two addresses overlap when their ports are equal and non-zero
+// and their hosts are equal or either host is the unspecified address
+// (0.0.0.0 / ::). The check runs before the bind so the conflict surfaces
+// as a typed error instead of a platform-dependent EADDRINUSE (or, on
+// platforms where SO_REUSEADDR lets a specific-address bind shadow a
+// wildcard bind, no error at all).
+var ErrBindConflict = errors.New("proxybuild: bind address conflicts with a running listener")

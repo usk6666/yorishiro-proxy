@@ -186,5 +186,5 @@ func (s *Server) handleResendRaw(ctx context.Context, _ *gomcp.CallToolRequest, 
 	}
 
 	duration := time.Since(start)
-	return nil, formatResendRawResult(plan.streamID, respBytes, chunks, truncated, input.Tag, duration), nil
+	return nil, s.formatResendRawResult(plan.streamID, respBytes, chunks, truncated, input.Tag, duration), nil
 }

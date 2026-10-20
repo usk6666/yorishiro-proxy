@@ -1,0 +1,17 @@
+{
+  "id": "INTERCEPT_ID",
+  "protocol": "websocket",
+  "direction": "send",
+  "held_at": "2026-10-20T00:00:00Z",
+  "matched_rules": ["test-rule"],
+  "flow_id": "f-ws",
+  "stream_id": "s-ws",
+  "ws": {
+    "opcode": "text",
+    "fin": true,
+    "masked": true,
+    "payload_encoding": "text",
+    "payload": "ping"
+  },
+  "raw_bytes_available": false
+}

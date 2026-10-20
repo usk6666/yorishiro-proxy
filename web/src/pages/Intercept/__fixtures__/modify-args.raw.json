@@ -1,0 +1,10 @@
+{
+  "action": "modify_and_forward",
+  "params": {
+    "intercept_id": "INTERCEPT_ID"
+  },
+  "raw": {
+    "bytes_override": "QllFDQo=",
+    "bytes_encoding": "base64"
+  }
+}

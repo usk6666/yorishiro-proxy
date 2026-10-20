@@ -1313,12 +1313,15 @@ func (s *Server) applyResendGRPCTag(ctx context.Context, streamID, tag string) {
 
 // formatResendGRPCResult turns the collected response envelopes into
 // the wire-shape MCP result. SafetyFilter output masking is applied to
-// each Data payload before it leaves the proxy boundary; the unmasked
-// variant is on disk via RecordStep.
+// each Data payload (body-target rules) and to the start metadata and
+// trailers (header-target rules, order and casing preserved — the same
+// projection query uses for gRPC metadata) before they leave the proxy
+// boundary; the unmasked variant is on disk via RecordStep. End.Message
+// (grpc-message) is returned as received, as in query.
 func (s *Server) formatResendGRPCResult(streamID string, startMeta []envelope.KeyValue, dataEnvs []*envelope.Envelope, endEnv *envelope.Envelope, tag string, duration time.Duration) *resendGRPCResult {
 	result := &resendGRPCResult{
 		StreamID:      streamID,
-		StartMetadata: keyValuesToHeaderKVs(startMeta),
+		StartMetadata: s.filterOutputHeaderKVs(startMeta),
 		DurationMs:    duration.Milliseconds(),
 		Tag:           tag,
 	}
@@ -1341,7 +1344,7 @@ func (s *Server) formatResendGRPCResult(streamID string, startMeta []envelope.Ke
 			result.End = &resendGRPCEndResult{
 				Status:   endMsg.Status,
 				Message:  endMsg.Message,
-				Trailers: keyValuesToHeaderKVs(endMsg.Trailers),
+				Trailers: s.filterOutputHeaderKVs(endMsg.Trailers),
 			}
 		}
 	}
@@ -1414,19 +1417,6 @@ func buildUnknownFieldWarnings(sendFlows []*flow.Flow, spec *protoschema.MethodS
 		}
 	}
 	return warnings
-}
-
-// keyValuesToHeaderKVs projects an ordered envelope.KeyValue slice onto
-// the MCP result schema's headerKV slice. Order and casing preserved.
-func keyValuesToHeaderKVs(list []envelope.KeyValue) []headerKV {
-	if len(list) == 0 {
-		return nil
-	}
-	out := make([]headerKV, len(list))
-	for i, kv := range list {
-		out[i] = headerKV{Name: kv.Name, Value: kv.Value}
-	}
-	return out
 }
 
 // encodeResendGRPCPayload returns the payload string and its declared

@@ -319,6 +319,7 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		if forward == nil {
 			forward = env
 		}
+		restoreLayerOpaque(env, forward)
 		if r := s.recheckReleaseScope(ctx, env, forward, action.Type); r.Action != Continue {
 			return r
 		}
@@ -366,6 +367,34 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		// it is scope-checked like one.
 		return s.recheckReleaseScope(ctx, env, env, action.Type)
 	}
+}
+
+// restoreLayerOpaque gives a modify_and_forward envelope the held
+// envelope's Opaque (the producing Layer's per-message state). The
+// HoldQueue hands the control plane Envelope.Clone snapshots, which drop
+// Opaque, so the modified envelope comes back without it. The HTTP/1.x
+// Layer needs it to patch the modification onto the held wire bytes: a
+// changed body is re-framed (Transfer-Encoding dropped, Content-Length
+// re-stamped) and a header-only change keeps the held body bytes. Without
+// it the Layer serializes the request synthetically, writing the decoded
+// body under the held framing headers — a stale Content-Length or a
+// Transfer-Encoding: chunked over an unchunked body (USK-1258).
+//
+// Only an HTTPMessage that stays an HTTPMessage is restored: the Opaque
+// describes the held HTTP message, and a raw override replaces the
+// message type entirely. A forward that already carries an Opaque is left
+// alone.
+func restoreLayerOpaque(held, forward *envelope.Envelope) {
+	if forward == held || forward.Opaque != nil || held.Opaque == nil {
+		return
+	}
+	if _, ok := held.Message.(*envelope.HTTPMessage); !ok {
+		return
+	}
+	if _, ok := forward.Message.(*envelope.HTTPMessage); !ok {
+		return
+	}
+	forward.Opaque = held.Opaque
 }
 
 // pinLiveConnForHold pins the live connection carried by ctx for the

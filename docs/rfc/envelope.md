@@ -268,32 +268,52 @@ type GRPCStartMessage struct {
     Path      string
     RawQuery  string
 
-    // USK-1219: response-side overlay populated by the gRPC-Web Layer —
-    // the upstream's HTTP status line / :status and HTTP/1.x reason
-    // phrase, so the opposite-side Send relays them (instead of 200 OK)
-    // and RecordStep records Flow.StatusCode. Zero on the request side
-    // and on native gRPC (whose HTTP/2 mapping fixes :status at 200).
-    // Carried across plugin rebuilds but not exposed as dict keys.
+    // USK-1252: request-side method overlay populated by the gRPC-Web
+    // Layer — the client's HTTP/1.x request-line method / HTTP/2 :method,
+    // verbatim (no case folding), so the opposite-side Send relays it
+    // instead of forcing POST and RecordStep records Flow.Method. Empty on
+    // the response side and on native gRPC (not populated yet); an empty
+    // value is sent as POST. Carried across plugin rebuilds but not
+    // exposed as a dict key.
+    HTTPMethod string
+
+    // USK-1219 / USK-1251: response-side overlay — the upstream's HTTP
+    // status line / :status (and, on gRPC-Web over HTTP/1.x, the reason
+    // phrase), populated by both the gRPC-Web and the native gRPC Layer,
+    // so the opposite-side Send relays it (instead of 200) and RecordStep
+    // records Flow.StatusCode. An Envoy / load-balancer 503 in front of a
+    // gRPC service therefore reaches the client as 503. Zero on the
+    // request side; a Start with zero (synthetic producers, unparseable
+    // status) is sent as 200. HTTPStatusReason is always empty on native
+    // gRPC (HTTP/2 has no reason phrase). Carried across plugin rebuilds
+    // but not exposed as dict keys.
     HTTPStatus       int
     HTTPStatusReason string
 
     // gRPC metadata — custom and reserved, order and casing as observed.
     // Pseudo-headers (:method, :path, :status, ...) are NOT included here;
-    // the request-side ones and the gRPC-Web response status are projected
-    // onto the overlay fields above, and their wire bytes stay in
+    // :authority / :scheme / :path are projected onto the overlay fields
+    // above, as are the gRPC-Web request method and the response status
+    // (native gRPC does not project :method yet). Their wire bytes stay in
     // Envelope.Raw.
     Metadata []KeyValue
 
     // Parsed gRPC-specific control headers (D7). These four are stripped
     // from Metadata, so the structured fields are the single editable
-    // source. On gRPC-Web the Layer additionally records each observed
-    // entry's name, raw value and position on its per-RPC Opaque, and the
-    // opposite-side Send restores them: verbatim while the field is
-    // unchanged, value rewritten in place when it was edited, dropped when
-    // cleared, synthesized lowercase at the front only when never observed
-    // (USK-1219). An Envelope without that Opaque (Envelope.Clone, e.g.
-    // intercept modify_and_forward, or a synthetic producer) falls back to
-    // the synthesized layout.
+    // source. Both the gRPC-Web Layer (USK-1219) and the native gRPC Layer
+    // (USK-1251) additionally record each observed entry's name, raw value
+    // and position on their Opaque, and the opposite-side Send restores
+    // them: verbatim while the field is unchanged (duplicates and
+    // unparseable values such as "grpc-timeout: soon" survive), value
+    // rewritten in place when it was edited, dropped when cleared,
+    // synthesized lowercase at the front only when never observed. Nothing
+    // the wire did not carry is added on that path — no default
+    // content-type, and on native gRPC no "te: trailers" on a request
+    // whose client sent none. An Envelope without that Opaque
+    // (Envelope.Clone, e.g. intercept modify_and_forward, or a synthetic
+    // producer such as resend_grpc / fuzz_grpc / RESPOND_GRPC) falls back
+    // to the synthesized layout (content-type defaulted to
+    // application/grpc first, "te: trailers" on native gRPC requests).
     Timeout        time.Duration // grpc-timeout parsed (0 = unset)
     ContentType    string        // application/grpc[+proto|+json|...]
     Encoding       string        // grpc-encoding (identity, gzip, deflate, ...)
@@ -351,6 +371,8 @@ type GRPCEndMessage struct {
     Trailers []KeyValue
 }
 ```
+
+**Native gRPC responses that end on their HEADERS frame (USK-1251).** A Receive HEADERS frame carrying END_STREAM is both the Start and the End of the response side, so the native gRPC Layer emits a Start and a synthetic End (`Raw=nil`) for it. For a trailers-only response (grpc-status in the headers) the End is parsed from the frame, and its `Trailers` list the frame's other entries (content-type included — in this form the HEADERS frame *is* the trailer block). With no grpc-status at all (e.g. a load balancer's bare `HEADERS(:status 503, server: lb, END_STREAM)`) the End is a `Status=0` placeholder stamped `GRPCMissingStatus` (recorded as `grpc_anomaly_missing_status`). The opposite-side Send writes either back as the ONE `HEADERS ... END_STREAM` frame the wire carried — the Start's header list, nothing fabricated. An End edit is detected against the End as emitted (a snapshot on the Layer's Opaque, read from the Start's Envelope so an intercept `Clone()` of the End does not lose it): a status / message / details edit is written into the grpc-status / grpc-message / grpc-status-details-bin entries in place (cleared → dropped, never observed → appended), and a Start-side edit is relayed as edited. An End `Trailers` edit cannot be written in place, so that response falls back to HEADERS (no END_STREAM) + a TRAILERS frame rebuilt from the End. A placeholder End whose status was not edited never gets a fabricated grpc-status: in that fallback its TRAILERS frame carries only the edited trailers. When the Start was `Clone()`d (its HEADERS went out without END_STREAM), an untouched placeholder End ends the stream with an empty DATA frame (or a TRAILERS frame of just its edited trailers) rather than a fabricated grpc-status trailer. When no response HEADERS went out at all (a Step dropped the Receive Start), the End's Send fails with a StreamError and the session resets the client stream rather than answer with a proxy-built `:status 200` + `grpc-status: 0`. A dropped End leaves the deferred HEADERS unsent; teardown discards it, and the client sees RST_STREAM.
 
 **Envelope.Raw for gRPC envelopes** contains the wire bytes specific to that event:
 - `GRPCStartMessage`: the encoded HPACK block of the HEADERS frame (not the HTTP/2 frame wrapper).
@@ -758,7 +780,7 @@ func (s *ConnectionStack) UpstreamTopmostForStream(streamID string) layer.Layer
 
 #### 3.4.2 TCP Forward L7 Dispatch
 
-In addition to the CONNECT / SOCKS5 / transparent paths, `yorishiro-proxy` accepts pre-configured **TCP forward** listeners (`tcp_forwards` in `proxy_start`). Each entry maps a local port to an upstream `host:port` and selects the connection-stack assembly explicitly rather than via peek-based detection.
+In addition to the CONNECT / SOCKS5 / transparent paths, `yorishiro-proxy` accepts pre-configured **TCP forward** listeners (`tcp_forwards` in `proxy_start`). Each entry maps a local port to an upstream `host:port` and selects the connection-stack assembly explicitly rather than via peek-based detection. A forward binds on its parent listener's **bound host** (USK-1125): a `0.0.0.0` parent yields `0.0.0.0:<port>` forwards, a `[::1]` parent yields `[::1]:<port>`; there is no per-forward bind override. `proxybuild.Manager` rejects a bind that overlaps another running listener or forward (equal non-zero port, and equal hosts or either host unspecified) with `ErrBindConflict` before calling `net.Listen`.
 
 Implementation: `internal/proxybuild/tcp_forward.go`. Configuration: `internal/config.ForwardConfig` with three independent axes —
 
@@ -776,6 +798,8 @@ Implementation: `internal/proxybuild/tcp_forward.go`. Configuration: `internal/c
 | true  | true        | TLS         | TLS           | Full MITM: terminate then re-encrypt upstream |
 
 **Upstream HTTP/2 GOAWAY (USK-1165).** An `http2` / `grpc` forward connection (and `TLS=true` + negotiated `h2`) starts with one upstream connection, but it is not bound to it: when that connection goes stale (peer GOAWAY or shutdown), the next stream is opened on a freshly dialed upstream connection, exactly like the CONNECT path (USK-991). The same machinery applies — the redial chain shared by concurrent streams, one retry of an `OpenStream` refused before HEADERS (USK-993), and the pre-warm worker woken by GOAWAY on the current head, including the first connection (USK-992 / USK-994). The pre-warm does not replace a connection it opened itself that went away without carrying a stream (USK-1179), so an upstream that sends GOAWAY on every connection costs an idle client connection at most two upstream connections instead of one redial per RTT; reactive redials stay per-request. The redial re-runs the forward upstream dial (`dialForwardUpstream`: `UpstreamTLS`, the ALPN offer above, the `UpstreamInsecureSkipVerify` tri-state, upstream-proxy rotation, and the `(tls, on_handshake)` hook for the new handshake), not the CONNECT `RedialUpstreamH2`. Streams already open on a GOAWAY'd connection drain up to its `last_stream_id` (RFC 9113 §6.8); redialed connections are closed when the forward connection ends. Redials count in the same `h2_upstream` status counters as CONNECT. A stream whose `OpenStream` succeeded just before the GOAWAY but whose first HEADERS is sent after it is refused locally before any stream id is allocated (USK-1175; RFC 9113 §6.8 forbids opening it) and reaches the client as `RST_STREAM(REFUSED_STREAM)` with the flow recorded `failure_reason=refused`, so a retrying client lands on the redialed connection; the proxy does not re-send it itself.
+
+**Upstream RST_STREAM code relay (USK-1269).** On every path (CONNECT and forward) where both legs are HTTP/2 — plain h2, gRPC, and gRPC-Web over h2 — the RST_STREAM error code the upstream resets a stream with reaches the client verbatim, any non-zero value including codes outside the five `layer.ErrorCode` categories and unknown extension codes (RFC 9113 §7), as a direct connection would show; it is no longer rewritten to `CANCEL`. The HTTP/2 Layer records the peer's code losslessly on `layer.StreamError.PeerWireCode` (set only by a received RST_STREAM, never by proxy-synthesized terminations), and the session closes the client stream with `CloseWithCode`, which also carries the REFUSED_STREAM propagation above: a peer code wins, else an upstream refusal yields `REFUSED_STREAM`, else `CANCEL`. Only `REFUSED_STREAM` is downgraded to `CANCEL` once response HEADERS (a 1xx included) reached the client (RFC 9113 §8.7). Proxy-local failures (e.g. a truncated gRPC LPM) still reset the client with `CANCEL`, and the recorded `failure_reason` keeps the lossy classification (`ENHANCE_YOUR_CALM` records as `aborted`). The client→upstream direction is unchanged.
 
 **Server-speaks-first raw relays (USK-1216).** A `[bytechunk → bytechunk]` stack — the `raw` arm, the `auto` arm's raw fallback, and on the CONNECT / SOCKS5 side the raw-passthrough hosts, an unknown inner ALPN after TLS MITM and plaintext inner bytechunk — has its upstream connected before the session starts, so the session runs pre-dialed (`session.RunPreDialedStackSession`): both directions are read from the start, and a protocol whose server speaks first (SMTP / FTP / MySQL / IMAP / POP3 banners) reaches the client without the client sending anything. Lazy dialling on the first client envelope is an HTTP routing need, not a raw one. On these relays a clean EOF in one direction is passed on as a half-close (`bytechunk.Channel.CloseWrite`: FIN on TCP, `close_notify` on TLS), never a full close, so the peer reads EOF as on a direct TCP connection and the other direction keeps flowing. The first raw envelope in **either** direction creates the Stream row and makes the capture-scope decision (a raw envelope has no method / path, so the decision is direction-symmetric); a server-first stream therefore records the banner as its Receive sequence-0 Flow. Non-raw protocols keep "the first Send creates the Stream". Caveat: with `Protocol="auto"` the 5 s first-bytes peek runs before the raw fallback, so a server-first protocol's banner reaches a silent client only after that peek times out — use `Protocol="raw"` for such targets. Plaintext CONNECT / SOCKS5 to a server-first target is out of scope: the inner-protocol peek waits for client bytes.
 
@@ -1005,7 +1029,7 @@ The fix is therefore again at the call sites, and `CheckTarget` is unchanged:
 - **Provisional gates** — routes on which the Pipeline sees every request: CONNECT / SOCKS5 to a target that is neither in the TLS passthrough list nor in `raw_passthrough_hosts`, the plain-HTTP forward, and `tcp_forwards` `http` / `http2` / `websocket` / `sse` / `auto` — admit on `CheckHost` (the route classification is computed once per connection, so admission, the live-connection predicate and the passthrough decision agree).
 - **Strict gates** — routes that can never yield a path: the TLS passthrough relay, `raw_passthrough_hosts`, and `tcp_forwards` `raw` / `grpc` — use `CheckOpaqueTarget` (= `CheckTarget(…, "")`, with reason `ReasonPathRequired` when only a path-scoped allow matched). SOCKS5 refuses them with `REP=0x02` via `SOCKS5Negotiator.OpaqueRoute`.
 - `HostScopeStep` recomputes `CheckHost` per envelope, statelessly (so the USK-1159 release re-check and USK-1192 revoke path need nothing new): on `pathPending` an `http` envelope continues to `HTTPScopeStep`, a `ws` envelope continues (its frames ride a path-checked upgrade), and every other protocol — `raw`, `grpc`, `grpc-web` — is blocked, failing closed.
-- **Raw relay refusal (review S-1).** `HostScopeStep` sees only Send envelopes, so a server-first upstream on a provisionally admitted route that resolved to raw bytes would reach a silent client before any check fired. Every raw relay therefore converges on one seam (`proxybuild.runRawRelaySession`) that, before relaying a byte, re-runs the admitting gate's check strictly with the gate's own scheme (`LiveConn.AdmitOpaque` → `CheckOpaqueTarget`) and asks the Pipeline's `HostScopeStep` about the first client chunk (`Pipeline.AdmitsRawRelay`). A refusal is recorded as a payload-free `blocked_by: target_scope` audit Stream and the connection is closed.
+- **Raw relay refusal (review S-1).** `HostScopeStep` sees only Send envelopes, so a server-first upstream on a provisionally admitted route that resolved to raw bytes would reach a silent client before any check fired. Every raw relay therefore converges on one seam (`proxybuild.runRawRelaySession`) that, before relaying a byte, re-runs the admitting gate's check strictly with the gate's own scheme (`LiveConn.AdmitOpaque` → `CheckOpaqueTarget`) and asks the Pipeline's `HostScopeStep` about the first client chunk (`Pipeline.AdmitsRawRelay`). A refusal is recorded as a payload-free `blocked_by: target_scope` audit Stream and the connection is closed. The same call (`LiveConnHandle.ResolveOpaque`) marks the live connection resolved before it runs the strict check, so every later re-evaluation (`Reconcile` / `Settle`) uses `AdmitOpaque` too: narrowing a host-only allow to a path-scoped one closes a raw relay that is already running, exactly as it refuses an identical new one (USK-1283). Connections whose route stays HTTP keep the provisional predicate and are judged per request.
 - `HTTPScopeStep` checks the request path against both the client-written authority and `Context.TargetHost` (the host the upstream leg is bound to). Without the second check a provisional CONNECT to X plus `Host: Z` (Z allowed host-only) reached X on any path, and a path deny on X was bypassed by naming another host. Strictly stricter for denies; no verdict change for rules without `path_prefix`.
 
 The MCP control-plane address checks (`resend_raw`, `fuzz_raw`, `resend_grpc`, gRPC schema discovery, `resend_ws`) keep the strict `CheckTarget(…, "")`; URL-carrying tools already pass the path (`CheckURL`). Residual limitations are recorded in §11.

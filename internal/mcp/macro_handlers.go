@@ -259,7 +259,7 @@ func (s *Server) handleRunMacro(ctx context.Context, params macroParams) (*macro
 		return nil, fmt.Errorf("run macro: %w", err)
 	}
 
-	return buildRunMacroResult(result), nil
+	return s.buildRunMacroResult(result), nil
 }
 
 // loadAndBuildMacro loads a macro record from DB, parses its config, and builds a macro.Macro.
@@ -370,7 +370,12 @@ func checkMacroStepsProtocolWithStore(ctx context.Context, store flow.Reader, st
 }
 
 // buildRunMacroResult converts a macro.Result to the MCP response format.
-func buildRunMacroResult(result *macro.Result) *macroRunMacroResult {
+//
+// kv_store values come from (or are sent in) upstream traffic, so they
+// pass through SafetyFilter output masking on the way to the agent. The
+// masked values go into a new map; result.KVStore, the engine's own
+// store whose originals later steps already consumed, is never mutated.
+func (s *Server) buildRunMacroResult(result *macro.Result) *macroRunMacroResult {
 	stepResults := make([]macroStepResultEntry, len(result.StepResults))
 	for i, sr := range result.StepResults {
 		stepResults[i] = macroStepResultEntry{
@@ -387,10 +392,25 @@ func buildRunMacroResult(result *macro.Result) *macroRunMacroResult {
 		MacroName:     result.MacroName,
 		Status:        result.Status,
 		StepsExecuted: result.StepsExecuted,
-		KVStore:       result.KVStore,
+		KVStore:       s.filterOutputKVStore(result.KVStore),
 		StepResults:   stepResults,
 		Error:         result.Error,
 	}
+}
+
+// filterOutputKVStore returns a copy of kv with every value passed
+// through SafetyFilter output masking (body-target rules, the same
+// FilterOutput the other tools apply to bodies). Keys are not masked.
+// With no safety engine configured, kv is returned unchanged.
+func (s *Server) filterOutputKVStore(kv map[string]string) map[string]string {
+	if s.pipeline.safetyEngine == nil || kv == nil {
+		return kv
+	}
+	out := make(map[string]string, len(kv))
+	for k, v := range kv {
+		out[k] = string(s.filterOutputBody([]byte(v)))
+	}
+	return out
 }
 
 // handleDeleteMacro handles the delete_macro action.

@@ -1,0 +1,25 @@
+{
+  "id": "INTERCEPT_ID",
+  "protocol": "http",
+  "direction": "send",
+  "held_at": "2026-10-20T00:00:00Z",
+  "matched_rules": ["test-rule"],
+  "flow_id": "f-req",
+  "stream_id": "s-req",
+  "http": {
+    "method": "POST",
+    "scheme": "https",
+    "authority": "example.com",
+    "path": "/orig",
+    "raw_query": "a=1",
+    "headers": [
+      { "name": "Host", "value": "example.com" },
+      { "name": "X-Dup", "value": "1" },
+      { "name": "x-dup", "value": "2" },
+      { "name": "X-Remove", "value": "gone" }
+    ],
+    "body_encoding": "text",
+    "body": "hello"
+  },
+  "raw_bytes_available": false
+}

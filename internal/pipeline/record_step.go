@@ -1442,6 +1442,14 @@ func projectGRPCStart(m *envelope.GRPCStartMessage, fl *flow.Flow) {
 	if m.HTTPStatus != 0 {
 		fl.StatusCode = m.HTTPStatus
 	}
+	// USK-1252: the gRPC-Web request-side Start carries the client's
+	// observed HTTP request method; record it verbatim so the Send start
+	// flow matches the wire (query summary, filter.method, HAR export).
+	// Empty (response side, native gRPC, synthetic producers) leaves
+	// Method unset.
+	if m.HTTPMethod != "" {
+		fl.Method = m.HTTPMethod
+	}
 	// USK-920: project the request-side pseudo-headers (:authority,
 	// :scheme, :path) into Flow.URL so resend_grpc { flow_id } can
 	// recover the RPC target without manual overrides — mirroring the
@@ -1494,6 +1502,8 @@ func grpcAnomalyMetadataKey(t envelope.AnomalyType) string {
 		return "grpc_anomaly_lpm_too_large"
 	case envelope.AnomalyGRPCLPMTruncated:
 		return "grpc_anomaly_lpm_truncated"
+	case envelope.AnomalyGRPCMissingStatus:
+		return "grpc_anomaly_missing_status"
 	default:
 		return ""
 	}

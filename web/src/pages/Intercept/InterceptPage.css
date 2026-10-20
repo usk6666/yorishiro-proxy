@@ -111,25 +111,51 @@
   margin-bottom: var(--space-lg);
 }
 
-.intercept-method-select {
-  width: 100px;
-  height: 32px;
-  padding: 0 var(--space-sm);
+/* Request target parts: edited as held, never re-parsed as a URL */
+.intercept-method-input {
+  width: 110px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.intercept-scheme-input {
+  width: 90px;
+  flex-shrink: 0;
+}
+
+.intercept-authority-input {
+  flex: 1;
+}
+
+.intercept-query-separator {
+  align-self: center;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+/* Output Filter masked-content warning */
+.intercept-mask-warning {
+  margin-bottom: var(--space-lg);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--accent-warning);
+  border-radius: var(--radius-md);
+  color: var(--accent-warning);
+  font-size: var(--font-size-sm);
+}
+
+/* Read-only view for holds without a structured editor (gRPC / SSE) */
+.intercept-readonly-view {
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  overflow: auto;
+  max-height: 400px;
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
-  font-weight: 600;
   color: var(--text-primary);
   background-color: var(--bg-primary);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  cursor: pointer;
-  appearance: none;
-}
-
-.intercept-method-select:focus {
-  outline: none;
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
 }
 
 .intercept-url-input {

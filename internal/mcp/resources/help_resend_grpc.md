@@ -96,7 +96,7 @@ Tag stored on the new flow's `Tags` map.
 ## Result fields
 
 - `stream_id` — new Stream record holding send Flows (Start + Data*) and receive Flows (Start + Data* + End)
-- `start_metadata` — ordered `[{name, value}]` from the response GRPCStart
+- `start_metadata` — ordered `[{name, value}]` from the response GRPCStart. `start_metadata`, `messages[].payload` and `end.trailers` are masked by SafetyFilter Output Filter when active; `end.message` is not
 - `messages[]` — decoded response Data LPMs (`payload`, `payload_encoding`, `compressed`). The gRPC Layer always decompresses for inspection convenience; original wire bytes preserved on `Flow.RawBytes`.
 - `end` — optional. Contains `status` (gRPC code; 0 = OK), `message`, and `trailers` (excluding `grpc-status`, `grpc-message`, `grpc-status-details-bin`). May be `null` when the upstream terminated without a trailer HEADERS frame — diagnostic callers should treat that as "abnormal termination observed; no trailer received".
 - `warnings[]` — optional, non-fatal advisories. Mode A dial-provenance and observed-transport TLS-upgrade notices (USK-1056) come first, followed by `proto-json` unknown-field notices (USK-923).

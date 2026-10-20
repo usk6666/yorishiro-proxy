@@ -1,0 +1,417 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "type": "string"
+    },
+    "grpc_data": {
+      "additionalProperties": false,
+      "description": "typed modify payload for GRPCDataMessage envelopes",
+      "properties": {
+        "compressed": {
+          "description": "set the compression bit in the LPM prefix",
+          "type": [
+            "null",
+            "boolean"
+          ]
+        },
+        "end_stream": {
+          "description": "END_STREAM flag on the carrying H2 DATA frame",
+          "type": [
+            "null",
+            "boolean"
+          ]
+        },
+        "payload": {
+          "description": "decompressed gRPC payload (text or base64 per payload_encoding)",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "payload_encoding": {
+          "description": "text|base64; required when payload is non-textual",
+          "type": "string"
+        }
+      },
+      "type": [
+        "null",
+        "object"
+      ]
+    },
+    "grpc_start": {
+      "additionalProperties": false,
+      "description": "typed modify payload for GRPCStartMessage envelopes",
+      "properties": {
+        "encoding": {
+          "description": "grpc-encoding override",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "metadata": {
+          "description": "ordered metadata list replacement (transport pseudo-headers excluded)",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        },
+        "method": {
+          "description": "gRPC method name override",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "service": {
+          "description": "gRPC service name override",
+          "type": [
+            "null",
+            "string"
+          ]
+        }
+      },
+      "type": [
+        "null",
+        "object"
+      ]
+    },
+    "http": {
+      "additionalProperties": false,
+      "description": "typed modify payload for HTTPMessage envelopes",
+      "properties": {
+        "authority": {
+          "description": "authority override (request side)",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "body": {
+          "description": "body replacement (text or base64 per body_encoding); on HTTP/1.x a body change always drops Transfer-Encoding and re-stamps Content-Length",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "body_encoding": {
+          "description": "text|base64; required when body is non-textual",
+          "type": "string"
+        },
+        "body_patches": {
+          "description": "body patches applied on top of any body replacement",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "encoding": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "null",
+                  "array"
+                ]
+              },
+              "json_path": {
+                "type": "string"
+              },
+              "regex": {
+                "type": "string"
+              },
+              "replace": {
+                "type": "string"
+              },
+              "value": true
+            },
+            "type": "object"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        },
+        "headers": {
+          "description": "ordered header list replacement",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        },
+        "method": {
+          "description": "HTTP method override (request side)",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "path": {
+          "description": "request path override",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "raw_query": {
+          "description": "raw query string override",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "scheme": {
+          "description": "scheme override (request side)",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "status": {
+          "description": "HTTP status code override (response side)",
+          "type": [
+            "null",
+            "integer"
+          ]
+        },
+        "status_reason": {
+          "description": "HTTP/1.x status reason phrase override",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "trailers": {
+          "description": "ordered trailer list replacement",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        }
+      },
+      "type": [
+        "null",
+        "object"
+      ]
+    },
+    "params": {
+      "additionalProperties": false,
+      "properties": {
+        "intercept_id": {
+          "description": "intercepted envelope ID for release/modify_and_forward/drop",
+          "type": "string"
+        },
+        "mode": {
+          "description": "forwarding mode: structured (default) or raw",
+          "type": "string"
+        },
+        "raw_override_base64": {
+          "description": "base64-encoded raw bytes for raw-mode forwarding (max 10 MiB)",
+          "type": [
+            "null",
+            "string"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "raw": {
+      "additionalProperties": false,
+      "description": "typed modify payload for RawMessage envelopes",
+      "properties": {
+        "bytes_encoding": {
+          "description": "text|base64; required when bytes_override is non-textual",
+          "type": "string"
+        },
+        "bytes_override": {
+          "description": "replacement bytes (text or base64 per bytes_encoding); mutually exclusive with patches",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "patches": {
+          "description": "byte-level patches applied to the held envelope's RawMessage.Bytes; mutually exclusive with bytes_override",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "data_base64": {
+                "description": "Base64-encoded data to write at offset",
+                "type": "string"
+              },
+              "find_base64": {
+                "description": "Base64-encoded bytes to find",
+                "type": "string"
+              },
+              "find_text": {
+                "description": "text to find",
+                "type": "string"
+              },
+              "offset": {
+                "description": "byte offset for overwrite patch",
+                "type": [
+                  "null",
+                  "integer"
+                ]
+              },
+              "replace_base64": {
+                "description": "Base64-encoded bytes to replace with",
+                "type": "string"
+              },
+              "replace_text": {
+                "description": "text to replace with",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        }
+      },
+      "type": [
+        "null",
+        "object"
+      ]
+    },
+    "sse": {
+      "additionalProperties": false,
+      "description": "typed modify payload for SSEMessage envelopes",
+      "properties": {
+        "data": {
+          "description": "SSE data body override (joined; multi-line splits on '\\n')",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "event": {
+          "description": "SSE event name override (event: line)",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "id": {
+          "description": "SSE last event id override (id: line)",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "retry_ms": {
+          "description": "SSE retry interval ms; 0 clears the retry line",
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "null",
+            "integer"
+          ]
+        }
+      },
+      "type": [
+        "null",
+        "object"
+      ]
+    },
+    "ws": {
+      "additionalProperties": false,
+      "description": "typed modify payload for WSMessage envelopes",
+      "properties": {
+        "body_encoding": {
+          "description": "text|base64; required when payload is non-textual",
+          "type": "string"
+        },
+        "close_code": {
+          "description": "RFC 6455 status code (Close frames only)",
+          "type": [
+            "null",
+            "integer"
+          ]
+        },
+        "close_reason": {
+          "description": "close reason text (Close frames only)",
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "fin": {
+          "description": "Fin bit override",
+          "type": [
+            "null",
+            "boolean"
+          ]
+        },
+        "opcode": {
+          "description": "WebSocket opcode: name (text|binary|close|ping|pong|continuation) or numeric 0..15"
+        },
+        "payload": {
+          "description": "frame payload (text or base64 per body_encoding)",
+          "type": [
+            "null",
+            "string"
+          ]
+        }
+      },
+      "type": [
+        "null",
+        "object"
+      ]
+    }
+  },
+  "required": [
+    "action",
+    "params"
+  ],
+  "type": "object"
+}

@@ -20,13 +20,16 @@
 // arm tolerates any client-side outcome — what matters is that the
 // upstream WS handler did NOT see the matching frame.
 //
-// Why a custom rule (not destructive-sql preset): per
-// internal/rules/ws/safety.go::LoadPreset's docstring, the
-// destructive-sql preset's targets (TargetBody / TargetURL / TargetQuery)
-// are NOT WS-local — wsrules.SafetyEngine silently skips them. The
-// canonical WS-local targets are TargetPayload and TargetOpcode; this
-// test uses a custom rule with `pattern: "password="` and
-// `targets: ["payload"]` so the WS engine actually evaluates it.
+// Two configurations are covered:
+//
+//   - TestE2E_SafetyFilter_BlocksWSPayload uses a custom WS-local rule
+//     (`targets: ["payload"]`).
+//   - TestE2E_SafetyFilter_BlocksDestructiveSQLPreset_WS uses ONLY the
+//     built-in destructive-sql preset. The preset targets the
+//     HTTP-canonical {body, url, query}; wsrules.SafetyEngine maps
+//     TargetBody onto the frame payload (same alias as the gRPC engine),
+//     so the preset gates WS frames. url / query are screened on the
+//     Upgrade request by the HTTP engine, not per frame.
 package mcptest_test
 
 import (
@@ -153,6 +156,75 @@ func TestE2E_SafetyFilter_BlocksWSPayload(t *testing.T) {
 	}
 }
 
+// safetyFilterWSPresetOnlyConfig enables ONLY the destructive-sql preset
+// — no WS-local custom rule — so the WS frame block below can only come
+// from the preset reaching the WS engine.
+const safetyFilterWSPresetOnlyConfig = `{
+  "safety_filter": {
+    "enabled": true,
+    "input": {
+      "action": "block",
+      "rules": [
+        {"preset": "destructive-sql"}
+      ]
+    }
+  }
+}`
+
+// TestE2E_SafetyFilter_BlocksDestructiveSQLPreset_WS pins USK-1275 on
+// the production wiring (JSON-RPC harness → config loader →
+// InitPerProtocolSafetyEngines → proxybuild → pipeline.SafetyStep WS
+// arm): with only the destructive-sql preset configured, a benign WS
+// frame is echoed but a `DROP TABLE users` frame never reaches the
+// upstream. Before the fix every preset rule was silently skipped by the
+// WS engine and the destructive frame was forwarded.
+func TestE2E_SafetyFilter_BlocksDestructiveSQLPreset_WS(t *testing.T) {
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{
+		ConfigJSON:    safetyFilterWSPresetOnlyConfig,
+		UpstreamProto: "ws",
+	})
+
+	startRes := h.MustOK(t, "proxy_start", map[string]any{"listen_addr": "127.0.0.1:0"})
+	proxyAddr, _ := startRes.Decoded["listen_addr"].(string)
+	if proxyAddr == "" {
+		t.Fatalf("proxy_start: missing listen_addr in result: %s", startRes.Text)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := dialWSThroughProxy(ctx, t, proxyAddr, wsUpstreamHostPort(t, h.UpstreamTLS.URL))
+	if err != nil {
+		t.Fatalf("dial WS through proxy: %v", err)
+	}
+	defer conn.Close()
+
+	// (1) Benign frame — baseline that the path is functional.
+	benign := []byte(`{"op":"select","table":"users"}`)
+	if err := writeMaskedClientFrame(conn, wslayer.OpcodeText, benign); err != nil {
+		t.Fatalf("write benign frame: %v", err)
+	}
+	echo, err := readServerFrameWithDeadline(conn, 5*time.Second)
+	if err != nil {
+		t.Fatalf("read benign echo: %v", err)
+	}
+	if !bytes.Equal(echo.Payload, benign) {
+		t.Fatalf("benign WS echo mismatch: got %q want %q", echo.Payload, benign)
+	}
+	if got := h.WSObservedHits.Total(); got != 1 {
+		t.Fatalf("upstream hits after benign WS frame = %d, want 1", got)
+	}
+
+	// (2) Destructive frame — must NOT reach the upstream. Client-side
+	// outcome is not asserted (SafetyStep contract is Drop); the upstream
+	// hit counter is the load-bearing assertion.
+	_ = writeMaskedClientFrame(conn, wslayer.OpcodeText, []byte("DROP TABLE users"))
+	_, _ = readServerFrameWithDeadline(conn, 2*time.Second)
+	if got := h.WSObservedHits.Total(); got != 1 {
+		t.Errorf("upstream hits after DROP TABLE WS frame = %d, want 1 (destructive-sql preset did not block the frame)", got)
+	}
+}
+
 // wsUpstreamHostPort parses the httptest server URL ("https://h:p")
 // returned by mcptest into the "host:port" string the WS client must
 // reach via CONNECT. Mirrors grpcUpstreamHostPort in
@@ -215,13 +287,19 @@ func dialWSThroughProxy(ctx context.Context, t *testing.T, proxyAddr, upstreamHo
 // arrive verbatim. (Validating Accept here would only restate what
 // computeWSAccept already does on the server side.)
 func performClientWSHandshake(conn net.Conn, host string) error {
+	return performClientWSHandshakePath(conn, host, "/ws")
+}
+
+// performClientWSHandshakePath is performClientWSHandshake with an
+// explicit request-target (path + optional query).
+func performClientWSHandshakePath(conn net.Conn, host, requestTarget string) error {
 	keyBytes := make([]byte, 16)
 	if _, err := rand.Read(keyBytes); err != nil {
 		return fmt.Errorf("generate Sec-WebSocket-Key: %w", err)
 	}
 	wsKey := base64.StdEncoding.EncodeToString(keyBytes)
 
-	req := "GET /ws HTTP/1.1\r\n" +
+	req := "GET " + requestTarget + " HTTP/1.1\r\n" +
 		"Host: " + host + "\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +

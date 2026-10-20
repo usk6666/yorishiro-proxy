@@ -52,9 +52,11 @@ type proxyStartInput struct {
 	// Defaults to "default" if empty.
 	Name string `json:"name,omitempty" jsonschema:"listener name for multi-listener support, defaults to 'default' if omitted"`
 
-	// ListenAddr is the TCP address to listen on (e.g. "127.0.0.1:8080", "127.0.0.1:9090").
+	// ListenAddr is the TCP address to listen on (e.g. "127.0.0.1:8080",
+	// "0.0.0.0:8080", "[::]:8080", "10.0.0.5:8080"). Validated by
+	// config.ValidateListenAddr: IP literal or "localhost", explicit host.
 	// Defaults to "127.0.0.1:8080" if empty.
-	ListenAddr string `json:"listen_addr,omitempty" jsonschema:"TCP address to listen on, defaults to 127.0.0.1:8080 if omitted"`
+	ListenAddr string `json:"listen_addr,omitempty" jsonschema:"TCP host:port to listen on, defaults to 127.0.0.1:8080 if omitted. Host must be an IP literal or localhost; use 0.0.0.0 or [::] explicitly for all interfaces (an empty host is rejected). A non-loopback address exposes the proxy with no client authentication"`
 
 	// UpstreamProxy is the URL of an upstream proxy to route all outgoing
 	// traffic through.
@@ -233,7 +235,7 @@ type proxyStartResult struct {
 func (s *Server) registerProxyStart() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "proxy_start",
-		Description: "Start (or initialize) a proxy listener on a loopback address with HTTP/HTTPS/SOCKS5 MITM. " +
+		Description: "Start (or initialize) a proxy listener with HTTP/HTTPS/SOCKS5 MITM (default 127.0.0.1:8080; non-loopback binds such as 0.0.0.0 are allowed but expose an unauthenticated proxy). " +
 			"Intended for first-time startup / session initialization. " +
 			"Multiple named listeners are supported via 'name' (default: 'default'). " +
 			"IMPORTANT: each call fully resets all prior settings to the values in this request — " +
@@ -277,9 +279,10 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		)
 	}()
 
-	// Validate the listen address before attempting to start.
+	// Validate the listen address before attempting to start. Non-loopback
+	// IP literals are accepted (USK-1125); see config.ValidateListenAddr.
 	if input.ListenAddr != "" {
-		if err := validateLoopbackAddr(input.ListenAddr); err != nil {
+		if err := config.ValidateListenAddr(input.ListenAddr); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -470,14 +473,10 @@ func (s *Server) applyProxyStartSettings(input *proxyStartInput, parsedForwards 
 }
 
 // applyProxyStartPipeline validates and applies the proxy pipeline settings:
-// listen address, upstream proxy, TLS passthrough, intercept rules, and
-// auto-transform rules.
+// upstream proxy, TLS passthrough, intercept rules, and auto-transform
+// rules. listen_addr is validated by handleProxyStart before the listener
+// starts.
 func (s *Server) applyProxyStartPipeline(input *proxyStartInput) error {
-	if input.ListenAddr != "" {
-		if err := validateLoopbackAddr(input.ListenAddr); err != nil {
-			return err
-		}
-	}
 	if err := s.applyProxyStartUpstreamProxy(input); err != nil {
 		return err
 	}
@@ -702,7 +701,10 @@ func (s *Server) resolveListenerAddr(listenerName string) string {
 	return addr
 }
 
-// validateLoopbackAddr validates that the given address is a loopback address.
+// validateLoopbackAddr validates that the given address is a loopback
+// address. It guards the MCP HTTP server (RunHTTP), which must never be
+// exposed beyond loopback in cleartext. Proxy listeners use the broader
+// config.ValidateListenAddr instead (USK-1125).
 func validateLoopbackAddr(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -725,17 +727,20 @@ func validateLoopbackAddr(addr string) error {
 // validateTCPForwardsAgainstListenAddr rejects tcp_forwards entries whose
 // port key collides with the primary listen_addr port (USK-861).
 //
-// The forward listener and the parent listener both bind a 127.0.0.1
-// socket; if their ports match, only one bind can succeed. Without this
+// Forward listeners bind on the parent listener's bound host (USK-1125:
+// proxybuild.startTCPForwardListener inherits it), so the two sockets
+// always share a host; if their ports match, only one bind can succeed.
+// Without this
 // check, the parent bind wins, the forward bind fails with "address
 // already in use", and the user is left with a registered-but-broken
 // listener they cannot recreate under the same name. The check runs
 // BEFORE StartNamed so a self-collision is rejected fail-fast with no
 // side effects on the proxybuild registry.
 //
-// Forward listeners hardcode 127.0.0.1 (see proxybuild.startTCPForwardListener)
-// and listen_addr is enforced loopback by validateLoopbackAddr, so a port
-// match is sufficient for collision; host comparison is unnecessary.
+// Because the forward inherits the parent's host, a port match is
+// sufficient for collision; host comparison is unnecessary. Conflicts
+// against OTHER running listeners are detected by proxybuild's pre-bind
+// check (proxybuild.ErrBindConflict).
 //
 // Port 0 on EITHER side is treated as a non-collision: it means
 // "kernel-assigned ephemeral", and the kernel never hands out the same
@@ -761,20 +766,20 @@ func validateTCPForwardsAgainstListenAddr(listenAddr string, forwards map[string
 	}
 	_, listenPortStr, err := net.SplitHostPort(listenAddr)
 	if err != nil {
-		// listen_addr is malformed; defer to validateLoopbackAddr's
+		// listen_addr is malformed; defer to config.ValidateListenAddr's
 		// dedicated error message rather than producing a confusing
-		// "tcp_forwards: ..." error here. validateLoopbackAddr runs
+		// "tcp_forwards: ..." error here. config.ValidateListenAddr runs
 		// immediately before this helper, so a bad listenAddr will
 		// already have been rejected.
 		return nil
 	}
 	listenPort, err := strconv.Atoi(listenPortStr)
 	if err != nil {
-		// listen_addr port is non-numeric; defer to validateLoopbackAddr.
+		// listen_addr port is non-numeric; defer to config.ValidateListenAddr.
 		return nil
 	}
 	// Two ephemeral ports never collide: the kernel assigns distinct
-	// values to each net.Listen("tcp", "127.0.0.1:0"). Skip the check
+	// values to each ephemeral (port 0) bind. Skip the check
 	// when listen_addr asks for an ephemeral assignment.
 	if listenPort == 0 {
 		return nil

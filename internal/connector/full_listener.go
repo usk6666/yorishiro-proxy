@@ -173,7 +173,7 @@ func NewFullListener(cfg FullListenerConfig) *FullListener {
 // Start begins accepting connections. It blocks until ctx is cancelled or
 // the underlying listener fails to accept. Returns nil on graceful shutdown.
 func (fl *FullListener) Start(ctx context.Context) error {
-	ln, err := net.Listen("tcp", fl.addr)
+	ln, err := ListenTCP(fl.addr)
 	if err != nil {
 		return fmt.Errorf("connector: listen on %s: %w", fl.addr, err)
 	}

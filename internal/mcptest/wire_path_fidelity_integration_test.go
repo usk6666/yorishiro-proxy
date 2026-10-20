@@ -174,9 +174,15 @@ func TestE2E_WirePath_HTTP2_RecordAndResend(t *testing.T) {
 }
 
 // TestE2E_Intercept_HTTP1_ModifyHeaderKeepsWirePath is Test Plan row 4: a
-// header-only modify_and_forward re-synthesizes the HTTP/1.x request line
-// from HTTPMessage.Path. With a decoded Path, "/a%3Fb%20c" went out as
-// "GET /a?b c HTTP/1.1". Path shape invented for the test.
+// header-only modify_and_forward must not decode the request-target. With a
+// decoded Path, "/a%3Fb%20c" went out as "GET /a?b c HTTP/1.1". Path shape
+// invented for the test.
+//
+// Since USK-1258 the modified request keeps the held Layer state, so a
+// header-only modify relays the request line exactly like a release: the
+// absolute-form target the client sent, byte for byte (see
+// TestE2E_WirePath_HTTP1_AbsoluteForm_RecordAndResend). Before, the modify
+// lost that state and the request line was re-synthesized in origin-form.
 func TestE2E_Intercept_HTTP1_ModifyHeaderKeepsWirePath(t *testing.T) {
 	const wireTarget = "/a%3Fb%20c"
 	upstream := startRawHTTPUpstream(t)
@@ -218,9 +224,9 @@ func TestE2E_Intercept_HTTP1_ModifyHeaderKeepsWirePath(t *testing.T) {
 	})
 
 	got := upstream.waitForRequest(t, 5*time.Second)
-	if got.path != wireTarget {
+	if want := "http://" + upstream.addr() + wireTarget; got.path != want {
 		t.Errorf("upstream request-target = %q, want %q (request line %q %q %q)",
-			got.path, wireTarget, got.method, got.path, got.httpVersion)
+			got.path, want, got.method, got.path, got.httpVersion)
 	}
 	if v := findHeaderValue(got.headerLines(), "X-Modified"); v != "1" {
 		t.Errorf("upstream X-Modified = %q, want 1 (the modify did not apply)", v)

@@ -550,10 +550,16 @@ func (s *Server) applyResendRawTag(ctx context.Context, streamID, tag string) {
 // formatResendRawResult builds the structured result. response_bytes
 // is always base64 — raw payloads are binary by definition; never
 // attempt UTF-8 sniffing.
-func formatResendRawResult(streamID string, respBytes []byte, chunks int, truncated bool, tag string, duration time.Duration) *resendRawTypedResult {
+//
+// SafetyFilter output masking is applied to the concatenated response
+// bytes exactly as received (no decompression or dechunking, matching
+// query's raw-bytes view) before they leave the MCP boundary. The mask
+// works on a copy: the recorded receive chunks keep the wire bytes.
+// response_size reports the wire (pre-mask) length.
+func (s *Server) formatResendRawResult(streamID string, respBytes []byte, chunks int, truncated bool, tag string, duration time.Duration) *resendRawTypedResult {
 	return &resendRawTypedResult{
 		StreamID:       streamID,
-		ResponseBytes:  base64.StdEncoding.EncodeToString(respBytes),
+		ResponseBytes:  base64.StdEncoding.EncodeToString(s.filterOutputBody(respBytes)),
 		ResponseSize:   len(respBytes),
 		ResponseChunks: chunks,
 		Truncated:      truncated,

@@ -39,16 +39,18 @@ const (
 type Violation struct {
 	RuleID   string
 	RuleName string
-	Target   string // "payload" or "opcode"
+	Target   string // "payload" (also for common.TargetBody matches) or "opcode"
 	Match    string // matched fragment (raw payload bytes for TargetPayload)
 }
 
 // SafetyEngine checks WS frames against input safety rules.
 // Thread-safe via RWMutex.
 //
-// HTTP presets are NOT auto-loaded into the WS SafetyEngine. Operators
-// who want payload regex rules should add them with explicit
-// Targets: []common.Target{TargetPayload}.
+// Presets are NOT auto-loaded; NewSafetyEngine starts empty. When a
+// preset is loaded (LoadPreset) or a rule targets common.TargetBody, the
+// body target is evaluated against the frame payload. url / query /
+// headers targets are skipped per frame — they are evaluated on the
+// WebSocket Upgrade request by the HTTP engine.
 type SafetyEngine struct {
 	mu    sync.RWMutex
 	rules []common.CompiledRule
@@ -59,9 +61,11 @@ func NewSafetyEngine() *SafetyEngine {
 	return &SafetyEngine{}
 }
 
-// LoadPreset compiles and adds all rules from a named preset. Operators
-// must ensure the preset's targets are WS-local (TargetPayload /
-// TargetOpcode) — non-WS targets are silently skipped at evaluation.
+// LoadPreset compiles and adds all rules from a named preset verbatim.
+// The built-in presets target {body, url, query}: body is evaluated
+// against the frame payload (common.TargetBody aliases TargetPayload);
+// url / query are skipped per frame because the HTTP engine already
+// evaluates them on the WebSocket Upgrade request.
 func (e *SafetyEngine) LoadPreset(name string) error {
 	preset, err := common.LookupPreset(name)
 	if err != nil {
@@ -132,7 +136,7 @@ func (e *SafetyEngine) CheckInputAll(ctx context.Context, msg *envelope.WSMessag
 func (e *SafetyEngine) checkRule(_ context.Context, rule *common.CompiledRule, msg *envelope.WSMessage) *Violation {
 	for _, target := range rule.Targets {
 		data, targetName := e.extractTarget(target, msg)
-		if data == "" && target != TargetPayload {
+		if data == "" && target != TargetPayload && target != common.TargetBody {
 			// Empty payload still legitimately runs through the regex
 			// (some patterns may match the empty string); other targets
 			// short-circuit on empty.
@@ -157,12 +161,19 @@ func (e *SafetyEngine) checkRule(_ context.Context, rule *common.CompiledRule, m
 
 func (e *SafetyEngine) extractTarget(target common.Target, msg *envelope.WSMessage) (data, targetName string) {
 	switch target {
-	case TargetPayload:
+	case TargetPayload, common.TargetBody:
+		// common.TargetBody is an alias for the frame payload so the
+		// built-in presets (which target the HTTP-canonical body / url /
+		// query triple) and custom `body` rules gate WS frames. Mirrors
+		// the gRPC engine's TargetBody → payload alias.
 		return string(msg.Payload), string(TargetPayload)
 	case TargetOpcode:
 		return fmt.Sprintf("0x%X", uint8(msg.Opcode)), string(TargetOpcode)
 	default:
-		// Unknown / non-WS targets are silently skipped.
+		// url / query / headers have no frame-level meaning: they are
+		// evaluated on the WebSocket Upgrade request by the HTTP engine
+		// (SafetyStep's HTTP arm runs before the WS layer swap). Other
+		// unknown targets are likewise skipped.
 		return "", ""
 	}
 }

@@ -20,10 +20,11 @@ import (
 // them. RFC 9113 §8.7: REFUSED_STREAM tells the peer the stream was closed
 // before any application processing, so the request can be retried.
 
-// refusedCloser is the consumer-side optional interface the session uses to
-// pick REFUSED_STREAM over CANCEL on teardown (USK-1157).
-type refusedCloser interface {
-	CloseRefused() error
+// codeCloser is the consumer-side optional interface the session uses to
+// pick the teardown RST_STREAM code — REFUSED_STREAM over CANCEL (USK-1157),
+// or the upstream's own RST_STREAM code (USK-1269).
+type codeCloser interface {
+	CloseWithCode(code uint32) error
 }
 
 // collectRSTs reads frames from peer for window and returns the RST_STREAM
@@ -217,7 +218,7 @@ func acceptServerStream(t *testing.T, l *Layer, peer *h2Peer) layer.Channel {
 
 // TestChannel_CloseRefused_ServerRole pins the client-facing half of
 // USK-1157: when the upstream refused a stream, the session closes the
-// client stream with CloseRefused, which resets it with REFUSED_STREAM so
+// client stream with CloseWithCode(REFUSED_STREAM), which resets it with REFUSED_STREAM so
 // the client retries — unless a response HEADERS (including 1xx) already
 // reached the client, in which case the stream is no longer "unprocessed"
 // and CANCEL is the only honest code; and never when the client already
@@ -225,7 +226,7 @@ func acceptServerStream(t *testing.T, l *Layer, peer *h2Peer) layer.Channel {
 func TestChannel_CloseRefused_ServerRole(t *testing.T) {
 	tests := []struct {
 		name string
-		// prepare runs against the accepted stream before CloseRefused.
+		// prepare runs against the accepted stream before CloseWithCode(REFUSED_STREAM).
 		prepare func(t *testing.T, peer *h2Peer, ch layer.Channel)
 		want    []uint32
 	}{
@@ -286,12 +287,12 @@ func TestChannel_CloseRefused_ServerRole(t *testing.T) {
 			ch := acceptServerStream(t, l, peer)
 			tt.prepare(t, peer, ch)
 
-			rc, ok := ch.(refusedCloser)
+			rc, ok := ch.(codeCloser)
 			if !ok {
-				t.Fatalf("server-role channel %T does not implement CloseRefused", ch)
+				t.Fatalf("server-role channel %T does not implement CloseWithCode", ch)
 			}
-			if err := rc.CloseRefused(); err != nil {
-				t.Fatalf("CloseRefused: %v", err)
+			if err := rc.CloseWithCode(ErrCodeRefusedStream); err != nil {
+				t.Fatalf("CloseWithCode(REFUSED_STREAM): %v", err)
 			}
 			// A follow-up Close (the session's generic teardown, or a
 			// wrapper cascade) must not add a second RST.
@@ -312,7 +313,7 @@ func TestChannel_CloseRefused_ServerRole(t *testing.T) {
 			select {
 			case <-ch.Closed():
 			default:
-				t.Error("channel not terminated after CloseRefused")
+				t.Error("channel not terminated after CloseWithCode(REFUSED_STREAM)")
 			}
 		})
 	}
@@ -406,12 +407,12 @@ func TestChannel_CloseRefused_ServerRole_QueuedHeadersKeepsCancel(t *testing.T) 
 		t.Fatalf("Send(103) err = %v, want context.DeadlineExceeded (HEADERS still queued)", err)
 	}
 
-	rc, ok := ch.(refusedCloser)
+	rc, ok := ch.(codeCloser)
 	if !ok {
-		t.Fatalf("server-role channel %T does not implement CloseRefused", ch)
+		t.Fatalf("server-role channel %T does not implement CloseWithCode", ch)
 	}
-	if err := rc.CloseRefused(); err != nil {
-		t.Fatalf("CloseRefused: %v", err)
+	if err := rc.CloseWithCode(ErrCodeRefusedStream); err != nil {
+		t.Fatalf("CloseWithCode(REFUSED_STREAM): %v", err)
 	}
 
 	got := collectRSTs(t, peer, 300*time.Millisecond)[1]
