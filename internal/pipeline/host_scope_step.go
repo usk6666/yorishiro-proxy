@@ -113,6 +113,33 @@ func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Res
 	return Result{}
 }
 
+// AdmitsRawRelay reports whether the Pipeline's HostScopeStep would let
+// the first client-sent raw chunk of a connection whose client Layer
+// stamps envCtx through. The raw relay asks it before relaying anything
+// (USK-1130 review S-1): HostScopeStep checks only Send envelopes, so on
+// a server-first protocol with a silent client its verdict — in
+// particular the pathPending block for a path-scoped allow — would
+// otherwise never fire while upstream bytes reach the client. The probe
+// carries no payload and runs no other Step. A Pipeline without a
+// HostScopeStep admits.
+func (p *Pipeline) AdmitsRawRelay(ctx context.Context, envCtx envelope.EnvelopeContext) bool {
+	if p == nil {
+		return true
+	}
+	probe := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolRaw,
+		Context:   envCtx,
+		Message:   &envelope.RawMessage{},
+	}
+	for _, step := range p.steps {
+		if hs, ok := step.(*HostScopeStep); ok && hs.Process(ctx, probe).Action != Continue {
+			return false
+		}
+	}
+	return true
+}
+
 // requestPathChecked reports whether every Send envelope of protocol p is
 // covered by an HTTPScopeStep request-path check (USK-1130): HTTP requests
 // directly, WebSocket frames through the upgrade request. Raw bytes carry

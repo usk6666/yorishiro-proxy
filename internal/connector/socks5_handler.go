@@ -120,6 +120,8 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		// admits target cancels ctx for every route below.
 		ctx, release, ok := trackAdmitted(ctx, cfg.LiveConns, "socks5", target, func() (bool, string) {
 			return socks5ScopeCheck(scope, target, route.opaque())
+		}, func() (bool, string) {
+			return socks5ScopeCheck(scope, target, true)
 		}, connLogger)
 		defer release()
 		if !ok {

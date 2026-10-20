@@ -834,13 +834,57 @@ func runSingleChannelSession(ctx context.Context, stack *connector.ConnectionSta
 //
 // The client Layer is captured before the session runs: stack.Close
 // clears the stack's Layer list, so ClientTopmost is nil afterwards.
+//
+// Before relaying anything it refuses a relay the target scope does not
+// admit for raw bytes (refuseRawRelay, USK-1130 review S-1).
 func runRawRelaySession(ctx context.Context, stack *connector.ConnectionStack, p *pipeline.Pipeline, opts session.SessionOptions) error {
 	clientRaw, _ := stack.ClientTopmost().(*bytechunk.Layer)
+	if clientRaw != nil && refuseRawRelay(ctx, clientRaw.EnvelopeContext(), p, opts) {
+		clientRaw.ReleaseState()
+		return nil
+	}
 	err := session.RunPreDialedStackSession(ctx, stack, p, opts)
 	if clientRaw != nil {
 		clientRaw.ReleaseState()
 	}
 	return err
+}
+
+// refuseRawRelay reports whether a raw relay must be refused before its
+// first byte is relayed (USK-1130 review S-1). The connection gates admit
+// a host that only a path-scoped allow names provisionally on routes that
+// may still carry HTTP (tcp_forwards auto, CONNECT / SOCKS5 inner peek,
+// TLS MITM); a route that resolved to raw bytes never yields a request
+// path, so U1(a)'s strict rule applies once the route is known:
+//
+//   - the admitting gate's check re-run strictly, with the gate's own
+//     scheme (connector.LiveConnHandle.AdmitOpaque);
+//   - HostScopeStep's verdict on the first client chunk, evaluated now
+//     rather than when the client first writes (Pipeline.AdmitsRawRelay),
+//     since a server-first upstream would otherwise reach a silent client.
+//
+// A refusal is recorded as a payload-free audit Stream (blocked_by
+// target_scope) through the session's OnPipelineDrop hook; the caller
+// returns without relaying and its deferred stack.Close drops both legs.
+func refuseRawRelay(ctx context.Context, envCtx envelope.EnvelopeContext, p *pipeline.Pipeline, opts session.SessionOptions) bool {
+	allowed, reason := connector.LiveConnFromContext(ctx).AdmitOpaque()
+	if allowed && p.AdmitsRawRelay(ctx, envCtx) {
+		return false
+	}
+	if reason == "" {
+		reason = "target scope does not admit a raw relay"
+	}
+	connector.LoggerFromContext(ctx, slog.Default()).Info("raw relay target blocked by scope",
+		"target", envCtx.TargetHost, "reason", reason)
+	if opts.OnPipelineDrop != nil {
+		opts.OnPipelineDrop(ctx, &envelope.Envelope{
+			Direction: envelope.Send,
+			Protocol:  envelope.ProtocolRaw,
+			Context:   envCtx,
+			Message:   &envelope.RawMessage{},
+		}, pipeline.BlockedByTargetScope)
+	}
+	return true
 }
 
 // runHTTP1ExchangeLoop iterates the HTTP/1.x client Layer's Channels()

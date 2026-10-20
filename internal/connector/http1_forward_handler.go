@@ -193,7 +193,7 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 		ctx, release, ok := trackAdmitted(ctx, cfg.LiveConns, "http1-forward", target, func() (bool, string) {
 			allowed, reason, _ := forwardScopeCheck(cfg.Scope, target)
 			return allowed, reason
-		}, connLogger)
+		}, nil, connLogger)
 		defer release()
 		if !ok {
 			writeForwardErrorResponse(pc, 403, "Forbidden",

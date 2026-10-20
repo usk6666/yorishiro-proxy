@@ -235,6 +235,9 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		ctx, release, ok := trackAdmitted(ctx, cfg.LiveConns, "connect", target, func() (bool, string) {
 			allowed, reason, _ := connectScopeCheck(cfg.Scope, target, route.opaque())
 			return allowed, reason
+		}, func() (bool, string) {
+			allowed, reason, _ := connectScopeCheck(cfg.Scope, target, true)
+			return allowed, reason
 		}, connLogger)
 		defer release()
 		if !ok {

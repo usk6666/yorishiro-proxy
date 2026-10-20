@@ -171,6 +171,11 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		Admit: func() (bool, string) {
 			return tcpForwardScopeCheck(scope, entry.target, upstreamTLS, tcpForwardProtocol(entry.fc))
 		},
+		// USK-1130 review S-1: an auto arm that falls back to Raw is
+		// re-checked as the raw arm would be before any byte is relayed.
+		AdmitOpaque: func() (bool, string) {
+			return tcpForwardScopeCheck(scope, entry.target, upstreamTLS, "raw")
+		},
 	})
 	if err != nil {
 		logger.Info("tcp forward target blocked by scope (policy changed during admission)", "error", err)

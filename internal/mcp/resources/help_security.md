@@ -186,7 +186,8 @@ steps:
   `tcp_forwards` with `protocol: raw` or `grpc` (`proxy_start` refuses the entry),
   non-HTTP bytes inside a tunnel (the connection is closed and a raw Stream is
   recorded with `blocked_by: target_scope`; the upstream connection may already
-  have been opened, but receives no client byte), and gRPC / gRPC-Web requests.
+  have been opened, but receives no client byte and none of its bytes reach the
+  client), and gRPC / gRPC-Web requests.
   `path_prefix: "/"` behaves the same way: it still requires a request path.
 - **Deny** `{hostname: X, path_prefix: "/admin"}`: never refuses or closes a
   connection; it is enforced per request. It therefore does not cover TLS
@@ -240,20 +241,21 @@ recorded request still shows the scheme exactly as the client declared it.
 | Traffic | What the client sees | Recorded |
 |---|---|---|
 | HTTP/1.x, HTTP/2 request | `403` with `X-Blocked-By: target_scope` | Stream with `blocked_by: target_scope`, `state: error` |
-| Raw TCP (bytechunk — CONNECT / SOCKS5 tunnels carrying an unknown protocol, `raw_passthrough_hosts`, `tcp_forwards` with `protocol: raw` or an `auto` fallback to raw) | The connection is closed (EOF) at the first byte the client sends; none of the client's bytes reach the denied host | One raw Stream with `blocked_by: target_scope`, `state: error` |
+| Raw TCP (bytechunk — CONNECT / SOCKS5 tunnels carrying an unknown protocol, `raw_passthrough_hosts`, `tcp_forwards` with `protocol: raw` or an `auto` fallback to raw) | The connection is closed (EOF) when it settles on a raw relay, before any byte is relayed in either direction; none of the client's bytes reach the denied host and none of its bytes reach the client | One raw Stream with `blocked_by: target_scope`, `state: error` |
 | WebSocket, gRPC message | The message is dropped; the connection stays open | Stream with `blocked_by: target_scope` |
 | `tcp_forwards` target denied when `proxy_start` runs | `proxy_start` fails with an error naming the scope, port and target; nothing is bound | Nothing |
 | `tcp_forwards` target denied when a client connects | Plaintext `protocol: http` / `websocket` / `sse`: `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`, then close. Every other protocol and every `tls: true` entry: the connection is closed with no byte (a TLS client's handshake fails). The target is never contacted | Nothing (Info log) |
 
 A raw connection is closed rather than having single chunks dropped because a
 byte stream has no message boundary to drop at: removing some bytes and relaying
-the rest would hand the peer a corrupted stream. An upstream that speaks first
-(an SMTP / FTP / IMAP banner) can still deliver its greeting before the client's
-first byte is checked.
+the rest would hand the peer a corrupted stream. The check runs once, before the
+relay starts, so an upstream that speaks first (an SMTP / FTP / IMAP banner)
+delivers nothing to a client that has not written yet.
 
-The check runs on the client's first byte, not at connect time, so the denied
-host is still *contacted*: the upstream TCP connection is already open when
-that byte is examined, and on `raw_passthrough_hosts`, an unrecognised-ALPN
+The check runs when the raw relay starts — for a CONNECT / SOCKS5 tunnel or a
+`tcp_forwards` `auto` entry, after the inner bytes were classified — not at
+connect time, so the denied host is still *contacted*: the upstream TCP
+connection is already open when it runs, and on `raw_passthrough_hosts`, an unrecognised-ALPN
 tunnel or a `tcp_forwards` entry with `upstream_tls` the upstream TLS handshake
 (SNI included) has already completed too. A CONNECT admitted as `https` and
 then denied by an `http`-scheme rule on its inner plaintext is a case that

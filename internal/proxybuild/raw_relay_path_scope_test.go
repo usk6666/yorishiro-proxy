@@ -110,6 +110,65 @@ func TestRunSingleChannelSession_PathScopedAllowRawRelayRefused(t *testing.T) {
 	}
 }
 
+// S-1, gate leg: the admitting gate's strict check (LiveConn.AdmitOpaque,
+// with the gate's own scheme) refuses the relay even where HostScopeStep —
+// which reads the client leg's scheme — would admit it, and the refusal is
+// handed to OnPipelineDrop as a payload-free target_scope audit envelope.
+func TestRunRawRelaySession_GateStrictCheckRefuses(t *testing.T) {
+	stack, clientPeer, upstreamPeer := newRawRelayTestStack(t, "127.0.0.1:2525")
+	go streamBanner(upstreamPeer)
+
+	reg := connector.NewLiveConns(nil)
+	ctx, release, err := reg.Register(context.Background(), connector.LiveConn{
+		Via:         "tcp-forward",
+		Target:      "127.0.0.1:2525",
+		Admit:       func() (bool, string) { return true, "" },
+		AdmitOpaque: func() (bool, string) { return false, connector.ReasonPathRequired },
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	defer release()
+
+	type drop struct {
+		env       *envelope.Envelope
+		blockedBy string
+	}
+	drops := make(chan drop, 4)
+	opts := session.SessionOptions{OnPipelineDrop: func(_ context.Context, env *envelope.Envelope, blockedBy string) {
+		drops <- drop{env, blockedBy}
+	}}
+
+	done := make(chan error, 1)
+	go func() { done <- runRawRelaySession(ctx, stack, pipeline.New(), opts) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("runRawRelaySession = %v, want nil on a refusal", err)
+		}
+	case <-time.After(5 * time.Second):
+		_ = stack.Close()
+		t.Fatal("runRawRelaySession relayed instead of refusing")
+	}
+	if got := readUpstreamBytes(clientPeer, 200*time.Millisecond); got != 0 {
+		t.Errorf("client received %d upstream bytes, want 0", got)
+	}
+	select {
+	case d := <-drops:
+		if d.blockedBy != pipeline.BlockedByTargetScope || d.env.Protocol != envelope.ProtocolRaw ||
+			d.env.Context.TargetHost != "127.0.0.1:2525" {
+			t.Errorf("audit drop = (%q, protocol %q, target %q), want (target_scope, raw, 127.0.0.1:2525)",
+				d.blockedBy, d.env.Protocol, d.env.Context.TargetHost)
+		}
+		if m, _ := d.env.Message.(*envelope.RawMessage); m == nil || len(m.Bytes) != 0 || len(d.env.Raw) != 0 {
+			t.Errorf("audit envelope carries payload: %+v", d.env)
+		}
+	default:
+		t.Error("refusal was not handed to OnPipelineDrop")
+	}
+}
+
 // Control: an unconditional allow keeps the server-first raw relay working
 // (USK-1216) — the refusal is specific to path-scoped allows.
 func TestRunSingleChannelSession_UnconditionalAllowRawRelayRelays(t *testing.T) {

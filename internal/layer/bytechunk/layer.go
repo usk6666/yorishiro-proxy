@@ -90,6 +90,15 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 	return l
 }
 
+// EnvelopeContext returns the EnvelopeContext template the Layer stamps
+// on its envelopes (WithEnvelopeContext), without ReceivedAt.
+func (l *Layer) EnvelopeContext() envelope.EnvelopeContext {
+	if l.channel == nil {
+		return envelope.EnvelopeContext{}
+	}
+	return l.channel.ctxTmpl
+}
+
 // Channels returns a channel that yields exactly one Channel, then closes.
 func (l *Layer) Channels() <-chan layer.Channel { return l.ch }
 
