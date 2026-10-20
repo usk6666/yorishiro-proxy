@@ -180,6 +180,15 @@ type SOCKS5Negotiator struct {
 	// sent. Nil disables the check.
 	Scope *TargetScope
 
+	// OpaqueRoute reports whether a tunnel to target takes a route on
+	// which no HTTP request path is ever observed — the TLS passthrough
+	// relay or raw_passthrough_hosts (USK-1130; production wiring:
+	// TunnelRouteOpaque). Such a target is scope-checked strictly, so a
+	// path-scoped allow is refused with REP=0x02 before any tunnel byte.
+	// Nil classifies every target as path-checked; NewSOCKS5Handler then
+	// still refuses an opaque route itself, after the reply.
+	OpaqueRoute func(target string) bool
+
 	// RateLimiter is consulted before the SOCKS5 reply is sent. Nil
 	// disables rate limiting.
 	RateLimiter *RateLimiter
@@ -284,7 +293,12 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 	// handler registers the tunnel in LiveConns with socks5ScopeCheck, and
 	// a reload / security-tool write that no longer admits target closes
 	// it. The scheme used for that re-check is the same blank one.
-	if allowed, reason := socks5ScopeCheck(n.Scope, target); !allowed {
+	//
+	// USK-1130: a path-scoped allow admits target only on a route whose
+	// requests the Pipeline path-checks (see gateScopeCheck); OpaqueRoute
+	// says which routes never yield a path.
+	opaque := n.OpaqueRoute != nil && n.OpaqueRoute(target)
+	if allowed, reason := socks5ScopeCheck(n.Scope, target, opaque); !allowed {
 		n.logger(ctx).Info("socks5 target blocked by scope",
 			"target", target, "reason", reason)
 		_ = writeSOCKS5Reply(conn, socks5ReplyConnectionNotAllowed)
@@ -632,11 +646,13 @@ func (n *SOCKS5Negotiator) logger(ctx context.Context) *slog.Logger {
 }
 
 // socks5ScopeCheck is the SOCKS5 gate's scope check: blank scheme (see the
-// USK-1061 note in Negotiate), the requested host and port, path "". It is
+// USK-1061 note in Negotiate), the requested host and port, no path. It is
 // both the admission check and the live-connection predicate (USK-1160).
 // A nil or rule-less scope allows everything; with rules, a target that
 // SplitTargetHostPort rejects (port 0 included) is denied (USK-1249).
-func socks5ScopeCheck(scope *TargetScope, target string) (allowed bool, reason string) {
+// opaque selects the strict check for a route that never yields an HTTP
+// request path (USK-1130, see gateScopeCheck).
+func socks5ScopeCheck(scope *TargetScope, target string, opaque bool) (allowed bool, reason string) {
 	if scope == nil || !scope.HasRules() {
 		return true, ""
 	}
@@ -644,5 +660,5 @@ func socks5ScopeCheck(scope *TargetScope, target string) (allowed bool, reason s
 	if err != nil {
 		return false, err.Error()
 	}
-	return scope.CheckTarget("", host, port, "")
+	return gateScopeCheck(scope, "", host, port, opaque)
 }

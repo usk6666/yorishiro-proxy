@@ -690,3 +690,15 @@ func (r *replayChannel) Send(ctx context.Context, env *envelope.Envelope) error 
 func (r *replayChannel) Close() error            { return r.inner.Close() }
 func (r *replayChannel) Closed() <-chan struct{} { return r.inner.Closed() }
 func (r *replayChannel) Err() error              { return r.inner.Err() }
+
+// CloseWithCode forwards the session's client reset code (the upstream's
+// own RST_STREAM code, or REFUSED_STREAM for an upstream refusal) to the
+// wrapped HTTP/2 stream. Without it the gRPC wrapper above this Channel
+// would fall back to Close and the client would see CANCEL on the
+// Protocol="grpc" forward arm only.
+func (r *replayChannel) CloseWithCode(code uint32) error {
+	if cc, ok := r.inner.(interface{ CloseWithCode(uint32) error }); ok {
+		return cc.CloseWithCode(code)
+	}
+	return r.inner.Close()
+}

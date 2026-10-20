@@ -45,8 +45,9 @@ func NewTransformStep(
 //
 // Each per-protocol engine is responsible for clearing env.Raw on commit
 // when a wire-encoded snapshot is invalidated by the mutation. The Step
-// itself never touches env.Raw; on HTTP it clears env.RawAuthoritative when
-// a rule fired (RFC §9.3 D4 last-writer-wins, USK-1079).
+// itself never touches env.Raw; on HTTP, WebSocket, and SSE it clears
+// env.RawAuthoritative when a rule fired (RFC §9.3 D4 last-writer-wins,
+// USK-1079 / USK-1238 / USK-1239).
 //
 // ctx is forwarded to engines so future async transform paths (e.g. disk-
 // backed body materialization, plugin transforms) can honour cancellation.
@@ -97,7 +98,10 @@ func (s *TransformStep) processWS(ctx context.Context, env *envelope.Envelope, m
 	if s.ws == nil {
 		return Result{}
 	}
-	s.ws.Transform(ctx, env, msg)
+	if s.ws.Transform(ctx, env, msg) {
+		// RFC §9.3 D4 last-writer-wins, as on HTTP (USK-1238).
+		env.RawAuthoritative = false
+	}
 	return Result{}
 }
 
@@ -138,7 +142,10 @@ func (s *TransformStep) processGRPCEnd(ctx context.Context, env *envelope.Envelo
 // Result{Action: Drop, BlockedBy: BlockedByInterceptDrop} — same pattern
 // as WS / gRPC mid-stream drops. Engines do NOT clear env.Raw; the
 // session-side `sseMessageMutated` field-diff is the authoritative
-// re-encode signal (USK-892 wire-fidelity invariant).
+// re-encode signal (USK-892 wire-fidelity invariant). When a rule
+// modified the event, env.RawAuthoritative is cleared so a pre_pipeline
+// plugin msg["raw"] write no longer wins at the session writer (RFC §9.3
+// D4 last-writer-wins, USK-1239).
 func (s *TransformStep) processSSE(ctx context.Context, env *envelope.Envelope, msg *envelope.SSEMessage) Result {
 	if s.sse == nil {
 		return Result{}
@@ -146,6 +153,9 @@ func (s *TransformStep) processSSE(ctx context.Context, env *envelope.Envelope, 
 	res := s.sse.Transform(ctx, env, msg)
 	if res.Drop {
 		return Result{Action: Drop, BlockedBy: BlockedByInterceptDrop}
+	}
+	if res.Modified {
+		env.RawAuthoritative = false
 	}
 	return Result{}
 }

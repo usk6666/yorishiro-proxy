@@ -413,6 +413,8 @@ type StreamError struct {
 ```
 HTTP/2 layer が RST_STREAM frame を受けたとき、ErrorCode を翻訳して Channel.Next() が StreamError を返す。
 
+**追記 (USK-1269):** `Code` は分類 (lossy) のままとし、peer が wire に載せた protocol-native なコード (HTTP/2: RST_STREAM error code) を `PeerWireCode` / `HasPeerWireCode` に verbatim で併せ持つ。設定するのは受信した RST_STREAM (`handleStreamRST`, NO_ERROR 以外) のみで、GOAWAY refusal・local reset・`MarkTerminatedWithRST` などプロキシ側で合成した終端は設定しない。session はこれを見て client stream を `CloseWithCode(code)` で閉じ、upstream のコードをそのまま client に中継する。`Is` / `ClassifyError` は従来どおり `Code` のみを見る。
+
 **状態:** N6 実装時の詳細。RFC には書かない (細かすぎる)。
 
 ### Friction 4-A: First Envelope peek before wrap

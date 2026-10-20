@@ -68,14 +68,20 @@ func tcpForwardScheme(upstreamTLS bool) string {
 
 // tcpForwardScopeCheck is the TCP forward gate's scope check: the dial
 // leg's scheme, the literal target host (no DNS resolution; TargetScope
-// compares it in canonical form) and port, path "". It is the start-time
+// compares it in canonical form) and port, no path. It is the start-time
 // check, the accept-time check and the live-connection predicate, so a
 // connection survives a policy change iff an identical new one would be
 // admitted. A nil or rule-less scope allows everything. With rules, a
 // target that tcpForwardTargetHostPort rejects fails closed: net.Dial
 // resolves a service-name port ("postgresql" → 5432), so checking it as
 // port 0 would slip past a port-scoped deny (USK-1161 review S-1).
-func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamTLS bool) (allowed bool, reason string) {
+//
+// protocol is the entry's declared arm ("" = auto). A path-scoped allow
+// admits the target provisionally on the arms whose requests the Pipeline
+// path-checks — http, http2, websocket, sse and auto (an h2 gRPC stream or
+// an auto raw fallback is then blocked per envelope by HostScopeStep) —
+// and not on raw or grpc, which never yield a checked path (USK-1130).
+func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamTLS bool, protocol string) (allowed bool, reason string) {
 	if scope == nil || !scope.HasRules() {
 		return true, ""
 	}
@@ -83,7 +89,24 @@ func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamT
 	if err != nil {
 		return false, err.Error()
 	}
-	return scope.CheckTarget(tcpForwardScheme(upstreamTLS), host, port, "")
+	scheme := tcpForwardScheme(upstreamTLS)
+	if tcpForwardOpaqueProtocol(protocol) {
+		return scope.CheckOpaqueTarget(scheme, host, port)
+	}
+	allowed, _, reason = scope.CheckHost(scheme, host, port)
+	return allowed, reason
+}
+
+// tcpForwardOpaqueProtocol reports whether a forward arm never yields an
+// HTTP request path that HTTPScopeStep checks: raw is a byte relay, and
+// gRPC requests bypass the HTTP path check (USK-1236).
+func tcpForwardOpaqueProtocol(protocol string) bool {
+	switch protocol {
+	case "raw", "grpc":
+		return true
+	default:
+		return false
+	}
 }
 
 // tcpForwardTargetHostPort splits a forward target into host and a port
@@ -92,6 +115,14 @@ func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamT
 // rejected, so the port the scope checks is the port the dialer connects to.
 func tcpForwardTargetHostPort(target string) (string, int, error) {
 	return connector.SplitTargetHostPort(target)
+}
+
+// tcpForwardProtocol returns the forward's declared protocol ("" = auto).
+func tcpForwardProtocol(fc *config.ForwardConfig) string {
+	if fc == nil {
+		return ""
+	}
+	return fc.Protocol
 }
 
 // tcpForwardUpstreamTLS reports the forward's upstream_tls axis.
@@ -121,7 +152,7 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		"via", tcpForwardScopeVia,
 	)
 
-	if allowed, reason := tcpForwardScopeCheck(scope, entry.target, upstreamTLS); !allowed {
+	if allowed, reason := tcpForwardScopeCheck(scope, entry.target, upstreamTLS, tcpForwardProtocol(entry.fc)); !allowed {
 		logger.Info("tcp forward target blocked by scope", "reason", reason)
 		rejectTCPForwardConn(entry, conn, logger)
 		return ctx, func() {}, false
@@ -138,7 +169,12 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		Via:      tcpForwardScopeVia,
 		Target:   entry.target,
 		Admit: func() (bool, string) {
-			return tcpForwardScopeCheck(scope, entry.target, upstreamTLS)
+			return tcpForwardScopeCheck(scope, entry.target, upstreamTLS, tcpForwardProtocol(entry.fc))
+		},
+		// USK-1130 review S-1: an auto arm that falls back to Raw is
+		// re-checked as the raw arm would be before any byte is relayed.
+		AdmitOpaque: func() (bool, string) {
+			return tcpForwardScopeCheck(scope, entry.target, upstreamTLS, "raw")
 		},
 	})
 	if err != nil {

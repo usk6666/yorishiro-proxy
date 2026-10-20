@@ -523,27 +523,84 @@ func isRefusedStreamError(err error) bool {
 	return errors.As(err, &se) && se != nil && se.Code == layer.ErrorRefused
 }
 
-// refusedCloser is implemented by client Channels (the HTTP/2 stream and the
-// httpaggregator / gRPC / gRPC-Web wrappers over it) that can tell their
-// peer a stream was refused without processing — RST_STREAM(REFUSED_STREAM)
-// instead of CANCEL — so the peer may retry it (RFC 9113 §8.7). The Channel
-// decides from its own wire state whether the refusal still applies (a
+// peerWireCode returns the protocol-native error code the UPSTREAM peer put
+// on the wire when it terminated the stream (HTTP/2: its RST_STREAM code),
+// probing with the same precedence as refused. Only valid after the
+// errgroup's Wait.
+func (uh *upstreamHolder) peerWireCode() (uint32, bool) {
+	if c, ok := peerWireCodeOf(uh.dialErr); ok {
+		return c, true
+	}
+	if c, ok := peerWireCodeOf(uh.recvErr); ok {
+		return c, true
+	}
+	if uh.ch != nil {
+		return peerWireCodeOf(uh.ch.Err())
+	}
+	return 0, false
+}
+
+// peerWireCodeOf reports the peer wire code carried by a wrapped
+// *layer.StreamError, if any.
+func peerWireCodeOf(err error) (uint32, bool) {
+	var se *layer.StreamError
+	if errors.As(err, &se) && se != nil && se.HasPeerWireCode {
+		return se.PeerWireCode, true
+	}
+	return 0, false
+}
+
+// clientCloseCode is the session's decision on how to reset the client
+// stream at teardown; the zero value means a plain Close.
+type clientCloseCode struct {
+	code  uint32
+	valid bool
+}
+
+// upstreamCloseCode decides, after the errgroup's Wait and only for a failed
+// session, which reset code the client should see so that it observes what
+// a direct connection to the origin would have shown:
+//
+//  1. the upstream peer reset the stream with a wire code → that code,
+//     verbatim (USK-1269);
+//  2. else the upstream declared the stream unprocessed → REFUSED_STREAM,
+//     so the client retries (USK-1157);
+//  3. else a plain Close (CANCEL): the failure was the proxy's own, or the
+//     client's.
+func (uh *upstreamHolder) upstreamCloseCode() clientCloseCode {
+	if c, ok := uh.peerWireCode(); ok {
+		return clientCloseCode{code: c, valid: true}
+	}
+	if uh.refused() {
+		return clientCloseCode{code: h2ErrCodeRefusedStream, valid: true}
+	}
+	return clientCloseCode{}
+}
+
+// h2ErrCodeRefusedStream is HTTP/2 REFUSED_STREAM (RFC 9113 §7). The session
+// only passes it through to the client Channel; it does not interpret codes.
+const h2ErrCodeRefusedStream uint32 = 0x7
+
+// codeCloser is implemented by client Channels (the HTTP/2 stream and the
+// httpaggregator / gRPC / gRPC-Web wrappers over it) that can reset their
+// peer with a specific RST_STREAM error code instead of CANCEL. The Channel
+// decides from its own wire state whether the code still applies (a
 // response that already started cannot be refused).
-type refusedCloser interface {
-	CloseRefused() error
+type codeCloser interface {
+	CloseWithCode(code uint32) error
 }
 
 // closeClient tears the client Channel down at the end of a session. When
-// the upstream refused the stream, the refusal is propagated to the client
-// via CloseRefused so a browser retries the request exactly as it would
-// had it been talking to the origin directly (USK-1157); otherwise, or when
-// the client Channel cannot express a refusal, it is a plain Close.
-func closeClient(client layer.Channel, upstreamRefused bool) {
-	if upstreamRefused {
-		if rc, ok := client.(refusedCloser); ok {
-			slog.Debug("session: upstream refused the stream; closing client stream as refused",
-				"stream_id", client.StreamID())
-			_ = rc.CloseRefused()
+// the session decided on a reset code (see upstreamCloseCode) and the client
+// Channel can express one, it closes via CloseWithCode; otherwise it is a
+// plain Close.
+func closeClient(client layer.Channel, cc clientCloseCode) {
+	if cc.valid {
+		if c, ok := client.(codeCloser); ok {
+			slog.Debug("session: relaying upstream stream termination to client",
+				"stream_id", client.StreamID(),
+				"code", cc.code)
+			_ = c.CloseWithCode(cc.code)
 			return
 		}
 	}
@@ -584,10 +641,10 @@ func ClassifyError(err error) string {
 // error the context is cancelled and the other goroutine terminates. io.EOF
 // from Channel.Next is treated as normal stream termination, not an error.
 func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pipeline.Pipeline, opts ...SessionOptions) (retErr error) {
-	// upstreamRefused is decided after the errgroup's Wait, BEFORE the
+	// clientClose is decided after the errgroup's Wait, BEFORE the
 	// deferred upstream Close below runs (defers are LIFO), and consumed
 	// by the client teardown — see closeClient.
-	var upstreamRefused bool
+	var clientClose clientCloseCode
 
 	// Cleanup is conditional: when the session exits with ErrUpgradePending
 	// the caller (RunStackSession) needs the underlying wires alive so it
@@ -597,7 +654,7 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 		if errors.Is(retErr, ErrUpgradePending) {
 			return
 		}
-		closeClient(client, upstreamRefused)
+		closeClient(client, clientClose)
 	}()
 
 	var opt SessionOptions
@@ -678,7 +735,9 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 	if errors.Is(result, errRawBlockedByTargetScope) {
 		result = nil
 	}
-	upstreamRefused = result != nil && uh.refused()
+	if result != nil {
+		clientClose = uh.upstreamCloseCode()
+	}
 
 	// On upgrade, expose the still-live upstream Channel via the session's
 	// notice helper so RunStackSession can construct the post-upgrade Layer
@@ -2184,12 +2243,16 @@ func emitSSESyntheticEventTooLarge(
 		outEnv = env
 	}
 
-	// If the Pipeline mutated the envelope (plugin appended fields,
-	// edited the JSON payload, etc.), re-encode so the wire reflects
-	// the post-mutation state. Otherwise use the encoded bytes we
-	// already produced — sse.EncodeWireBytes is pure, so they match.
+	// A plugin msg["raw"] write that is still the last writer goes out
+	// verbatim (RFC-001 §9.3 D4, USK-1239). Otherwise, if the Pipeline
+	// mutated the envelope (plugin appended fields, edited the JSON
+	// payload, etc.), re-encode so the wire reflects the post-mutation
+	// state; else use the encoded bytes we already produced —
+	// sse.EncodeWireBytes is pure, so they match.
 	wireBytes := encoded
-	if cur, ok := outEnv.Message.(*envelope.SSEMessage); ok {
+	if outEnv.RawWins() {
+		wireBytes = outEnv.Raw
+	} else if cur, ok := outEnv.Message.(*envelope.SSEMessage); ok {
 		if cur != msg || cur.Event != "error" || cur.Data != string(payload) {
 			reEncoded, reErr := sse.EncodeWireBytes(outEnv)
 			if reErr == nil {
@@ -2536,7 +2599,9 @@ func runUpgradeSSEOverH2(
 // decide modification — comparing the encoder output to raw bytes would
 // flag every event whose upstream wire order differs from the encoder's
 // canonical order (event → id → retry → data), and a MITM must not
-// rewrite unmutated traffic.
+// rewrite unmutated traffic. A plugin msg["raw"] write that is still the
+// last writer (Envelope.RawWins) takes precedence over both — see
+// sseEventWireBytes.
 func relaySSEEvent(
 	ctx context.Context,
 	p *pipeline.Pipeline,
@@ -2601,12 +2666,30 @@ func relaySSEEvent(
 		outEnv = env
 	}
 
-	// Decide raw-vs-re-encoded payload. If the Pipeline did not touch
-	// the message fields, forward the raw bytes verbatim — preserving
-	// wire fidelity for unchanged events (field order, comments,
-	// unknown fields, "data:value" no-space round-trip).
-	if !sseMessageMutated(&snap, outEnv) {
-		return writeEventToClient(clientWriter, raw, chunkedTE)
+	return writeEventToClient(clientWriter, sseEventWireBytes(&snap, outEnv, raw, streamID), chunkedTE)
+}
+
+// sseEventWireBytes picks the bare event bytes relaySSEEvent writes for
+// a Pipeline output envelope; the caller adds the per-transport framing
+// (h1 chunked via writeEventToClient, h2 DATA via the detach writer).
+//
+//   - RFC-001 §9.3 D4 "Raw wins" (USK-1239): while a plugin's msg["raw"]
+//     write is still the last writer (outEnv.RawWins()), its bytes are
+//     the complete wire event and go out verbatim — no terminator is
+//     appended and nothing is validated. A firing Transform or an
+//     intercept modify clears the marker and hands the wire back to the
+//     Message path.
+//   - Otherwise, if the Pipeline did not touch the message fields, the
+//     upstream bytes go out verbatim — preserving wire fidelity for
+//     unchanged events (field order, comments, unknown fields,
+//     "data:value" no-space round-trip).
+//   - Otherwise the mutated message is re-encoded.
+func sseEventWireBytes(snap *envelope.SSEMessage, outEnv *envelope.Envelope, raw []byte, streamID string) []byte {
+	if outEnv.RawWins() {
+		return outEnv.Raw
+	}
+	if !sseMessageMutated(snap, outEnv) {
+		return raw
 	}
 	encoded, eerr := sse.EncodeWireBytes(outEnv)
 	if eerr != nil {
@@ -2618,9 +2701,9 @@ func relaySSEEvent(
 		slog.Warn("session: SSE re-encode failed; forwarding raw bytes",
 			slog.String("err", eerr.Error()),
 			slog.String("stream_id", streamID))
-		return writeEventToClient(clientWriter, raw, chunkedTE)
+		return raw
 	}
-	return writeEventToClient(clientWriter, encoded, chunkedTE)
+	return encoded
 }
 
 // sseMessageMutated reports whether the Pipeline's output envelope

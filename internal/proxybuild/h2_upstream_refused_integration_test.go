@@ -111,6 +111,8 @@ type refusingH2Origin struct {
 	mode  refusingOriginMode
 	batch int
 	grpc  bool
+	// rstCode: see refusingOriginOpts.rstCode; read via resetCode.
+	rstCode http2.ErrCode
 
 	accepts atomic.Int64
 	wg      sync.WaitGroup
@@ -145,6 +147,10 @@ type refusingOriginOpts struct {
 	// content-type application/grpc, one LPM DATA frame, grpc-status
 	// trailers) instead of text/plain.
 	grpc bool
+	// rstCode is the RST_STREAM error code originRSTLast and
+	// originEarlyHintsThenRST reset with; zero means REFUSED_STREAM
+	// (USK-1269 drives the other codes through the same scenarios).
+	rstCode http2.ErrCode
 }
 
 func startRefusingH2OriginOpts(t *testing.T, opts refusingOriginOpts) *refusingH2Origin {
@@ -165,6 +171,7 @@ func startRefusingH2OriginOpts(t *testing.T, opts refusingOriginOpts) *refusingH
 		mode:          opts.mode,
 		batch:         opts.batch,
 		grpc:          opts.grpc,
+		rstCode:       opts.rstCode,
 		refused:       make(map[uint32]bool),
 		firstConnDone: make(chan struct{}),
 	}
@@ -545,7 +552,7 @@ func (o *refusingH2Origin) runScenario(oc *originConn) bool {
 			}
 		}
 		o.markRefused(last)
-		if err := oc.fr.WriteRSTStream(last, http2.ErrCodeRefusedStream); err != nil {
+		if err := oc.fr.WriteRSTStream(last, o.resetCode()); err != nil {
 			return false
 		}
 		return true
@@ -558,12 +565,20 @@ func (o *refusingH2Origin) runScenario(oc *originConn) bool {
 			return false
 		}
 		o.markRefused(id)
-		if err := oc.fr.WriteRSTStream(id, http2.ErrCodeRefusedStream); err != nil {
+		if err := oc.fr.WriteRSTStream(id, o.resetCode()); err != nil {
 			return false
 		}
 		return true
 	}
 	return false
+}
+
+// resetCode is the RST_STREAM code the RST-based modes reset with.
+func (o *refusingH2Origin) resetCode() http2.ErrCode {
+	if o.rstCode == 0 {
+		return http2.ErrCodeRefusedStream
+	}
+	return o.rstCode
 }
 
 func (o *refusingH2Origin) markRefused(ids ...uint32) {

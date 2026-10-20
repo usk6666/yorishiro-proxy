@@ -193,9 +193,10 @@ func TestGRPCLPMPartialAnomaly_ReceiveTruncated(t *testing.T) {
 	var resp []byte
 	req := []byte("hi")
 	err := cc.Invoke(ctx, "/svc.S/M", &req, &resp)
-	// Characterization (captured before USK-1254, unchanged by it): the
-	// upstream-side stream error cascades to the client as
-	// RST_STREAM(CANCEL), which grpc-go surfaces as codes.Canceled.
+	// The truncated LPM is a proxy-local failure (the gRPC wrapper's own
+	// "stream ended mid-LPM" error; the upstream sent no RST_STREAM), so
+	// there is no upstream reset code to relay (USK-1269) and CANCEL is the
+	// intended client reset, which grpc-go surfaces as codes.Canceled.
 	if got := status.Code(err); got != codes.Canceled {
 		t.Errorf("client status = %v (err=%v), want %v (pre-USK-1254 characterization)", got, err, codes.Canceled)
 	}

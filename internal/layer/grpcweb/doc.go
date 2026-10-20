@@ -54,6 +54,37 @@
 // placeholder for a trailer the upstream never sent, so no trailer frame is
 // synthesized for it.
 //
+// A Receive HTTPMessage with an empty body still yields Start + End
+// (USK-1219): the End carries the grpc-status / grpc-message of a
+// trailers-only response read from the HTTP headers, or the
+// AnomalyMissingGRPCWebTrailer placeholder when there is none (e.g. a bare
+// 503). The opposite-side Send writes such a response with an empty body —
+// a trailers-only status already travels in the headers, so no trailer
+// frame is added; an edit to that End (detected against the End as emitted,
+// not against the headers) is written back into those header entries in
+// place, while a Start-side edit of the same headers is relayed as edited.
+// The End baseline lives on the Layer's per-RPC Opaque, so when both the
+// Start and End Envelopes were Clone()d or synthesized an End edit is not
+// projected and the headers are relayed as the Start carries them. A
+// response that carried a trailer frame is never projected onto its
+// headers: header and trailer statuses are relayed as observed even when
+// they disagree, and an edit to its End (which clears the End's Raw) is
+// re-encoded into a trailer frame even when its headers also carry
+// grpc-status. A 1xx informational response (100, 103; 101 too when the
+// inner Layer is HTTP/2, which delivers it as interim) is not final: it
+// yields only a Start and no End.
+//
+// # Status, path and query (USK-1219, USK-1069 / USK-1110)
+//
+// The response status and reason are projected onto
+// GRPCStartMessage.HTTPStatus / HTTPStatusReason and relayed by the
+// opposite-side Send; a Start without one (synthetic producers, or a live
+// response whose status line / :status the inner Layer could not parse and
+// left at 0) is written as 200 OK. On the request side Path / RawQuery are projected from the
+// inner HTTPMessage and the Send side resolves the path with pathForStart
+// (the observed path wins when parseServiceMethod cannot represent it) and
+// forwards RawQuery for the inner HTTP Layer to rejoin.
+//
 // # Malformed bodies, request trailers and framing headers (USK-1203)
 //
 // A body that fails to parse (malformed base64 / LPM / trailer) is emitted
@@ -85,6 +116,13 @@
 // grpc-encoding, grpc-accept-encoding, grpc-timeout. The stripped values
 // populate ContentType, Encoding, AcceptEncoding, Timeout respectively.
 // Order and casing of remaining Metadata entries are preserved.
+//
+// The stripped entries' observed names, raw values and positions are
+// recorded on the per-RPC Opaque, and the opposite-side Send restores them
+// (rebuildStartHeaders): verbatim while the structured field is unchanged,
+// rewritten in place when edited, dropped when cleared, synthesized
+// lowercase at the front only when never observed. An Envelope that lost
+// its Opaque (Envelope.Clone) gets the synthesized layout.
 //
 // On Receive, GRPCEndMessage.Trailers excludes grpc-status, grpc-message,
 // and grpc-status-details-bin per RFC §3.2.3; those values populate Status,

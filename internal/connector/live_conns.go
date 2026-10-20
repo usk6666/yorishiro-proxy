@@ -75,6 +75,12 @@ type LiveConn struct {
 	Target string
 	// Admit is the gate's admission check. A nil Admit is never cut.
 	Admit LiveConnAdmitFunc
+	// AdmitOpaque is the gate's check run strictly, as for a route that
+	// never yields an HTTP request path (CheckOpaqueTarget, USK-1130).
+	// A gate that admits path-scoped allows provisionally sets it so the
+	// raw relay can refuse once the route resolves to raw bytes (see
+	// LiveConnHandle.AdmitOpaque). Nil means Admit is already strict.
+	AdmitOpaque LiveConnAdmitFunc
 }
 
 type liveConnEntry struct {
@@ -307,13 +313,17 @@ func (r *LiveConns) Len() int {
 // the connection must be rejected (an Info line was logged). On ok=true the
 // caller must use the returned ctx for everything that follows and defer
 // release.
-func trackAdmitted(ctx context.Context, reg *LiveConns, via, target string, admit LiveConnAdmitFunc, logger *slog.Logger) (context.Context, func(), bool) {
+//
+// admitOpaque is the gate's strict check (LiveConn.AdmitOpaque); nil when
+// admit is already strict.
+func trackAdmitted(ctx context.Context, reg *LiveConns, via, target string, admit, admitOpaque LiveConnAdmitFunc, logger *slog.Logger) (context.Context, func(), bool) {
 	tctx, release, err := reg.Register(ctx, LiveConn{
-		ConnID:   ConnIDFromContext(ctx),
-		Listener: ListenerNameFromContext(ctx),
-		Via:      via,
-		Target:   target,
-		Admit:    admit,
+		ConnID:      ConnIDFromContext(ctx),
+		Listener:    ListenerNameFromContext(ctx),
+		Via:         via,
+		Target:      target,
+		Admit:       admit,
+		AdmitOpaque: admitOpaque,
 	})
 	if err != nil {
 		logger.Info("target blocked by scope (policy changed during admission)",
@@ -410,6 +420,27 @@ func (h *LiveConnHandle) RevokePending() bool {
 		return true
 	}
 	return h.e.cut.Load()
+}
+
+// AdmitOpaque re-runs the admitting gate's scope check strictly, as for a
+// route that never yields an HTTP request path (USK-1130 review S-1). The
+// raw relay calls it once before relaying: a gate admits a path-scoped
+// allow provisionally on routes that may still carry HTTP, and a route
+// that resolved to raw bytes must then be refused as the strict gate
+// would have refused it. It falls back to the gate's own check when the
+// gate registered no strict variant; a nil handle allows.
+func (h *LiveConnHandle) AdmitOpaque() (allowed bool, reason string) {
+	if h == nil {
+		return true, ""
+	}
+	switch {
+	case h.e.info.AdmitOpaque != nil:
+		return h.e.info.AdmitOpaque()
+	case h.e.info.Admit != nil:
+		return h.e.info.Admit()
+	default:
+		return true, ""
+	}
 }
 
 // Settle cuts the connection iff it is revoke-pending, no hold is in

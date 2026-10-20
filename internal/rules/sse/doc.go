@@ -22,7 +22,10 @@
 //   - Engines do NOT clear env.Raw. The session-side `sseMessageMutated`
 //     field-diff (see internal/session/session.go relaySSEEvent) is the
 //     authoritative re-encode signal. Clearing Raw here would false-
-//     positive every unchanged event the Pipeline passes through.
+//     positive every unchanged event the Pipeline passes through. When a
+//     rule modifies an event, TransformStep clears env.RawAuthoritative so
+//     a pre_pipeline plugin msg["raw"] write no longer wins on the wire
+//     (RFC-001 §9.3 D4 last-writer-wins, USK-1239).
 //   - Anomalies are record-only metadata; engines never mutate the
 //     Anomalies slice and never report Anomaly-only differences as a
 //     mutation.

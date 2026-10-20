@@ -18,6 +18,17 @@ import (
 // derived from Envelope.Context.TLS exactly as HostScopeStep derives it —
 // not HTTPMessage.Scheme (USK-1086, see transportScopeScheme).
 //
+// The request is checked twice when Envelope.Context.TargetHost is set:
+// against the client-written authority (Host / :authority) and against the
+// connection's actual dial target, both with the request path (USK-1130).
+// The authority is client-controlled and the upstream leg is bound to the
+// target the gate admitted, so checking the authority alone let a request
+// carry a path to a host whose path rules it never matched — a path-scoped
+// deny on the dial target was bypassed by naming another host, and a host
+// admitted provisionally for a path-scoped allow could be reached on any
+// path. Both checks must pass. For rules without path_prefix the
+// dial-target check is the one HostScopeStep already made.
+//
 // Only Send-direction HTTPMessage envelopes are checked. Receive and
 // non-HTTP messages always pass through.
 type HTTPScopeStep struct {
@@ -57,13 +68,32 @@ func (s *HTTPScopeStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMe
 	// msg.Scheme itself is left untouched — it is recorded and forwarded
 	// as the wire declared it.
 	scheme := transportScopeScheme(env)
-	authority := msg.Authority
 	path := msg.Path
 
-	host, portStr, err := net.SplitHostPort(authority)
+	allowed := s.checkHostPort(scheme, msg.Authority, path)
+	if allowed && env.Context.TargetHost != "" {
+		allowed = s.checkHostPort(scheme, env.Context.TargetHost, path)
+	}
+	if !allowed {
+		// USK-829: emit a 403 terminator on the wire. HTTPScopeStep is
+		// HTTPMessage-typed by construction so the synthetic Respond
+		// envelope is always appropriate here.
+		return Result{
+			Action:    Respond,
+			Response:  buildPolicyDropResponse(env, BlockedByTargetScope, nil),
+			BlockedBy: BlockedByTargetScope,
+		}
+	}
+	return Result{}
+}
+
+// checkHostPort checks scheme, the host and port of hostPort (a port-less
+// value takes the scheme's default port) and path against the scope.
+func (s *HTTPScopeStep) checkHostPort(scheme, hostPort, path string) bool {
+	host, portStr, err := net.SplitHostPort(hostPort)
 	if err != nil {
-		// Authority without port (e.g., "example.com").
-		host = authority
+		// No port (e.g., "example.com").
+		host = hostPort
 		portStr = ""
 	}
 
@@ -76,17 +106,7 @@ func (s *HTTPScopeStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMe
 	}
 
 	allowed, _ := s.scope.CheckTarget(scheme, host, port, path)
-	if !allowed {
-		// USK-829: emit a 403 terminator on the wire. HTTPScopeStep is
-		// HTTPMessage-typed by construction so the synthetic Respond
-		// envelope is always appropriate here.
-		return Result{
-			Action:    Respond,
-			Response:  buildPolicyDropResponse(env, BlockedByTargetScope, nil),
-			BlockedBy: BlockedByTargetScope,
-		}
-	}
-	return Result{}
+	return allowed
 }
 
 // defaultPortForScheme returns the well-known default port for HTTP schemes.

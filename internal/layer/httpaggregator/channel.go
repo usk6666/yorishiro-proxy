@@ -169,22 +169,23 @@ func (a *aggregatorChannel) Close() error {
 	return nil
 }
 
-// CloseRefused is Close for a stream the far side of the proxy refused
-// without processing it (USK-1157). It runs the same aggregator teardown and
-// cascades to the inner Channel's CloseRefused when it has one (the HTTP/2
-// stream picks RST_STREAM(REFUSED_STREAM) vs CANCEL from wire state), else
-// to its Close. Shares Close's sync.Once.
-func (a *aggregatorChannel) CloseRefused() error {
+// CloseWithCode is Close with the RST_STREAM error code the session wants
+// the client to see: the upstream's own reset code (USK-1269) or
+// REFUSED_STREAM for an upstream refusal (USK-1157). It runs the same
+// aggregator teardown and cascades to the inner Channel's CloseWithCode when
+// it has one (the HTTP/2 stream applies the code subject to its wire state),
+// else to its Close. Shares Close's sync.Once.
+func (a *aggregatorChannel) CloseWithCode(code uint32) error {
 	a.closeWith(func() error {
-		if rc, ok := a.inner.(interface{ CloseRefused() error }); ok {
-			return rc.CloseRefused()
+		if cc, ok := a.inner.(interface{ CloseWithCode(uint32) error }); ok {
+			return cc.CloseWithCode(code)
 		}
 		return a.inner.Close()
 	})
 	return nil
 }
 
-// closeWith is the single teardown path behind Close and CloseRefused;
+// closeWith is the single teardown path behind Close and CloseWithCode;
 // closeInner cascades to the inner Channel.
 func (a *aggregatorChannel) closeWith(closeInner func() error) {
 	a.closeOnce.Do(func() {

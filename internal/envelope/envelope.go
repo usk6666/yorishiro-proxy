@@ -142,11 +142,16 @@ type Envelope struct {
 	// writer in Pipeline order wins. Layers must consult RawWins rather
 	// than this field directly: an intercept modify replaces the
 	// envelope with Raw=nil, and RawWins then falls back to the
-	// Message path.
+	// Message path. SSE is the exception: an SSE intercept modify keeps
+	// Raw (USK-892 wire-fidelity invariant) and instead clears this
+	// marker explicitly when the operator sets at least one field; a
+	// release that sets no field keeps the plugin's raw-wins marker
+	// (USK-1239).
 	//
-	// Per-Layer support (USK-1079): HTTP/1.x (both directions) and raw
-	// TCP (bytechunk) honour it; gRPC Data and gRPC-Web already write a
-	// non-empty Raw verbatim. HTTP/2, WebSocket, and SSE do not yet.
+	// Per-Layer support (USK-1079, USK-1238): HTTP/1.x (both directions),
+	// raw TCP (bytechunk), and WebSocket honour it, as does the
+	// session-side SSE event writer (USK-1239); gRPC Data and gRPC-Web
+	// already write a non-empty Raw verbatim. HTTP/2 does not yet.
 	//
 	// Clone copies the flag. It is never set on Layer-produced envelopes.
 	RawAuthoritative bool

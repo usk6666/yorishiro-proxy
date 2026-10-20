@@ -40,25 +40,24 @@ type headerKV struct {
 //
 // Headers and Trailers replace the held envelope's slices wholesale when
 // non-nil. Body, when supplied, replaces HTTPMessage.Body before
-// BodyPatches are applied (Decision R12). AutoContentLength is accepted
-// but read by nothing: the HTTP/1.x opaque send path always drops
-// Transfer-Encoding and re-stamps Content-Length on a body change. Its
-// description says so rather than advertise a smuggling knob that does
-// not exist (USK-1153; making it work is tracked in USK-1258).
+// BodyPatches are applied (Decision R12). On HTTP/1.x a body change always
+// drops Transfer-Encoding and re-stamps Content-Length; there is no knob to
+// suppress that here (USK-1258 removed an auto_content_length field that
+// nothing read). CL/TE mismatch tests use a header-only modify, a plugin
+// msg["raw"], or fuzz_raw instead.
 type httpMessageModify struct {
-	Method            *string     `json:"method,omitempty" jsonschema:"HTTP method override (request side)"`
-	Scheme            *string     `json:"scheme,omitempty" jsonschema:"scheme override (request side)"`
-	Authority         *string     `json:"authority,omitempty" jsonschema:"authority override (request side)"`
-	Path              *string     `json:"path,omitempty" jsonschema:"request path override"`
-	RawQuery          *string     `json:"raw_query,omitempty" jsonschema:"raw query string override"`
-	Status            *int        `json:"status,omitempty" jsonschema:"HTTP status code override (response side)"`
-	StatusReason      *string     `json:"status_reason,omitempty" jsonschema:"HTTP/1.x status reason phrase override"`
-	Headers           []headerKV  `json:"headers,omitempty" jsonschema:"ordered header list replacement"`
-	Trailers          []headerKV  `json:"trailers,omitempty" jsonschema:"ordered trailer list replacement"`
-	Body              *string     `json:"body,omitempty" jsonschema:"body replacement (text or base64 per body_encoding)"`
-	BodyEncoding      string      `json:"body_encoding,omitempty" jsonschema:"text|base64; required when body is non-textual"`
-	BodyPatches       []BodyPatch `json:"body_patches,omitempty" jsonschema:"body patches applied on top of any body replacement"`
-	AutoContentLength *bool       `json:"auto_content_length,omitempty" jsonschema:"accepted but currently has no effect; on HTTP/1.x a body change always re-stamps Content-Length"`
+	Method       *string     `json:"method,omitempty" jsonschema:"HTTP method override (request side)"`
+	Scheme       *string     `json:"scheme,omitempty" jsonschema:"scheme override (request side)"`
+	Authority    *string     `json:"authority,omitempty" jsonschema:"authority override (request side)"`
+	Path         *string     `json:"path,omitempty" jsonschema:"request path override"`
+	RawQuery     *string     `json:"raw_query,omitempty" jsonschema:"raw query string override"`
+	Status       *int        `json:"status,omitempty" jsonschema:"HTTP status code override (response side)"`
+	StatusReason *string     `json:"status_reason,omitempty" jsonschema:"HTTP/1.x status reason phrase override"`
+	Headers      []headerKV  `json:"headers,omitempty" jsonschema:"ordered header list replacement"`
+	Trailers     []headerKV  `json:"trailers,omitempty" jsonschema:"ordered trailer list replacement"`
+	Body         *string     `json:"body,omitempty" jsonschema:"body replacement (text or base64 per body_encoding); on HTTP/1.x a body change always drops Transfer-Encoding and re-stamps Content-Length"`
+	BodyEncoding string      `json:"body_encoding,omitempty" jsonschema:"text|base64; required when body is non-textual"`
+	BodyPatches  []BodyPatch `json:"body_patches,omitempty" jsonschema:"body patches applied on top of any body replacement"`
 }
 
 // wsMessageModify carries the structured override fields for a WebSocket
@@ -487,7 +486,9 @@ func applyGRPCDataModify(env *envelope.Envelope, _ *envelope.GRPCDataMessage, pa
 // the authoritative re-encode signal. Clearing Raw here would force a
 // re-encode for every modify_and_forward release, including no-op
 // "release-with-empty-payload" cases that should round-trip the
-// upstream's bytes verbatim.
+// upstream's bytes verbatim. Setting any field clears
+// Envelope.RawAuthoritative instead (RFC-001 §9.3 D4 last-writer-wins,
+// USK-1239); a release with no fields keeps a plugin's raw-wins marker.
 //
 // CRLF guards: event / id reject CR or LF; data accepts `\n` (multi-line
 // is legal RFC 8895 wire form) but rejects `\r`. RetryMs is interpreted
@@ -522,7 +523,14 @@ func applySSEModify(env *envelope.Envelope, _ *envelope.SSEMessage, params *sseM
 	if params.RetryMs != nil {
 		sm.Retry = time.Duration(*params.RetryMs) * time.Millisecond
 	}
-	// Deliberately do NOT clear clone.Raw — see func doc.
+	// Deliberately do NOT clear clone.Raw — see func doc. Because Raw is
+	// kept, the raw-wins marker of an earlier plugin msg["raw"] write must
+	// be cleared explicitly when the operator set a field, or the session
+	// writer would send the plugin bytes and drop the edit (RFC §9.3 D4
+	// last-writer-wins, USK-1239).
+	if params.Event != nil || params.ID != nil || params.Data != nil || params.RetryMs != nil {
+		clone.RawAuthoritative = false
+	}
 	return clone, nil
 }
 
