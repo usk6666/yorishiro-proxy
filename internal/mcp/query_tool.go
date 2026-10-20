@@ -253,6 +253,9 @@ type queryFilter struct {
 	WireLevel string `json:"wire_level,omitempty" jsonschema:"wire_level filter (USK-921). semantic (default) returns only canonical L7 envelopes; h2-frame / h1-chunk / grpc-lpm-frame / grpcweb-base64 isolate a single diagnostic overlay; all returns every wire_level. Applies to flows / flow / messages resources."`
 	// ConnID filters flows by connection ID (exact match).
 	ConnID string `json:"conn_id,omitempty" jsonschema:"connection ID filter for flows (exact match)"`
+	// ListenerName filters flows by the name of the listener that accepted
+	// them (exact match; the proxy_start "name", or "default").
+	ListenerName string `json:"listener_name,omitempty" jsonschema:"listener name filter for flows (exact match on the proxy_start name, e.g. default)"`
 	// Host filters flows by host (matches server_addr or URL host).
 	Host string `json:"host,omitempty" jsonschema:"host filter for flows (matches server_addr or URL host, e.g. example.com)"`
 	// BodyContains filters fuzz_results by response body substring.
@@ -796,9 +799,12 @@ type queryFlowsEntry struct {
 	// or for errored streams that did not surface a classifiable signal
 	// (USK-797 makes this column visible to MCP clients).
 	FailureReason string `json:"failure_reason,omitempty"`
-	Method        string `json:"method"`
-	URL           string `json:"url"`
-	StatusCode    int    `json:"status_code"`
+	// ListenerName is the name of the listener that accepted the stream's
+	// connection. Empty for resend / fuzz streams and pre-V19 rows.
+	ListenerName string `json:"listener_name,omitempty"`
+	Method       string `json:"method"`
+	URL          string `json:"url"`
+	StatusCode   int    `json:"status_code"`
 	// MessageCount is the number of canonical L7 semantic envelopes
 	// recorded for the flow. Wire-level overlay rows (h2-frame,
 	// h1-chunk, grpc-lpm-frame, grpcweb-base64) are excluded by default
@@ -858,6 +864,7 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 		opts.State = input.Filter.State
 		opts.Origin = flow.Origin(input.Filter.Origin)
 		opts.ConnID = input.Filter.ConnID
+		opts.ListenerName = input.Filter.ListenerName
 		opts.Host = input.Filter.Host
 	}
 	return opts
@@ -942,6 +949,7 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			Scheme:          fl.Scheme,
 			State:           fl.State,
 			FailureReason:   fl.FailureReason,
+			ListenerName:    fl.ListenerName,
 			Method:          method,
 			URL:             urlStr,
 			StatusCode:      statusCode,
@@ -996,6 +1004,9 @@ type queryFlowResult struct {
 	ConnID   string `json:"conn_id"`
 	Protocol string `json:"protocol"`
 	Scheme   string `json:"scheme,omitempty"`
+	// ListenerName is the name of the listener that accepted the stream's
+	// connection. Empty for resend / fuzz streams and pre-V19 rows.
+	ListenerName string `json:"listener_name,omitempty"`
 	// HTTPVersion is the wire-observed HTTP protocol version stamped on
 	// the request flow (USK-788). Canonical lowercased values:
 	// "http/1.0", "http/1.1", "h2", "h2c". Empty for non-HTTP flows and
@@ -1626,6 +1637,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		HTTPVersion:                     resolveHTTPVersion(cat),
 		State:                           fl.State,
 		FailureReason:                   fl.FailureReason,
+		ListenerName:                    fl.ListenerName,
 		Method:                          reqSide.method,
 		URL:                             reqSide.url,
 		RequestHeaders:                  reqSide.headers,
@@ -1783,6 +1795,7 @@ func buildConnInfoResult(ci *flow.ConnectionInfo) *connInfoResult {
 	return &connInfoResult{
 		ClientAddr:           ci.ClientAddr,
 		ServerAddr:           ci.ServerAddr,
+		UpstreamProxy:        ci.UpstreamProxy,
 		TLSVersion:           ci.TLSVersion,
 		TLSCipher:            ci.TLSCipher,
 		TLSALPN:              ci.TLSALPN,

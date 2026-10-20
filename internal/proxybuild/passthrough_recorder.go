@@ -117,9 +117,11 @@ func (r *passthroughRecorder) OnStart(ctx context.Context, obs connector.Passthr
 		Timestamp: time.Now(),
 		Origin:    flow.OriginProxy,
 		ConnInfo: &flow.ConnectionInfo{
-			ClientAddr: obs.RemoteAddr,
-			ServerAddr: obs.UpstreamAddr,
+			ClientAddr:    obs.RemoteAddr,
+			ServerAddr:    obs.UpstreamAddr,
+			UpstreamProxy: obs.UpstreamProxy,
 		},
+		ListenerName: r.listenerName,
 	}
 
 	saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -236,6 +238,7 @@ func (r *passthroughRecorder) recordDialFailure(ctx context.Context, obs connect
 		ConnInfo: &flow.ConnectionInfo{
 			ClientAddr: obs.RemoteAddr,
 		},
+		ListenerName: r.listenerName,
 	}
 	if obs.ErrorReason != "" {
 		st.Tags = map[string]string{"error": obs.ErrorReason}

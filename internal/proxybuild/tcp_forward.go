@@ -543,11 +543,11 @@ func (m *Manager) handleTCPForwardConnRaw(
 	)
 	stack.PushClient(clientLayer)
 	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive,
-		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+		bytechunk.WithEnvelopeContext(connector.WithUpstreamPeer(envelope.EnvelopeContext{
 			ConnID:     connID,
 			TargetHost: target,
 			TLS:        upstreamTLS,
-		}),
+		}, upstreamConn)),
 	)
 	stack.PushUpstream(upstreamLayer)
 

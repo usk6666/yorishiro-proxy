@@ -101,16 +101,20 @@ type ExportStream struct {
 	// ('proxy' | 'resend' | 'fuzz'). Omitted from the JSONL line when
 	// empty so older exports continue to round-trip unchanged; on import
 	// a missing origin falls back to 'proxy' (USK-785).
-	Origin    string `json:"origin,omitempty"`
-	SendMs    *int64 `json:"send_ms,omitempty"`
-	WaitMs    *int64 `json:"wait_ms,omitempty"`
-	ReceiveMs *int64 `json:"receive_ms,omitempty"`
+	Origin string `json:"origin,omitempty"`
+	// ListenerName is the name of the listener that accepted the Stream's
+	// connection (Stream.ListenerName). Omitted when empty.
+	ListenerName string `json:"listener_name,omitempty"`
+	SendMs       *int64 `json:"send_ms,omitempty"`
+	WaitMs       *int64 `json:"wait_ms,omitempty"`
+	ReceiveMs    *int64 `json:"receive_ms,omitempty"`
 }
 
 // ExportConnInfo is the JSON-serializable representation of ConnectionInfo.
 type ExportConnInfo struct {
 	ClientAddr           string `json:"client_addr,omitempty"`
 	ServerAddr           string `json:"server_addr,omitempty"`
+	UpstreamProxy        string `json:"upstream_proxy,omitempty"`
 	TLSVersion           string `json:"tls_version,omitempty"`
 	TLSCipher            string `json:"tls_cipher,omitempty"`
 	TLSALPN              string `json:"tls_alpn,omitempty"`
@@ -215,24 +219,26 @@ func ExportStreams(ctx context.Context, store Store, w io.Writer, opts ExportOpt
 // streamToExport converts a Stream to its export representation.
 func streamToExport(s *Stream) *ExportStream {
 	es := &ExportStream{
-		ID:         s.ID,
-		ConnID:     s.ConnID,
-		Protocol:   s.Protocol,
-		Scheme:     s.Scheme,
-		State:      s.State,
-		Timestamp:  s.Timestamp.UTC().Format(time.RFC3339Nano),
-		DurationMs: s.Duration.Milliseconds(),
-		Tags:       s.Tags,
-		BlockedBy:  s.BlockedBy,
-		Origin:     string(s.Origin),
-		SendMs:     s.SendMs,
-		WaitMs:     s.WaitMs,
-		ReceiveMs:  s.ReceiveMs,
+		ID:           s.ID,
+		ConnID:       s.ConnID,
+		Protocol:     s.Protocol,
+		Scheme:       s.Scheme,
+		State:        s.State,
+		Timestamp:    s.Timestamp.UTC().Format(time.RFC3339Nano),
+		DurationMs:   s.Duration.Milliseconds(),
+		Tags:         s.Tags,
+		BlockedBy:    s.BlockedBy,
+		Origin:       string(s.Origin),
+		ListenerName: s.ListenerName,
+		SendMs:       s.SendMs,
+		WaitMs:       s.WaitMs,
+		ReceiveMs:    s.ReceiveMs,
 	}
 	if s.ConnInfo != nil {
 		es.ConnInfo = &ExportConnInfo{
 			ClientAddr:           s.ConnInfo.ClientAddr,
 			ServerAddr:           s.ConnInfo.ServerAddr,
+			UpstreamProxy:        s.ConnInfo.UpstreamProxy,
 			TLSVersion:           s.ConnInfo.TLSVersion,
 			TLSCipher:            s.ConnInfo.TLSCipher,
 			TLSALPN:              s.ConnInfo.TLSALPN,

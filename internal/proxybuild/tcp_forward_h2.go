@@ -572,6 +572,12 @@ func recordGRPCFilterReject(
 		ConnID:   connID,
 		Protocol: observedProtocol,
 		State:    "error",
+		// USK-1116: the forward handler stamps the parent listener's
+		// configured name and the client socket's peer on ctx.
+		ListenerName: connector.ListenerNameFromContext(ctx),
+	}
+	if clientAddr := connector.ClientAddrFromContext(ctx); clientAddr != "" {
+		st.ConnInfo = &flow.ConnectionInfo{ClientAddr: clientAddr}
 	}
 	_ = parentStack.FlowStore.SaveStream(ctx, st)
 	_ = parentStack.FlowStore.UpdateStream(ctx, streamID, flow.StreamUpdate{

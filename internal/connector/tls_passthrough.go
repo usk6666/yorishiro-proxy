@@ -48,6 +48,11 @@ type PassthroughObservation struct {
 	// invoked with Outcome="failed" and OnStart never fired).
 	UpstreamAddr string
 
+	// UpstreamProxy is the upstream proxy the relay socket was dialed
+	// through ("scheme://host:port", userinfo stripped); empty for a direct
+	// dial. When set, UpstreamAddr is the proxy's address.
+	UpstreamProxy string
+
 	// ClientJA3 / ClientJA4 are the client's ClientHello fingerprints
 	// computed from the SNI peek buffer (USK-1015). Empty when the peek
 	// failed or the ClientHello was malformed. Under passthrough the proxy
@@ -213,7 +218,9 @@ func relayTLSPassthroughWithObserver(
 		LocalAddr:    netAddrString(clientConn.LocalAddr()),
 		RemoteAddr:   netAddrString(clientConn.RemoteAddr()),
 		UpstreamAddr: netAddrString(upstreamConn.RemoteAddr()),
-		TargetHost:   hostOnly(target),
+		// USK-1116: UpstreamAddr is the proxy when one was used.
+		UpstreamProxy: UpstreamProxyOf(upstreamConn),
+		TargetHost:    hostOnly(target),
 	}
 	if observer != nil {
 		observer.OnStart(ctx, obs)

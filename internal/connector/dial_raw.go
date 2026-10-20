@@ -129,7 +129,9 @@ func dialTCP(ctx context.Context, target string, upstreamProxy *url.URL, timeout
 		if err != nil {
 			return nil, fmt.Errorf("connector: dial via upstream proxy: %w", err)
 		}
-		return conn, nil
+		// USK-1116: tag the socket with the proxy actually used so the
+		// upstream Layer can record it (see WithUpstreamPeer).
+		return &proxiedConn{Conn: conn, proxy: proxyEndpoint(upstreamProxy)}, nil
 	}
 
 	slog.Debug("connector: dialing direct", "target", target)

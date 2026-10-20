@@ -93,7 +93,9 @@ func RedialUpstreamH2(
 	// CONNECT's lifetime. A future enhancement could project the new snap
 	// onto each envelope, but the immediate USK-816 fix is to land the
 	// fresh stream on the wire — not to re-record TLS.
-	envCtx := stale.EnvelopeContextTemplate()
+	// USK-1116: the copied template still names the stale socket's peer;
+	// overwrite it with the fresh socket's.
+	envCtx := WithUpstreamPeer(stale.EnvelopeContextTemplate(), upstreamConn)
 
 	connID := redialConnIDLabel(envCtx.ConnID, generation)
 

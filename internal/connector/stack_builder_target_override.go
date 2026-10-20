@@ -371,11 +371,11 @@ func buildTargetOverrideRawStack(
 	stack.PushClient(clientLayer)
 
 	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive,
-		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+		bytechunk.WithEnvelopeContext(WithUpstreamPeer(envelope.EnvelopeContext{
 			ConnID:     connID,
 			TargetHost: target,
 			TLS:        upstreamTLS,
-		}),
+		}, upstreamConn)),
 	)
 	stack.PushUpstream(upstreamLayer)
 
@@ -522,7 +522,9 @@ func NewForwardUpstreamH2Layer(
 	}
 	l, err := http2.New(conn, label, http2.ClientRole,
 		http2.WithScheme(scheme),
-		http2.WithEnvelopeContext(envCtx),
+		// USK-1116: stamp this socket's peer (covers the initial dial and
+		// every forward-h2 redial, which reuse a stale template).
+		http2.WithEnvelopeContext(WithUpstreamPeer(envCtx, conn)),
 		http2.WithBodySpillDir(cfg.BodySpillDir),
 		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http2.WithMaxBodySize(cfg.MaxBodySize),
@@ -585,7 +587,7 @@ func buildTargetOverrideHTTPStack(
 		// path terminated TLS before calling this builder.
 		TLS: clientTLS,
 	}
-	upstreamEnvCtx := envelope.EnvelopeContext{
+	upstreamEnvCtx := WithUpstreamPeer(envelope.EnvelopeContext{
 		ConnID:     connID,
 		TargetHost: target,
 		// USK-916: upstream TLS snapshot is stamped here when the forward
@@ -594,7 +596,7 @@ func buildTargetOverrideHTTPStack(
 		// envelopes recording a cleartext upstream — the original USK-913
 		// HTTP→HTTP path.
 		TLS: upstreamTLS,
-	}
+	}, upstreamConn)
 
 	stack := NewConnectionStack(connID)
 

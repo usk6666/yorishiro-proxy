@@ -102,8 +102,13 @@ func formatFingerprint(b []byte) string {
 type connInfoResult struct {
 	// ClientAddr is the client's remote address (e.g., "192.168.1.100:54321").
 	ClientAddr string `json:"client_addr,omitempty"`
-	// ServerAddr is the upstream server's resolved address.
+	// ServerAddr is the wire-observed peer of the upstream socket — the
+	// upstream proxy when UpstreamProxy is set.
 	ServerAddr string `json:"server_addr,omitempty"`
+	// UpstreamProxy is the upstream proxy the upstream socket was dialed
+	// through ("scheme://host:port", credentials stripped); empty for a
+	// direct dial.
+	UpstreamProxy string `json:"upstream_proxy,omitempty"`
 	// TLSVersion is the negotiated TLS version (e.g., "TLS 1.3").
 	TLSVersion string `json:"tls_version,omitempty"`
 	// TLSCipher is the negotiated TLS cipher suite name.

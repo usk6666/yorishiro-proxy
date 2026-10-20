@@ -49,11 +49,11 @@ func BuildPlainHTTPStack(
 		TargetHost: target,
 		// TLS intentionally nil: no handshake happened on the client side.
 	}
-	upstreamEnvCtx := envelope.EnvelopeContext{
+	upstreamEnvCtx := WithUpstreamPeer(envelope.EnvelopeContext{
 		ConnID:     connID,
 		TargetHost: target,
 		// TLS intentionally nil: no handshake happened on the upstream side.
-	}
+	}, upstreamConn)
 
 	stack := NewConnectionStack(connID)
 
