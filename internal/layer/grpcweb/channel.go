@@ -226,25 +226,23 @@ func (c *channel) Close() error {
 	return nil
 }
 
-// CloseRefused is Close for a stream the far side of the proxy refused
-// without processing it (USK-1157). It cascades to the inner Channel's
-// CloseRefused when it has one (an aggregator over an HTTP/2 stream, which
-// picks RST_STREAM(REFUSED_STREAM) vs CANCEL from wire state), else to its
-// Close. Shares Close's sync.Once.
-func (c *channel) CloseRefused() error {
+// CloseWithCode is Close with the RST_STREAM error code the session wants
+// the client to see: the upstream's own reset code (USK-1269) or
+// REFUSED_STREAM for an upstream refusal (USK-1157). It cascades to the
+// inner Channel's CloseWithCode when it has one (an aggregator over an
+// HTTP/2 stream, which applies the code subject to its wire state), else to
+// its Close. Shares Close's sync.Once.
+func (c *channel) CloseWithCode(code uint32) error {
 	c.closeWith(func() error {
-		if rc, ok := c.inner.(interface{ CloseRefused() error }); ok {
-			return rc.CloseRefused()
+		if cc, ok := c.inner.(interface{ CloseWithCode(uint32) error }); ok {
+			return cc.CloseWithCode(code)
 		}
 		return c.inner.Close()
 	})
 	return nil
 }
 
-// CloseWithCode is a scaffold (USK-1269 red commit).
-func (c *channel) CloseWithCode(code uint32) error { return c.Close() }
-
-// closeWith is the single teardown path behind Close and CloseRefused;
+// closeWith is the single teardown path behind Close and CloseWithCode;
 // closeInner cascades to the inner Channel.
 func (c *channel) closeWith(closeInner func() error) {
 	c.closeOnce.Do(func() {
