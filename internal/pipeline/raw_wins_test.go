@@ -15,6 +15,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 )
 
 // USK-1079: RFC-001 §9.3 D4 "Raw wins" is carried on the Envelope itself
@@ -196,5 +197,38 @@ func TestRawWins_RawOnlyDropsSpilledRawBuffer(t *testing.T) {
 	}
 	if env.RawBuffer == nil {
 		t.Error("input envelope RawBuffer must be left for the session refcount backstop")
+	}
+}
+
+// TestRawWins_WSTransform (USK-1238): on WebSocket a Transform rule that
+// fires takes the wire back from an earlier plugin msg["raw"] write; a
+// rule that does not fire leaves the marker alone.
+func TestRawWins_WSTransform(t *testing.T) {
+	cases := []struct {
+		name     string
+		pattern  string
+		wantAuth bool
+	}{
+		{name: "firing rule clears marker", pattern: `hello`, wantAuth: false},
+		{name: "non-matching rule keeps marker", pattern: `^never$`, wantAuth: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			te := wsrules.NewTransformEngine()
+			te.AddRule(wsrules.TransformRule{
+				ID: "replace", Enabled: true, Direction: wsrules.DirectionSend,
+				ActionType:     wsrules.TransformReplacePayload,
+				PayloadPattern: regexp.MustCompile(tc.pattern), PayloadReplace: []byte("XFORM"),
+			})
+			env := &envelope.Envelope{
+				Direction: envelope.Send, Protocol: envelope.ProtocolWebSocket,
+				Raw: []byte("PLUGIN-RAW"), RawAuthoritative: true,
+				Message: &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte("hello")},
+			}
+			NewTransformStep(nil, te, nil, nil).Process(context.Background(), env)
+			if env.RawAuthoritative != tc.wantAuth {
+				t.Errorf("RawAuthoritative = %v, want %v", env.RawAuthoritative, tc.wantAuth)
+			}
+		})
 	}
 }
