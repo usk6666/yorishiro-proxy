@@ -68,7 +68,9 @@
 // projected and the headers are relayed as the Start carries them. A
 // response that carried a trailer frame is never projected onto its
 // headers: header and trailer statuses are relayed as observed even when
-// they disagree. A 1xx informational response (100, 103; 101 too when the
+// they disagree, and an edit to its End (which clears the End's Raw) is
+// re-encoded into a trailer frame even when its headers also carry
+// grpc-status. A 1xx informational response (100, 103; 101 too when the
 // inner Layer is HTTP/2, which delivers it as interim) is not final: it
 // yields only a Start and no End.
 //

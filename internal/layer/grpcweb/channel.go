@@ -635,6 +635,36 @@ func trailersOnlyBaseline(endEnv, startEnv *envelope.Envelope) *envelope.GRPCEnd
 	return nil
 }
 
+// trailersOnlyResponse reports whether the response being sent is the
+// trailers-only form, whose status travels in the HTTP headers, and returns
+// its End baseline (trailersOnlyBaseline).
+//
+// When either Envelope still carries this Layer's Opaque, the decision
+// comes from what was observed: trailers-only exactly when a baseline was
+// recorded (USK-1219 review F-R2-1). A response whose End came from a
+// trailer frame has no baseline even when its headers also carry
+// grpc-status, so an End whose Raw was cleared by an edit (Transform
+// TransformEnd, plugin) falls through to the normal Receive trailer
+// re-encode instead of being dropped.
+//
+// Only when neither Envelope carries the Opaque (synthetic producer, or
+// both Clone()d) is the Start's grpc-status header used as the signal, as
+// before; such a response is relayed without projection (nil baseline).
+func trailersOnlyResponse(endEnv, startEnv *envelope.Envelope, start *envelope.GRPCStartMessage) (*envelope.GRPCEndMessage, bool) {
+	if b := trailersOnlyBaseline(endEnv, startEnv); b != nil {
+		return b, true
+	}
+	for _, e := range []*envelope.Envelope{endEnv, startEnv} {
+		if e == nil {
+			continue
+		}
+		if _, ok := e.Opaque.(*opaqueGRPCWeb); ok {
+			return nil, false
+		}
+	}
+	return nil, headerHas(start.Metadata, "grpc-status")
+}
+
 // withEndStatusInHeaders projects an End edit onto the HTTP headers of a
 // trailers-only response (USK-1219 review F-3). Its End is derived from the
 // grpc-status / grpc-message / grpc-status-details-bin headers
@@ -975,12 +1005,12 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 
 	isBase64 := IsBase64Encoded(start.ContentType)
 
-	// A Receive with no assembled frames whose Start carries grpc-status in
-	// its HTTP headers is the trailers-only form: the status already
-	// travels in the headers, so a trailer frame would duplicate it into a
-	// body the wire did not have.
-	statusInHeaders := dir == envelope.Receive && len(dataBytes) == 0 && passthrough == nil &&
-		headerHas(start.Metadata, "grpc-status")
+	// A Receive with no assembled frames that was observed as trailers-only
+	// carries its status in the HTTP headers, so a trailer frame would
+	// duplicate it into a body the wire did not have. See
+	// trailersOnlyResponse for how that is decided.
+	baseline, trailersOnly := trailersOnlyResponse(env, srcEnv, start)
+	statusInHeaders := dir == envelope.Receive && len(dataBytes) == 0 && passthrough == nil && trailersOnly
 
 	if shouldEmbedTrailer(dir, env, m, passthrough != nil || statusInHeaders) {
 		trailer, err := trailerFrameBytes(env, m, isBase64)
@@ -1013,7 +1043,7 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	// Reconstruct HTTPMessage.
 	httpMsg := buildHTTPMessage(start, body, dir, srcEnv)
 	if statusInHeaders && len(env.Raw) == 0 {
-		httpMsg.Headers = withEndStatusInHeaders(httpMsg.Headers, m, trailersOnlyBaseline(env, srcEnv))
+		httpMsg.Headers = withEndStatusInHeaders(httpMsg.Headers, m, baseline)
 	}
 
 	out := &envelope.Envelope{
@@ -1055,8 +1085,8 @@ func emptyResponseBody(body []byte, dir envelope.Direction, status int) []byte {
 //     an anomaly AND relayed, rather than silently stripped (USK-1203).
 //   - bodyComplete: the observed body is already complete and the End is
 //     only the flush sentinel, so nothing is added. sendEndLocked sets it for
-//     a passthrough body and for a trailers-only response (grpc-status in the
-//     HTTP headers, no frames), whose status already travels in the headers.
+//     a passthrough body and for a response observed as trailers-only
+//     (trailersOnlyResponse), whose status already travels in the headers.
 //   - End stamped with a malformed-body anomaly: the emitAnomalyStart
 //     sentinel, standing for "no trailer observed". Nothing is added even
 //     if the passthrough body was lost before this Send.
