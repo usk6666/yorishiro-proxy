@@ -1,0 +1,21 @@
+{
+  "id": "INTERCEPT_ID",
+  "protocol": "http",
+  "direction": "receive",
+  "held_at": "2026-10-20T00:00:00Z",
+  "matched_rules": ["test-rule"],
+  "flow_id": "f-resp",
+  "stream_id": "s-resp",
+  "http": {
+    "status": 200,
+    "status_reason": "OK",
+    "headers": [
+      { "name": "Content-Type", "value": "application/octet-stream" },
+      { "name": "Set-Cookie", "value": "a=1" },
+      { "name": "set-cookie", "value": "b=2" }
+    ],
+    "body_encoding": "base64",
+    "body": "/wAB"
+  },
+  "raw_bytes_available": false
+}

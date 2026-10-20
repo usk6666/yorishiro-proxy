@@ -1,0 +1,12 @@
+{
+  "action": "modify_and_forward",
+  "params": {
+    "intercept_id": "INTERCEPT_ID",
+    "override_method": "",
+    "override_url": "",
+    "override_headers": {
+      "Set-Cookie": "c=3"
+    },
+    "override_body": "/wACAw=="
+  }
+}
