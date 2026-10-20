@@ -27,6 +27,8 @@ func TestDocsTool_ProxyStartListenAddrDocumentsNonLoopback(t *testing.T) {
 		"no client authentication",
 		"Warn",
 		"inherit",
+		"binds IPv4 only",
+		"dual-stack",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("proxy_start docs missing %q", want)
@@ -42,5 +44,10 @@ func TestDocsTool_SecurityDocumentsListenerExposure(t *testing.T) {
 	body := callDocsOK(t, cs, map[string]any{"topic": "security"})
 	if !strings.Contains(body, "## Listener Exposure") {
 		t.Fatal("security docs missing the \"## Listener Exposure\" section")
+	}
+	for _, want := range []string{"binds IPv4 only", "dual-stack"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("security docs missing %q", want)
+		}
 	}
 }

@@ -61,7 +61,9 @@ func bindHostsOverlap(a, b string) bool {
 
 func isUnspecifiedHost(h string) bool {
 	ip, err := netip.ParseAddr(h)
-	return err == nil && ip.IsUnspecified()
+	// Unmap so "::ffff:0.0.0.0" counts as the IPv4 wildcard it binds as
+	// (connector.ListenTCP binds IPv4-mapped literals as IPv4).
+	return err == nil && ip.Unmap().IsUnspecified()
 }
 
 func isLoopbackHost(h string) bool {

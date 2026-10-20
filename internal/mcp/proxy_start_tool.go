@@ -779,7 +779,7 @@ func validateTCPForwardsAgainstListenAddr(listenAddr string, forwards map[string
 		return nil
 	}
 	// Two ephemeral ports never collide: the kernel assigns distinct
-	// values to each net.Listen("tcp", "127.0.0.1:0"). Skip the check
+	// values to each ephemeral (port 0) bind. Skip the check
 	// when listen_addr asks for an ephemeral assignment.
 	if listenPort == 0 {
 		return nil

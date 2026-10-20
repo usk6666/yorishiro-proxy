@@ -15,6 +15,7 @@ TCP address the proxy listener (HTTP, HTTPS via CONNECT, and SOCKS5 on the same 
 - Default: `"127.0.0.1:8080"`
 - Format: `"host:port"`. The host must be an IP literal or the literal `localhost`: loopback (`"127.0.0.1:9090"`, `"[::1]:8080"`), all interfaces (`"0.0.0.0:8080"`, `"[::]:8080"`), or one specific interface address (`"10.0.0.5:8080"`, `"[fe80::1%eth0]:8080"`)
 - To listen on all interfaces, write `0.0.0.0` or `[::]` explicitly — an empty host (`":8080"`) is rejected
+- `0.0.0.0` binds IPv4 only; `[::]` is the dual-stack wildcard and accepts IPv4 as well as IPv6 connections (write firewall rules for both families when using `[::]`). An IPv4-mapped literal such as `[::ffff:0.0.0.0]` is treated as the IPv4 address it maps and binds IPv4 only
 - Host names other than `localhost` are rejected (the bound interface must not depend on DNS), as are legacy IPv4 spellings such as `127.1`
 - The port must be a decimal number 0-65535 (`0` = kernel-assigned); service names such as `http` are rejected
 - **A non-loopback address makes the proxy an open proxy**: there is no client authentication, so any host that can route to the address can use it. Access control is the network side (firewall / nftables) plus the `target_scope` Policy layer — see `docs(topic="security")`, section "Listener Exposure". When the listener binds a non-loopback address the server logs one `Warn` line (`proxy listener bound to non-loopback address`) at start
