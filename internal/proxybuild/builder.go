@@ -729,7 +729,11 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 		pipeline.NewInterceptStep(deps.HTTPInterceptEngine, deps.WSInterceptEngine, deps.GRPCInterceptEngine, deps.SSEInterceptEngine, deps.HoldQueue, safetyStep, logger).
 			WithHoldTracker(deps.InterceptHoldTracker).
 			WithScopeRecheck(hostScopeStep, httpScopeStep),
-		pipeline.NewTransformStep(deps.HTTPTransformEngine, deps.WSTransformEngine, deps.GRPCTransformEngine, deps.SSETransformEngine),
+		// The scope Steps are shared so an HTTP request a Transform rule
+		// modified (e.g. set_header Host) is re-checked against the live
+		// TargetScope before it is forwarded (USK-1167).
+		pipeline.NewTransformStep(deps.HTTPTransformEngine, deps.WSTransformEngine, deps.GRPCTransformEngine, deps.SSETransformEngine).
+			WithScopeRecheck(hostScopeStep, httpScopeStep),
 		pipeline.NewPluginStepPost(deps.PluginV2Engine, encoders, logger),
 		pipeline.NewRecordStep(deps.FlowStore, logger, recordOpts...),
 		// UpgradeStep MUST run AFTER RecordStep so the 101 response is

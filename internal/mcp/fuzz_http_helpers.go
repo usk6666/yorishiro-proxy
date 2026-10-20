@@ -229,7 +229,12 @@ func (s *Server) buildFuzzHTTPPlan(ctx context.Context, input *fuzzHTTPInput) (*
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkResendHTTPScope(baseMsg, addr, input.OverrideHost); err != nil {
+	// USK-1167: Host values a position replaces, or that carry a §var§
+	// placeholder, are not judged here: their sent form only exists per
+	// variant, and checkFuzzHTTPVariantScope judges every variant's Host
+	// values after positions and §var§ expansion, before send.
+	hostHeaders := fuzzHTTPPlanHostHeaders(baseMsg.Headers, input.Positions, meta.HostInjected)
+	if err := s.checkResendHTTPScopeHostHeaders(baseMsg, addr, input.OverrideHost, hostHeaders); err != nil {
 		return nil, err
 	}
 
@@ -250,6 +255,39 @@ func (s *Server) buildFuzzHTTPPlan(ctx context.Context, input *fuzzHTTPInput) (*
 		hostInjected:    meta.HostInjected,
 		userHeaderCount: meta.UserHeaderCount,
 	}, nil
+}
+
+// fuzzHTTPPlanHostHeaders returns the base headers whose Host value the
+// plan-level scope check can judge: it drops every header a
+// headers[N].name / .value position targets (the variant rewrites its
+// name or value) and every header whose value contains a §var§ marker
+// (expandFuzzHTTPEnvelope rewrites it per variant). Index mapping follows
+// applyFuzzHTTPPosition: with hostInjected, user index N is envelope
+// index N+1. The input slice is not modified.
+func fuzzHTTPPlanHostHeaders(headers []envelope.KeyValue, positions []fuzzHTTPPosition, hostInjected bool) []envelope.KeyValue {
+	targeted := make(map[int]bool)
+	for _, p := range positions {
+		m := fuzzHTTPHeadersPathRE.FindStringSubmatch(p.Path)
+		if m == nil {
+			continue
+		}
+		idx, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		if hostInjected {
+			idx++
+		}
+		targeted[idx] = true
+	}
+	out := make([]envelope.KeyValue, 0, len(headers))
+	for i, kv := range headers {
+		if targeted[i] || strings.Contains(kv.Value, "§") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // runFuzzHTTPVariants iterates the cartesian product of all positions,
@@ -1274,7 +1312,13 @@ func (s *Server) checkFuzzHTTPVariantScope(plan *fuzzHTTPPlan, variantMsg *envel
 	if plan.useTLS {
 		connScheme = "https"
 	}
-	return s.checkTargetScopeAddrPath(connScheme, plan.dialAddr, variantMsg.Path)
+	if err := s.checkTargetScopeAddrPath(connScheme, plan.dialAddr, variantMsg.Path); err != nil {
+		return err
+	}
+	// USK-1167: the encoder writes the variant's Host header lines, so each
+	// value — after headers[N].value / .name positions and §var§ expansion —
+	// is judged against the dialled address on the connection scheme.
+	return checkHostHeaderLegs(s.connector.targetScope, connScheme, variantMsg.Headers, variantMsg.Path, plan.dialAddr)
 }
 
 // runFuzzHTTPSingleExchange runs one variant's send/receive cycle and

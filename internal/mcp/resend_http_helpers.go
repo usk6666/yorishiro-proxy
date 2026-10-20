@@ -634,17 +634,34 @@ func resolveResendHTTPDial(msg *envelope.HTTPMessage, overrideHost string) (addr
 // (envelope.WirePath, == msg.Path), the same form TargetScope.CheckURL and
 // the live HTTPScopeStep match on; canonical.Path is only the lenient
 // decoding since USK-1139, and CheckTarget decodes once more itself.
+//
+// USK-1167: every Host header value is checked too, against the dial
+// address addr (checkHostHeaderLegs). The HTTP/1 encoder writes the Host
+// line from msg.Headers and never from msg.Authority, so a `headers` list
+// naming a denied vhost reached it on an allowed authority. The Host legs
+// use the canonical leg's scheme and the wire-form path.
 func (s *Server) checkResendHTTPScope(msg *envelope.HTTPMessage, addr, overrideHost string) error {
+	return s.checkResendHTTPScopeHostHeaders(msg, addr, overrideHost, msg.Headers)
+}
+
+// checkResendHTTPScopeHostHeaders is checkResendHTTPScope with the Host
+// legs judged on hostHeaders instead of msg.Headers. resend_http always
+// passes msg.Headers; fuzz_http's plan check passes the base headers
+// minus the ones every variant rewrites (fuzzHTTPPlanHostHeaders), which
+// checkFuzzHTTPVariantScope judges per variant instead.
+func (s *Server) checkResendHTTPScopeHostHeaders(msg *envelope.HTTPMessage, addr, overrideHost string, hostHeaders []envelope.KeyValue) error {
 	canonical := resendHTTPRequestURL(msg)
 	if err := s.checkTargetScopeURL(canonical); err != nil {
 		return err
 	}
+	scheme := strings.ToLower(canonical.Scheme)
+	path := envelope.WirePath(canonical)
 	if overrideHost != "" {
-		if err := s.checkTargetScopeAddrPath(strings.ToLower(canonical.Scheme), addr, envelope.WirePath(canonical)); err != nil {
+		if err := s.checkTargetScopeAddrPath(scheme, addr, path); err != nil {
 			return err
 		}
 	}
-	return nil
+	return checkHostHeaderLegs(s.connector.targetScope, scheme, hostHeaders, path, addr)
 }
 
 // resendHTTPRequestURL composes the canonical *url.URL used for scope

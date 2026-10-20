@@ -29,6 +29,17 @@ import (
 // path. Both checks must pass. For rules without path_prefix the
 // dial-target check is the one HostScopeStep already made.
 //
+// Every Host header value is checked as well (USK-1167): the HTTP/1
+// serializer writes the Host line from Headers, never from Authority, so
+// a Host rewritten by intercept or Transform, or a duplicate Host on the
+// wire, would otherwise name a vhost no check saw. HTTP/2 forwards a
+// regular "host" header next to :authority, so it is checked there too.
+// The authority and the Host values are name legs
+// (connector.TargetScope.CheckNameLeg): deny rules always apply, but an
+// allow layer that admitted the dial target through an IP-literal rule
+// does not require them to be allow-listed — same-IP different-vhost and
+// Host-injection testing stay possible while a denied name is refused.
+//
 // Only Send-direction HTTPMessage envelopes are checked. Receive and
 // non-HTTP messages always pass through.
 type HTTPScopeStep struct {
@@ -70,9 +81,13 @@ func (s *HTTPScopeStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMe
 	scheme := transportScopeScheme(env)
 	path := msg.Path
 
-	allowed := s.checkHostPort(scheme, msg.Authority, path)
-	if allowed && env.Context.TargetHost != "" {
-		allowed = s.checkHostPort(scheme, env.Context.TargetHost, path)
+	dialTarget := env.Context.TargetHost
+	allowed := s.checkNameLeg(scheme, msg.Authority, path, dialTarget)
+	if allowed && dialTarget != "" {
+		allowed = s.checkHostPort(scheme, dialTarget, path)
+	}
+	if allowed {
+		allowed = s.checkHostHeaders(scheme, msg.Headers, path, dialTarget)
 	}
 	if !allowed {
 		// USK-829: emit a 403 terminator on the wire. HTTPScopeStep is
@@ -90,6 +105,43 @@ func (s *HTTPScopeStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMe
 // checkHostPort checks scheme, the host and port of hostPort (a port-less
 // value takes the scheme's default port) and path against the scope.
 func (s *HTTPScopeStep) checkHostPort(scheme, hostPort, path string) bool {
+	host, port := splitScopeHostPort(scheme, hostPort)
+	allowed, _ := s.scope.CheckTarget(scheme, host, port, path)
+	return allowed
+}
+
+// checkNameLeg checks the request authority as a name leg against the
+// connection's dial target (TargetScope.CheckNameLeg, USK-1167): denies
+// always apply, and an allow layer that admitted the dial target through
+// an IP-literal rule does not require the authority to be allow-listed.
+// With no dial target it is the full checkHostPort check. The authority is
+// split exactly as before (lenient port parse, default port inference).
+func (s *HTTPScopeStep) checkNameLeg(scheme, authority, path, dialTarget string) bool {
+	host, port := splitScopeHostPort(scheme, authority)
+	allowed, _ := s.scope.CheckNameLeg(scheme, host, port, path, dialTarget)
+	return allowed
+}
+
+// checkHostHeaders checks every Host header value as a name leg
+// (TargetScope.CheckHostHeader, USK-1167). The HTTP/1 serializer writes
+// the Host line from msg.Headers and never from msg.Authority, so a Host
+// rewritten after parsing (intercept, Transform) or a second Host header
+// on the wire would otherwise reach a vhost no check saw; HTTP/2 forwards
+// a regular "host" header next to :authority. Every value must pass.
+// headers is only read.
+func (s *HTTPScopeStep) checkHostHeaders(scheme string, headers []envelope.KeyValue, path, dialTarget string) bool {
+	for _, v := range envelope.HostHeaderValues(headers) {
+		if ok, _ := s.scope.CheckHostHeader(scheme, v, path, dialTarget); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// splitScopeHostPort splits hostPort for a scope check: a value without a
+// port, or whose port does not parse as a positive number, takes the
+// scheme's default port.
+func splitScopeHostPort(scheme, hostPort string) (string, int) {
 	host, portStr, err := net.SplitHostPort(hostPort)
 	if err != nil {
 		// No port (e.g., "example.com").
@@ -104,9 +156,7 @@ func (s *HTTPScopeStep) checkHostPort(scheme, hostPort, path string) bool {
 	if port == 0 {
 		port = defaultPortForScheme(scheme)
 	}
-
-	allowed, _ := s.scope.CheckTarget(scheme, host, port, path)
-	return allowed
+	return host, port
 }
 
 // defaultPortForScheme returns the well-known default port for HTTP schemes.

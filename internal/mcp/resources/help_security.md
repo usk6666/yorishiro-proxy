@@ -211,6 +211,35 @@ Every request is checked against both the host it names (`Host` / `:authority`)
 and the host the connection actually reaches, each with the request path, so
 naming another host in `Host` does not escape a path rule on the real target.
 
+### Host headers and allow rules
+
+The names a request carries — its authority (`Host` as parsed, HTTP/2
+`:authority`) and **every** `Host` header value (all casings, duplicates
+included; HTTP/2's regular `host` header too) — are checked as well, on live
+traffic, after an intercept `modify_and_forward` or a Transform rule rewrites the
+request, and in `resend_http` / `fuzz_http` (each variant, after positions are
+applied). They are checked with a narrower allow rule than the host the
+connection dials:
+
+- **Deny rules always apply.** A request naming a denied host in any `Host`
+  value is refused (`403`, `blocked_by: target_scope`), whatever it dials.
+- **IP-literal allow → name not required in the allow list.** If the dialed host
+  was admitted by an allow rule whose `hostname` is an IP address, a `Host` /
+  authority naming another (non-denied) virtual host is sent as written. With
+  `allows: [{hostname: "10.0.0.5"}]`, a CONNECT to `10.0.0.5:443` carrying
+  `Host: intranet.local` is forwarded. This keeps same-IP different-vhost and
+  Host-header injection testing possible.
+- **Domain allow → name must be allowed too.** With
+  `allows: [{hostname: "app.example"}]`, a request to `app.example` carrying
+  `Host: other.example` is refused: the allow named hosts, not an address.
+- This is evaluated per layer (Policy and Agent separately), so an agent allow
+  rule that names domains narrows names even when the policy allows an IP.
+- A `Host` value with a port that is not a decimal number in 1–65535
+  (`db.internal:abc`) is refused while any rule is set.
+
+To stop a vhost from being reached on an allowed address, **deny** its name.
+
+
 ### What `schemes` means
 
 `schemes` is a **transport confidentiality** axis, not an L7 application-protocol

@@ -217,6 +217,26 @@ func checkTargetScopeAddrPathHelper(ts *connector.TargetScope, scheme, addr, pat
 	return nil
 }
 
+// checkHostHeaderLegs checks every Host header value in headers
+// (envelope.HostHeaderValues: every casing, wire order, OWS trimmed, no
+// dedup) as a TargetScope name leg against the dial address dialAddr
+// (connector.TargetScope.CheckHostHeader, USK-1167). Deny rules always
+// apply; an allow layer that admitted dialAddr through an IP-literal rule
+// does not require the Host value to be allow-listed, so a Host naming a
+// different (non-denied) vhost on an allowed address can still be sent.
+// headers is only read. Returns nil in open mode.
+func checkHostHeaderLegs(ts *connector.TargetScope, scheme string, headers []envelope.KeyValue, path, dialAddr string) error {
+	if ts == nil || !ts.HasRules() {
+		return nil
+	}
+	for _, v := range envelope.HostHeaderValues(headers) {
+		if allowed, reason := ts.CheckHostHeader(scheme, v, path, dialAddr); !allowed {
+			return fmt.Errorf("request blocked by target scope: Host header %q is %s", v, reason)
+		}
+	}
+	return nil
+}
+
 // isDecimalPort reports whether a port string taken from net.SplitHostPort is
 // a decimal TCP port number the scope engine can resolve.
 //
