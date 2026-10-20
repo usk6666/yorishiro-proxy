@@ -51,6 +51,14 @@ func TestSplitTargetHostPort(t *testing.T) {
 		{target: "h", wantErr: true},
 		{target: "[::1]", wantErr: true},
 		{target: "", wantErr: true},
+		// USK-1264 U2: bracket content must be an IPv6 literal.
+		{target: "[fe80::1%eth0]:80", wantHost: "fe80::1%eth0", wantPort: 80},
+		{target: "[::ffff:1.2.3.4]:80", wantHost: "::ffff:1.2.3.4", wantPort: 80},
+		{target: "[db.internal:5432]:80", wantErr: true},
+		{target: "[db.internal]:80", wantErr: true},
+		{target: "[localhost:1]:80", wantErr: true},
+		{target: "[1.2.3.4]:80", wantErr: true},
+		{target: "[]:80", wantErr: true},
 	}
 	for _, c := range cases {
 		t.Run(c.target, func(t *testing.T) {

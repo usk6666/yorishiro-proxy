@@ -368,22 +368,46 @@ func TestResolveForwardPeekTimeout(t *testing.T) {
 	}
 }
 
-func TestEnsurePort(t *testing.T) {
+// TestJoinDefaultPort covers the forward target's default-port join (it
+// replaced ensurePort). USK-1264: a host with colons that is neither
+// host:port nor an IPv6 literal must be an error, not wrapped as
+// "[db.internal:5432:x]:80"; a bracket holding anything but an IPv6
+// literal is an error too. An unbracketed valid IPv6 literal is still
+// accepted and bracketed (decision record in JoinDefaultPort's doc).
+func TestJoinDefaultPort(t *testing.T) {
 	cases := []struct {
-		in   string
-		want string
+		in      string
+		want    string
+		wantErr bool
 	}{
-		{"example.com", "example.com:80"},
-		{"example.com:8080", "example.com:8080"},
-		{"127.0.0.1", "127.0.0.1:80"},
-		{"127.0.0.1:443", "127.0.0.1:443"},
+		{in: "example.com", want: "example.com:80"},
+		{in: "example.com:8080", want: "example.com:8080"},
+		{in: "127.0.0.1", want: "127.0.0.1:80"},
+		{in: "127.0.0.1:443", want: "127.0.0.1:443"},
 		// IPv6 without port. JoinHostPort wraps in brackets.
-		{"::1", "[::1]:80"},
+		{in: "::1", want: "[::1]:80"},
+		{in: "2001:db8::1:8080", want: "[2001:db8::1:8080]:80"},
+		{in: "fe80::1%eth0", want: "[fe80::1%eth0]:80"},
+		{in: "[::1]", want: "[::1]:80"},
+		{in: "[::1]:8080", want: "[::1]:8080"},
+		{in: "db.internal:5432:x", wantErr: true},
+		{in: "db.internal:5432:80", wantErr: true},
+		{in: "a:b:c", wantErr: true},
+		{in: "[db.internal:5432]:80", wantErr: true},
+		{in: "[db.internal]:80", wantErr: true},
+		{in: "[db.internal]", wantErr: true},
+		{in: "[localhost:1]", wantErr: true},
 	}
 	for _, c := range cases {
-		got := ensurePort(c.in, "80")
-		if got != c.want {
-			t.Errorf("ensurePort(%q) = %q, want %q", c.in, got, c.want)
+		got, err := JoinDefaultPort(c.in, "80")
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("JoinDefaultPort(%q) = %q, nil; want error", c.in, got)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("JoinDefaultPort(%q) = %q, %v; want %q", c.in, got, err, c.want)
 		}
 	}
 }

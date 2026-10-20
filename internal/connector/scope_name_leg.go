@@ -3,8 +3,33 @@ package connector
 import (
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 )
+
+// CheckAuthority checks a request authority as a name leg (scaffolding).
+func (s *TargetScope) CheckAuthority(scheme, authority, path, dialTarget string) (allowed bool, reason string) {
+	host, port := splitAuthorityLenient(scheme, authority)
+	return s.CheckNameLeg(scheme, host, port, path, dialTarget)
+}
+
+// splitAuthorityLenient splits an authority for a scope check: a value
+// without a port, or whose port does not parse as a number, takes the
+// scheme's default port.
+func splitAuthorityLenient(scheme, authority string) (string, int) {
+	host, portStr, err := net.SplitHostPort(authority)
+	if err != nil {
+		host, portStr = authority, ""
+	}
+	port := 0
+	if portStr != "" {
+		port, _ = strconv.Atoi(portStr)
+	}
+	if port == 0 {
+		port = defaultPort(scheme, "")
+	}
+	return host, port
+}
 
 // Name legs (USK-1167).
 //

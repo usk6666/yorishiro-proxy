@@ -231,7 +231,10 @@ func (s *Server) buildResendWSPlan(ctx context.Context, input *resendWSInput) (*
 		dialAuthority = input.TargetAddr
 	}
 	plan.useTLS = scheme == "wss"
-	plan.dialAddr, plan.sni = resolveResendWSDialTarget(dialAuthority, plan.useTLS)
+	plan.dialAddr, plan.sni, err = resolveResendWSDialTarget(dialAuthority, plan.useTLS)
+	if err != nil {
+		return nil, err
+	}
 	plan.upgradeURL = resendWSUpgradeURL(scheme, authority, upgradePath, rawQuery)
 
 	if err := populateResendWSFrame(input, plan); err != nil {
@@ -408,7 +411,7 @@ func firstFlowHeaderValue(headers map[string][]string, name string) string {
 
 // resolveResendWSDialTarget produces the (host:port, sni) pair for the
 // upstream connection. authority may be host:port or just host.
-func resolveResendWSDialTarget(authority string, useTLS bool) (addr, sni string) {
+func resolveResendWSDialTarget(authority string, useTLS bool) (addr, sni string, err error) {
 	host := authority
 	port := ""
 	if h, p, err := net.SplitHostPort(authority); err == nil {
@@ -422,7 +425,7 @@ func resolveResendWSDialTarget(authority string, useTLS bool) (addr, sni string)
 			port = "80"
 		}
 	}
-	return net.JoinHostPort(host, port), host
+	return net.JoinHostPort(host, port), host, nil
 }
 
 // resendWSUpgradeURL builds the canonical *url.URL used for scope and

@@ -347,6 +347,8 @@ func TestE2E_HostHeaderScope_TransformSetHost(t *testing.T) {
 	}{
 		{"vhost.example", false},
 		{"denied.example", true},
+		// USK-1304: a denied comma part is refused too.
+		{"ok.example, denied.example", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {

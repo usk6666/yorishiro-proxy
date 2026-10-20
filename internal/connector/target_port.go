@@ -33,3 +33,12 @@ func SplitTargetHostPort(target string) (host string, port int, err error) {
 	}
 	return host, port, nil
 }
+
+// JoinDefaultPort returns host with ":" + defaultPort appended when it
+// carries no port.
+func JoinDefaultPort(host, defaultPort string) (string, error) {
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host, nil
+	}
+	return net.JoinHostPort(host, defaultPort), nil
+}
