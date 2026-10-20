@@ -2,6 +2,7 @@ package connector
 
 import (
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -11,7 +12,8 @@ import (
 // An HTTP request names its target twice over: the connection's dial
 // target (Envelope.Context.TargetHost, or the resend / fuzz dial address)
 // and the names the request itself carries — the authority (HTTP/1 Host
-// as parsed, HTTP/2 :authority) and every Host header value. The dial
+// as parsed, HTTP/2 :authority), every Host header value and, for an
+// HTTP/1.x absolute-form request-target, its URI authority (USK-1274). The dial
 // target is what the proxy connects to; the names are what a virtual-host
 // server on that address routes on. Both are scope-checked, but the names
 // with a narrower allow semantic ("Option B"):
@@ -308,13 +310,43 @@ func lastColonIPv6Reading(value string) (string, int, bool) {
 }
 
 // ReasonAbsoluteFormAuthorityUninterpretable is the block reason for an
-// absolute-form request-target whose authority cannot be parsed.
+// HTTP/1.x absolute-form request-target whose authority net/url cannot
+// parse (an unterminated IPv6 literal, a percent-encoded ASCII host byte,
+// ...) or that carries more than one "@".
 const ReasonAbsoluteFormAuthorityUninterpretable = "blocked: absolute-form request-target authority is uninterpretable"
 
 // CheckAbsoluteFormAuthority checks the authority of an HTTP/1.x
-// absolute-form request-target as a name leg. Scaffolding (USK-1274).
+// absolute-form request-target (envelope.EnvelopeContext.AbsoluteFormAuthority,
+// verbatim from the wire) as a name leg (USK-1274). RFC 9112 §3.2.2 has a
+// server that receives absolute-form route on the URI authority and ignore
+// Host, so the authority names a host exactly as a Host value does.
+//
+// scheme is the client connection's transport scheme, never the URI's:
+// a port-less authority takes the transport default port. An empty
+// authority — or one whose host part is empty, as in "u@" — names no
+// host and passes; the Host values are checked separately. Userinfo is
+// stripped by net/url; the host[:port] that remains is judged by
+// CheckHostHeader (strict port, Option B allow semantic). An authority
+// net/url refuses fails closed when the scope has rules: a server may
+// still read a host out of it, and no rule could be matched against it.
 func (s *TargetScope) CheckAbsoluteFormAuthority(scheme, authority, path, dialTarget string) (allowed bool, reason string) {
-	return true, ""
+	if authority == "" || !s.HasRules() {
+		return true, ""
+	}
+	// More than one "@" is not an RFC 3986 authority (userinfo cannot hold
+	// a raw "@"). net/url splits at the last one, other parsers at the
+	// first, so which name a server routes on is ambiguous: refuse it.
+	if strings.Count(authority, "@") > 1 {
+		return false, ReasonAbsoluteFormAuthorityUninterpretable
+	}
+	u, err := url.ParseRequestURI("http://" + authority)
+	if err != nil {
+		return false, ReasonAbsoluteFormAuthorityUninterpretable
+	}
+	if u.Host == "" {
+		return true, ""
+	}
+	return s.CheckHostHeader(scheme, u.Host, path, dialTarget)
 }
 
 // splitHostHeaderValue splits a Host header value into host and port for

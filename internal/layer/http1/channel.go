@@ -312,6 +312,19 @@ func absoluteFormPrefix(requestURI string) string {
 	return requestURI[:i+3+end]
 }
 
+// absoluteFormAuthority returns the authority of an absolute-form
+// request-target exactly as it appears on the wire (userinfo included),
+// or "" for any other form. It is the part of absoluteFormPrefix after
+// "://" — the same prefix requestLine splices a rewritten path behind, so
+// the judged authority is the one that reaches the wire.
+func absoluteFormAuthority(requestURI string) string {
+	prefix := absoluteFormPrefix(requestURI)
+	if prefix == "" {
+		return ""
+	}
+	return prefix[strings.Index(prefix, "://")+3:]
+}
+
 // bodyOpts are the per-channel body assembly options inherited from the Layer.
 type bodyOpts struct {
 	spillDir       string
@@ -1153,6 +1166,10 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 
 	envCtx := c.ctxTmpl
 	envCtx.ReceivedAt = time.Now()
+	// USK-1274: the absolute-form authority, for the scope check only.
+	// Set on this request envelope's copy, not on ctxTmpl, so the paired
+	// Receive envelopes do not carry it.
+	envCtx.AbsoluteFormAuthority = absoluteFormAuthority(rawReq.RequestURI)
 
 	opaque := &opaqueHTTP1{
 		rawReq:         rawReq,
