@@ -40,7 +40,7 @@ A `target_scope` deny surfaces differently depending on how the request entered 
 
 | Path | Deny symptom |
 |---|---|
-| Transparent HTTPS via CONNECT tunnel | Proxy returns `HTTP/1.1 200 Connection Established` (the tunnel acknowledgement is sent before the scope check), then closes the connection. The client's inner TLS handshake fails with EOF. Note that the `200` line refers to the CONNECT tunnel, **not** to the backend -- no backend bytes are exchanged. |
+| Transparent HTTPS via CONNECT tunnel | Proxy refuses the tunnel with `HTTP/1.1 403 Forbidden` and body `yorishiro-proxy: target blocked by scope`, then closes the connection. No tunnel is opened and the backend is never contacted. |
 | Transparent plain-HTTP forward proxy | Proxy returns `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`. |
 | MCP tool-initiated request (`resend_*`, `fuzz_*`, `macro`) | MCP error response with the violation reason. |
 | Intercept release (`release`, `modify_and_forward`, timeout auto-release) | The `intercept` call itself succeeds. Scope is checked again at release time, with the rules in force then, against the request being forwarded — for `modify_and_forward`, the modified one. A deny added while the request was held (policy reload or this tool) or a rewrite of `authority` / `path` into a denied target blocks it: an HTTP request gets `403 Forbidden` with body `{"error":"blocked by target_scope","blocked_by":"target_scope"}`, a WebSocket / gRPC message is dropped, and the block is recorded as a flow with `blocked_by: target_scope`. |
@@ -273,7 +273,7 @@ logged.
 
 Rate limits use the same two-layer architecture as target scope. The Policy Layer defines upper bounds (set via the policy file or config file; replaceable only by the operator's `SIGHUP` reload); the Agent Layer can set equal or stricter limits at runtime.
 
-Requests that exceed rate limits receive a `429 Too Many Requests` response with an `X-Blocked-By: rate_limit` header.
+Requests that exceed rate limits receive a `429 Too Many Requests` response. At the connection-level gates -- an HTTP CONNECT tunnel request and the plain HTTP forward proxy -- that is `HTTP/1.1 429 Too Many Requests` with body `yorishiro-proxy: target blocked by rate limit`, after which the connection closes; no tunnel is opened and the target is not contacted. Elsewhere the response carries an `X-Blocked-By: rate_limit` header.
 
 **Applicability**: Both Policy Layer and Agent Layer rate limits apply to **all** proxy traffic -- transparent MITM traffic (HTTP CONNECT tunnel, plain HTTP forward proxy, SOCKS5 tunnel) and MCP tool-initiated requests (the same list as for `target_scope`). The effective rate (the stricter of policy and agent) is shared across both paths.
 

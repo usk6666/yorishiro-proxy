@@ -218,7 +218,7 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 
 	flags := registerFlags(fs, cfg)
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagsOnly(fs, args); err != nil {
 		return err
 	}
 
@@ -367,6 +367,22 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		sseInterceptEngine, httpTransformEngine, sseTransformEngine, passthrough,
 		targetScopePolicy, targetScopePolicySource, reload, openBrowser, stdioMCP, versionStr, opts, logger)
+}
+
+// parseFlagsOnly parses args into fs and refuses any positional argument.
+// The flag package stops at the first non-flag token and leaves the rest
+// unparsed, so `-insecure true -db proj` would otherwise boot with -db
+// silently dropped. The server takes flags only, and the refusal happens
+// before any side effect (USK-1047).
+func parseFlagsOnly(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q: the server takes flags only "+
+			"(boolean flags take -flag=value, e.g. -insecure=false)", fs.Arg(0))
+	}
+	return nil
 }
 
 // applyMCPTransportFlags clears the HTTP MCP address when -no-http-mcp is

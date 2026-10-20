@@ -408,6 +408,8 @@ func New(conn net.Conn, role Role) layer.Layer
 func (l *Layer) DetachStream() (io.Reader, io.Writer, io.Closer, error)
 ```
 
+**HTTP/1.x keep-alive ルール (USK-1229)。** HTTP/1.1 は request の順に応答する (RFC 9112 §9.3) ため、client 側の HTTP/1.x Layer は、request を渡したのに完全な final response (status ≥ 200、`101`、または raw-authoritative response) を書かなかった exchange の後、その connection で次の request を parse しない。upstream が応答前または応答途中で close した場合や、Pipeline が request を drop した場合がこれにあたる。代わりに connection を close して upstream の FIN を写す。response は合成しない。upstream 側では、request 送信後・response head 完成前の close は aborted `StreamError` になり、途中で切れた body (Content-Length 不足、終端 chunk のない chunked body) は受信したとおりに `TruncatedBody` anomaly 付きで渡し、その後 aborted `StreamError` を返す。
+
 ```go
 package http2layer
 // New は net.Conn を HTTP/2 layer で wrap する。HTTP/2 stream ごとに

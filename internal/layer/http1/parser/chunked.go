@@ -3,6 +3,7 @@ package parser
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -160,6 +161,12 @@ type dechunkedReader struct {
 	err              error
 	trailers         RawHeaders
 	trailerAnomalies []Anomaly
+
+	// truncated is set when the underlying reader hit EOF before the
+	// terminal zero-size chunk was read (USK-1229). decoded counts the
+	// chunk-data bytes delivered, for the anomaly detail.
+	truncated bool
+	decoded   int64
 
 	// rawCapture accumulates the on-wire body bytes (chunk framing + data +
 	// trailers). Read from RawBody() (memory) or RawBodyBuffer() (spilled)
@@ -336,6 +343,23 @@ func (dr *dechunkedReader) RawBodyTruncated() bool {
 	return dr.rawCapture.isTruncated()
 }
 
+// noteEOF records truncation when err shows the stream ended before the
+// terminal chunk (USK-1229). Called only at reads of the underlying stream,
+// so a malformed chunk-size line is not mistaken for a cut connection.
+func (dr *dechunkedReader) noteEOF(err error) {
+	if !dr.done && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+		dr.truncated = true
+	}
+}
+
+// BodyTruncated implements BodyTruncationProvider (USK-1229).
+func (dr *dechunkedReader) BodyTruncated() (bool, string) {
+	if !dr.truncated {
+		return false, ""
+	}
+	return true, fmt.Sprintf("connection closed before the terminal chunk after %d decoded body bytes", dr.decoded)
+}
+
 // Read implements io.Reader. It returns decoded chunk data without markers.
 func (dr *dechunkedReader) Read(p []byte) (int, error) {
 	if dr.done || dr.err != nil {
@@ -370,15 +394,22 @@ func (dr *dechunkedReader) readChunkData(p []byte) (int, error) {
 	if n > 0 {
 		dr.rawCapture.write(p[:n])
 		dr.captureChunkBytes(p[:n])
+		dr.decoded += int64(n)
 	}
 	if err != nil {
+		dr.noteEOF(err)
 		dr.err = err
 		return n, err
 	}
 	// If the chunk is fully read, consume the trailing CRLF.
 	if dr.remaining == 0 {
 		var crlf [2]byte
-		if _, crlfErr := io.ReadFull(dr.r, crlf[:]); crlfErr != nil {
+		if cn, crlfErr := io.ReadFull(dr.r, crlf[:]); crlfErr != nil {
+			if cn > 0 {
+				dr.rawCapture.write(crlf[:cn])
+				dr.captureChunkBytes(crlf[:cn])
+			}
+			dr.noteEOF(crlfErr)
 			dr.err = crlfErr
 			return n, crlfErr
 		}
@@ -448,6 +479,7 @@ func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
 			dr.rawCapture.write(line)
 			dr.captureChunkBytes(line)
 		}
+		dr.noteEOF(lineErr)
 		return "", lineErr
 	}
 	for lineErr == bufio.ErrBufferFull {

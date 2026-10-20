@@ -379,6 +379,10 @@ func runCloseDuringBodyRead(t *testing.T, keepWarm bool, settle time.Duration) b
 		if r.err != nil {
 			t.Fatalf("first Next: %v", r.err)
 		}
+		// USK-1229: answer the first request, or the Layer ends the
+		// connection instead of parsing the partial one.
+		go func() { _, _ = io.Copy(io.Discard, client) }()
+		answerOK(t, ch)
 		_ = ch.Close()
 	}
 
