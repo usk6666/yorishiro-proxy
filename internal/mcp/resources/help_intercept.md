@@ -35,7 +35,11 @@ For an HTTP request or response.
 - **body** (string): The new body. On HTTP/1.x any body change drops `Transfer-Encoding` and sets `Content-Length` to the new length.
 - **body_encoding** (string): `"text"` (default) or `"base64"`, for `body`.
 - **body_patches** (array): Patches applied in order, after `body` if both are given. Each entry is either `{"json_path": "$.a.b", "value": ...}` (dot path into a JSON body; array indexes are not supported) or `{"regex": "...", "replace": "..."}` (`$1`-style group references). Either form takes an optional `encoding` codec chain applied to the value / replacement.
-- **auto_content_length** (boolean): Accepted, but currently has no effect.
+
+On HTTP/1.x there is no switch to keep the old framing after a body change. To send a mismatched `Content-Length` / `Transfer-Encoding` pair (request smuggling tests):
+- Change **only** `headers`, not the body: your header list is sent as given (for example add `Content-Length` to a held chunked request) and the held body bytes go out unchanged.
+- Write the whole request in a plugin hook with `phase="post_pipeline"` via `msg["raw"]`: HTTP/1.x sends those bytes verbatim, with no framing fix-up.
+- Send hand-written request bytes with `fuzz_raw` (`override_bytes` plus `target_addr`; no `flow_id` needed). Its bytes reach the wire verbatim, as do `resend_raw`'s, but `resend_raw` replays only recorded raw TCP flows, not HTTP ones.
 
 ### ws (object, optional)
 For a WebSocket frame.
