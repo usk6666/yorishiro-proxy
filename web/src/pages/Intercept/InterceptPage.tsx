@@ -1,24 +1,25 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, Spinner, Table, Tabs, useToast } from "../../components/ui/index.js";
 import { useInterceptAction, useQuery } from "../../lib/mcp/hooks.js";
 import type {
-  InterceptPhase,
   InterceptQueueEntry,
   InterceptQueueResult,
 } from "../../lib/mcp/types.js";
 import { BodyEditor } from "./BodyEditor.js";
-import type { HeaderRow } from "./HeaderEditor.js";
 import { HeaderEditor } from "./HeaderEditor.js";
 import "./InterceptPage.css";
-import { RawBytesEditor } from "./RawBytesEditor.js";
-import { RulesPanel } from "./RulesPanel.js";
 import {
   buildModifyAndForwardArgs,
-  type DetailViewMode,
+  canModify,
+  entryKind,
   entryToEditState,
+  type InterceptEditState,
+  type InterceptKind,
+  maskingWarning,
   rawModeAllowed,
-  resolvePhase,
 } from "./interceptPayload.js";
+import { RawBytesEditor } from "./RawBytesEditor.js";
+import { RulesPanel } from "./RulesPanel.js";
 
 const TABS = [
   { id: "queue", label: "Queue" },
@@ -33,27 +34,20 @@ const TABS = [
 const INTERCEPT_POLL_ACTIVE_MS = 1000;
 const INTERCEPT_POLL_IDLE_MS = 5000;
 
+// Suggestions only: the method field is free text so any token the wire
+// can carry (WebDAV verbs, custom or malformed methods) can be sent.
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
 const HTTP_STATUS_CODES = [
   200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 405, 500, 502, 503, 504,
 ];
 
-
 export function InterceptPage() {
   const [activeTab, setActiveTab] = useState("queue");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detailViewMode, setDetailViewMode] = useState<DetailViewMode>("structured");
 
-  // Editable fields for the selected entry (structured mode)
-  const [editMethod, setEditMethod] = useState("");
-  const [editUrl, setEditUrl] = useState("");
-  const [editHeaders, setEditHeaders] = useState<HeaderRow[]>([]);
-  const [editBody, setEditBody] = useState("");
-  const [editStatusCode, setEditStatusCode] = useState(200);
-
-  // Editable raw bytes (raw mode, Base64)
-  const [editRawBytes, setEditRawBytes] = useState("");
+  // Editable state for the selected entry.
+  const [edit, setEdit] = useState<InterceptEditState | null>(null);
 
   // True while a release/drop/modify_and_forward mutation is awaiting its
   // post-mutation refetchQueue. Drives `disabled` on the action buttons so
@@ -87,11 +81,13 @@ export function InterceptPage() {
     pauseWhenHidden: true,
   });
 
-  // Fetch config for intercept rules summary
+  // Fetch config for intercept rules summary and the Output Filter rule
+  // count that drives the masked-content warning.
   const {
     data: configData,
     loading: configLoading,
   } = useQuery<"config">("config");
+  const outputRules = configData?.safety_filter?.output_rules ?? 0;
 
   const queue: InterceptQueueResult = queueData ?? { items: [], count: 0 };
 
@@ -117,33 +113,37 @@ export function InterceptPage() {
     ? queue.items.find((item) => item.id === selectedId) ?? null
     : null;
 
-  // Select a queue entry and populate edit fields based on phase
+  // Select a queue entry and populate the editor from its held view.
   const handleSelect = useCallback((entry: InterceptQueueEntry) => {
     setSelectedId(entry.id);
-
-    const edit = entryToEditState(entry);
-    setEditMethod(edit.method);
-    setEditUrl(edit.url);
-    setEditHeaders(edit.headers);
-    setEditBody(edit.body);
-    setEditStatusCode(edit.statusCode);
-    setEditRawBytes(edit.rawBytes);
+    setEdit(entryToEditState(entry));
   }, []);
+
+  const updateEdit = useCallback((patch: Partial<InterceptEditState>) => {
+    setEdit((prev) => (prev ? { ...prev, ...patch } : prev));
+  }, []);
+
+  const modifiable = selectedEntry ? canModify(selectedEntry) : false;
+
+  // The arguments Modify & Forward would send right now; recomputed on
+  // every edit so the masked-content warning tracks what is actually sent.
+  const pendingArgs = useMemo(
+    () => (selectedEntry && edit && modifiable ? buildModifyAndForwardArgs(selectedEntry, edit) : null),
+    [selectedEntry, edit, modifiable],
+  );
+  const showMaskWarning = pendingArgs ? maskingWarning(pendingArgs, outputRules) : false;
 
   // Release: forward as-is
   const handleRelease = useCallback(async () => {
     if (!selectedId || isActionInFlight) return;
-    const phase = selectedEntry ? resolvePhase(selectedEntry) : "request";
+    const kind = selectedEntry ? entryKind(selectedEntry) : "unknown";
     setIsActionInFlight(true);
     try {
       await interceptAction({
         action: "release",
-        params: {
-          intercept_id: selectedId,
-          mode: detailViewMode,
-        },
+        params: { intercept_id: selectedId },
       });
-      addToast({ type: "success", message: `${phaseLabel(phase)} released` });
+      addToast({ type: "success", message: `${kindLabel(kind)} released` });
       // Await the refetch BEFORE clearing selectedId so the detail panel
       // does not render a stale (already-released) entry between the
       // mutation completing and the queue polling catching up.
@@ -157,38 +157,16 @@ export function InterceptPage() {
     } finally {
       setIsActionInFlight(false);
     }
-  }, [selectedId, isActionInFlight, selectedEntry, detailViewMode, interceptAction, addToast, refetchQueue]);
+  }, [selectedId, isActionInFlight, selectedEntry, interceptAction, addToast, refetchQueue]);
 
-  // Modify & Forward: apply edits and forward (phase-aware)
+  // Modify & Forward: send the typed payload for the held item.
   const handleModifyAndForward = useCallback(async () => {
-    if (!selectedId || !selectedEntry || isActionInFlight) return;
-
-    const phase = resolvePhase(selectedEntry);
-
+    if (!selectedId || !selectedEntry || !pendingArgs || isActionInFlight) return;
+    const kind = entryKind(selectedEntry);
     setIsActionInFlight(true);
     try {
-      await interceptAction(
-        buildModifyAndForwardArgs(
-          selectedEntry,
-          {
-            phase,
-            method: editMethod,
-            url: editUrl,
-            headers: editHeaders,
-            body: editBody,
-            statusCode: editStatusCode,
-            rawBytes: editRawBytes,
-          },
-          detailViewMode,
-        ),
-      );
-      addToast({
-        type: "success",
-        message: detailViewMode === "raw"
-          ? `${phaseLabel(phase)} modified (raw) and forwarded`
-          : `${phaseLabel(phase)} modified and forwarded`,
-      });
-
+      await interceptAction(pendingArgs);
+      addToast({ type: "success", message: `${kindLabel(kind)} modified and forwarded` });
       // Await the refetch BEFORE clearing selectedId so the detail panel
       // does not render a stale (already-forwarded) entry between the
       // mutation completing and the queue polling catching up.
@@ -202,19 +180,19 @@ export function InterceptPage() {
     } finally {
       setIsActionInFlight(false);
     }
-  }, [selectedId, isActionInFlight, selectedEntry, detailViewMode, editMethod, editUrl, editHeaders, editBody, editStatusCode, editRawBytes, interceptAction, addToast, refetchQueue]);
+  }, [selectedId, selectedEntry, pendingArgs, isActionInFlight, interceptAction, addToast, refetchQueue]);
 
   // Drop: discard entry
   const handleDrop = useCallback(async () => {
     if (!selectedId || isActionInFlight) return;
-    const phase = selectedEntry ? resolvePhase(selectedEntry) : "request";
+    const kind = selectedEntry ? entryKind(selectedEntry) : "unknown";
     setIsActionInFlight(true);
     try {
       await interceptAction({
         action: "drop",
         params: { intercept_id: selectedId },
       });
-      addToast({ type: "warning", message: `${phaseLabel(phase)} dropped` });
+      addToast({ type: "warning", message: `${kindLabel(kind)} dropped` });
       // Await the refetch BEFORE clearing selectedId so the detail panel
       // does not render a stale (already-dropped) entry between the
       // mutation completing and the queue polling catching up.
@@ -230,8 +208,7 @@ export function InterceptPage() {
     }
   }, [selectedId, isActionInFlight, selectedEntry, interceptAction, addToast, refetchQueue]);
 
-  const hasRawBytes = selectedEntry ? rawModeAllowed(selectedEntry) : false;
-  const selectedPhase = selectedEntry ? resolvePhase(selectedEntry) : "request";
+  const actionDisabled = executeLoading || isActionInFlight;
 
   return (
     <div className="page intercept-page">
@@ -265,35 +242,18 @@ export function InterceptPage() {
         </Tabs>
       </div>
 
-      {activeTab === "queue" && selectedEntry && (
+      {activeTab === "queue" && selectedEntry && edit && (
         <div className="intercept-detail">
           <div className="intercept-detail-header">
             <span className="intercept-detail-title">
               <DetailTitle entry={selectedEntry} />
             </span>
             <div className="intercept-detail-actions">
-              {/* Structured / Raw toggle */}
-              {hasRawBytes && (
-                <div className="intercept-view-mode-selector">
-                  <button
-                    className={`intercept-mode-btn ${detailViewMode === "structured" ? "intercept-mode-btn--active" : ""}`}
-                    onClick={() => setDetailViewMode("structured")}
-                  >
-                    Structured
-                  </button>
-                  <button
-                    className={`intercept-mode-btn ${detailViewMode === "raw" ? "intercept-mode-btn--active" : ""}`}
-                    onClick={() => setDetailViewMode("raw")}
-                  >
-                    Raw
-                  </button>
-                </div>
-              )}
               <Button
                 variant="primary"
                 size="sm"
                 onClick={handleRelease}
-                disabled={executeLoading || isActionInFlight}
+                disabled={actionDisabled}
               >
                 Release
               </Button>
@@ -301,7 +261,8 @@ export function InterceptPage() {
                 variant="secondary"
                 size="sm"
                 onClick={handleModifyAndForward}
-                disabled={executeLoading || isActionInFlight}
+                disabled={actionDisabled || !modifiable}
+                title={modifiable ? undefined : "Modify & Forward is not available for this hold type; use Release or Drop"}
               >
                 Modify & Forward
               </Button>
@@ -309,110 +270,21 @@ export function InterceptPage() {
                 variant="danger"
                 size="sm"
                 onClick={handleDrop}
-                disabled={executeLoading || isActionInFlight}
+                disabled={actionDisabled}
               >
                 Drop
               </Button>
             </div>
           </div>
           <div className="intercept-detail-body">
-            {detailViewMode === "structured" ? (
-              <>
-                {selectedPhase === "request" && (
-                  <>
-                    {/* Method + URL */}
-                    <div className="intercept-request-line">
-                      <select
-                        className="intercept-method-select"
-                        value={editMethod}
-                        onChange={(e) => setEditMethod(e.target.value)}
-                      >
-                        {HTTP_METHODS.map((m) => (
-                          <option key={m} value={m}>{m}</option>
-                        ))}
-                      </select>
-                      <input
-                        className="input intercept-url-input"
-                        value={editUrl}
-                        onChange={(e) => setEditUrl(e.target.value)}
-                        placeholder="URL"
-                      />
-                    </div>
-                    <HeaderEditor headers={editHeaders} onChange={setEditHeaders} />
-                    <BodyEditor body={editBody} onChange={setEditBody} />
-                  </>
-                )}
-
-                {selectedPhase === "response" && (
-                  <>
-                    {/* Status Code + URL (read-only) */}
-                    <div className="intercept-request-line">
-                      <input
-                        type="number"
-                        className="input intercept-status-input"
-                        value={editStatusCode}
-                        min={100}
-                        max={599}
-                        onChange={(e) => setEditStatusCode(Number(e.target.value))}
-                        list="http-status-codes"
-                      />
-                      <datalist id="http-status-codes">
-                        {HTTP_STATUS_CODES.map((code) => (
-                          <option key={code} value={code} />
-                        ))}
-                      </datalist>
-                      <input
-                        className="input intercept-url-input"
-                        value={selectedEntry.url ?? ""}
-                        readOnly
-                        title="URL (read-only for response phase)"
-                      />
-                    </div>
-                    <HeaderEditor headers={editHeaders} onChange={setEditHeaders} />
-                    <BodyEditor body={editBody} onChange={setEditBody} />
-                  </>
-                )}
-
-                {selectedPhase === "websocket_frame" && (
-                  <>
-                    {/* WebSocket frame metadata (read-only) */}
-                    <div className="intercept-ws-meta">
-                      <div className="intercept-ws-meta-row">
-                        <span className="intercept-ws-meta-label">Opcode</span>
-                        <Badge variant="info">{selectedEntry.opcode ?? "Unknown"}</Badge>
-                      </div>
-                      <div className="intercept-ws-meta-row">
-                        <span className="intercept-ws-meta-label">Direction</span>
-                        <Badge variant={selectedEntry.direction === "client_to_server" ? "success" : "warning"}>
-                          {formatDirection(selectedEntry.direction)}
-                        </Badge>
-                      </div>
-                      {selectedEntry.upgrade_url && (
-                        <div className="intercept-ws-meta-row">
-                          <span className="intercept-ws-meta-label">URL</span>
-                          <span className="intercept-ws-meta-value">{selectedEntry.upgrade_url}</span>
-                        </div>
-                      )}
-                      {selectedEntry.sequence != null && (
-                        <div className="intercept-ws-meta-row">
-                          <span className="intercept-ws-meta-label">Sequence</span>
-                          <span className="intercept-ws-meta-value">#{selectedEntry.sequence}</span>
-                        </div>
-                      )}
-                    </div>
-                    {/* Payload editor only */}
-                    <BodyEditor body={editBody} onChange={setEditBody} />
-                  </>
-                )}
-              </>
-            ) : (
-              /* Raw bytes editor */
-              <RawBytesEditor
-                rawBytes={editRawBytes}
-                onChange={setEditRawBytes}
-                size={selectedEntry.raw_bytes_size}
-              />
+            {showMaskWarning && (
+              <div className="intercept-mask-warning" role="alert">
+                The held view was passed through the SafetyFilter Output Filter. Masked
+                values (e.g. [MASKED:...]) in the headers or body you send will be
+                forwarded to the wire as shown. Check them before forwarding.
+              </div>
             )}
+            <DetailEditor entry={selectedEntry} edit={edit} onChange={updateEdit} />
           </div>
         </div>
       )}
@@ -421,36 +293,194 @@ export function InterceptPage() {
 }
 
 // ---------------------------------------------------------------------------
-// DetailTitle -- phase-aware detail header title
+// DetailEditor -- kind-specific editor for the selected entry
+// ---------------------------------------------------------------------------
+
+interface DetailEditorProps {
+  entry: InterceptQueueEntry;
+  edit: InterceptEditState;
+  onChange: (patch: Partial<InterceptEditState>) => void;
+}
+
+function DetailEditor({ entry, edit, onChange }: DetailEditorProps) {
+  if (rawModeAllowed(entry)) {
+    return (
+      <RawBytesEditor
+        rawBytes={edit.rawBytes}
+        onChange={(rawBytes) => onChange({ rawBytes })}
+        size={entry.raw_bytes_size}
+      />
+    );
+  }
+
+  switch (edit.kind) {
+    case "request":
+      return (
+        <>
+          <div className="intercept-request-line">
+            <input
+              className="input intercept-method-input"
+              value={edit.method}
+              onChange={(e) => onChange({ method: e.target.value })}
+              list="intercept-http-methods"
+              placeholder="Method"
+              aria-label="Method"
+              spellCheck={false}
+            />
+            <datalist id="intercept-http-methods">
+              {HTTP_METHODS.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+            <input
+              className="input intercept-scheme-input"
+              value={edit.scheme}
+              onChange={(e) => onChange({ scheme: e.target.value })}
+              placeholder="scheme"
+              aria-label="Scheme"
+              spellCheck={false}
+            />
+            <input
+              className="input intercept-authority-input"
+              value={edit.authority}
+              onChange={(e) => onChange({ authority: e.target.value })}
+              placeholder="authority"
+              aria-label="Authority"
+              spellCheck={false}
+            />
+          </div>
+          <div className="intercept-request-line">
+            <input
+              className="input intercept-url-input"
+              value={edit.path}
+              onChange={(e) => onChange({ path: e.target.value })}
+              placeholder="path"
+              aria-label="Path"
+              spellCheck={false}
+            />
+            <span className="intercept-query-separator">?</span>
+            <input
+              className="input intercept-url-input"
+              value={edit.rawQuery}
+              onChange={(e) => onChange({ rawQuery: e.target.value })}
+              placeholder="raw query (no leading ?)"
+              aria-label="Raw query"
+              spellCheck={false}
+            />
+          </div>
+          <HeaderEditor headers={edit.headers} onChange={(headers) => onChange({ headers })} />
+          <BodyEditor
+            body={edit.body}
+            encoding={edit.bodyEncoding}
+            onChange={(body) => onChange({ body })}
+          />
+        </>
+      );
+
+    case "response":
+      return (
+        <>
+          <div className="intercept-request-line">
+            <input
+              type="number"
+              className="input intercept-status-input"
+              value={edit.status}
+              min={100}
+              max={999}
+              onChange={(e) => onChange({ status: Number(e.target.value) })}
+              list="http-status-codes"
+              aria-label="Status"
+            />
+            <datalist id="http-status-codes">
+              {HTTP_STATUS_CODES.map((code) => (
+                <option key={code} value={code} />
+              ))}
+            </datalist>
+            <input
+              className="input intercept-url-input"
+              value={edit.statusReason}
+              onChange={(e) => onChange({ statusReason: e.target.value })}
+              placeholder="reason phrase (HTTP/1.x)"
+              aria-label="Status reason"
+              spellCheck={false}
+            />
+          </div>
+          <HeaderEditor headers={edit.headers} onChange={(headers) => onChange({ headers })} />
+          <BodyEditor
+            body={edit.body}
+            encoding={edit.bodyEncoding}
+            onChange={(body) => onChange({ body })}
+          />
+        </>
+      );
+
+    case "websocket_frame":
+      return (
+        <>
+          {/* WebSocket frame metadata (read-only) */}
+          <div className="intercept-ws-meta">
+            <div className="intercept-ws-meta-row">
+              <span className="intercept-ws-meta-label">Opcode</span>
+              <Badge variant="info">{entry.ws?.opcode ?? "unknown"}</Badge>
+            </div>
+            <div className="intercept-ws-meta-row">
+              <span className="intercept-ws-meta-label">FIN</span>
+              <span className="intercept-ws-meta-value">{entry.ws?.fin ? "1" : "0"}</span>
+            </div>
+            <div className="intercept-ws-meta-row">
+              <span className="intercept-ws-meta-label">Direction</span>
+              <Badge variant={entry.direction === "send" ? "success" : "warning"}>
+                {formatDirection(entry.direction)}
+              </Badge>
+            </div>
+            {entry.flow_id && (
+              <div className="intercept-ws-meta-row">
+                <span className="intercept-ws-meta-label">Flow</span>
+                <span className="intercept-ws-meta-value">{entry.flow_id}</span>
+              </div>
+            )}
+          </div>
+          <BodyEditor
+            label="Payload"
+            body={edit.body}
+            encoding={edit.bodyEncoding}
+            onChange={(body) => onChange({ body })}
+          />
+        </>
+      );
+
+    default:
+      // gRPC / SSE / unknown holds: read-only view; Release or Drop only.
+      return (
+        <div className="intercept-section">
+          <div className="intercept-section-title">
+            Held item (read-only; Modify & Forward is not available for this hold type)
+          </div>
+          <pre className="intercept-readonly-view">
+            {JSON.stringify(entry.grpc_start ?? entry.grpc_data ?? entry.grpc_end ?? entry, null, 2)}
+          </pre>
+        </div>
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DetailTitle -- kind-aware detail header title
 // ---------------------------------------------------------------------------
 
 function DetailTitle({ entry }: { entry: InterceptQueueEntry }) {
-  const phase = resolvePhase(entry);
-  if (phase === "response") {
-    return (
-      <>
-        <Badge variant={statusVariant(entry.status_code ?? 0)} className="intercept-phase-badge">
-          {entry.status_code ?? "???"}
-        </Badge>
-        {" "}
-        {extractHost(entry.url ?? "")}
-      </>
-    );
-  }
-  if (phase === "websocket_frame") {
-    return (
-      <>
-        <Badge variant="info" className="intercept-phase-badge">
-          WS {entry.opcode ?? "Frame"}
-        </Badge>
-        {" "}
-        {formatDirection(entry.direction)}
-        {entry.upgrade_url ? ` ${extractHost(entry.upgrade_url)}` : ""}
-      </>
-    );
-  }
-  // request phase (default)
-  return <>{entry.method ?? ""} {extractHost(entry.url ?? "")}</>;
+  const kind = entryKind(entry);
+  return (
+    <>
+      <Badge variant={kindVariant(kind)} className="intercept-phase-badge">
+        {kindLabel(kind)}
+      </Badge>
+      {" "}
+      <QueueMethodCell entry={entry} kind={kind} />
+      {" "}
+      {queueTarget(entry, kind)}
+    </>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -499,17 +529,17 @@ function QueuePanel({ queue, loading, error, selectedId, onSelect }: QueuePanelP
         <thead>
           <tr>
             <th>ID</th>
-            <th>Phase</th>
+            <th>Kind</th>
             <th>Method / Status</th>
-            <th>URL</th>
-            <th>Host</th>
+            <th>Target</th>
             <th>Rules</th>
             <th>Time</th>
           </tr>
         </thead>
         <tbody>
           {queue.items.map((entry) => {
-            const phase = resolvePhase(entry);
+            const kind = entryKind(entry);
+            const target = queueTarget(entry, kind);
             return (
               <tr
                 key={entry.id}
@@ -522,35 +552,26 @@ function QueuePanel({ queue, loading, error, selectedId, onSelect }: QueuePanelP
                   <Badge variant="info">{truncateId(entry.id)}</Badge>
                 </td>
                 <td>
-                  <Badge variant={phaseVariant(phase)}>{phaseLabel(phase)}</Badge>
+                  <Badge variant={kindVariant(kind)}>{kindLabel(kind)}</Badge>
                 </td>
                 <td>
-                  <QueueMethodCell entry={entry} phase={phase} />
+                  <QueueMethodCell entry={entry} kind={kind} />
                 </td>
                 <td>
-                  <span className="intercept-queue-url" title={phase === "websocket_frame" ? (entry.upgrade_url || undefined) : (entry.url ?? "")}>
-                    {phase === "websocket_frame"
-                      ? (entry.upgrade_url ? extractPath(entry.upgrade_url) : (entry.flow_id ? `[Flow ${entry.flow_id.slice(0, 8)}]` : "[WebSocket]"))
-                      : extractPath(entry.url ?? "")}
-                  </span>
-                </td>
-                <td>
-                  <span className="intercept-queue-host">
-                    {phase === "websocket_frame"
-                      ? (entry.upgrade_url ? extractHost(entry.upgrade_url) : "\u2014")
-                      : extractHost(entry.url ?? "")}
+                  <span className="intercept-queue-url" title={target}>
+                    {target}
                   </span>
                 </td>
                 <td>
                   <span className="intercept-queue-rules">
-                    {entry.matched_rules.map((rule) => (
+                    {(entry.matched_rules ?? []).map((rule) => (
                       <Badge key={rule} variant="default">{rule}</Badge>
                     ))}
                   </span>
                 </td>
                 <td>
                   <span className="intercept-queue-time">
-                    {formatTime(entry.timestamp)}
+                    {formatTime(entry.held_at)}
                   </span>
                 </td>
               </tr>
@@ -563,79 +584,81 @@ function QueuePanel({ queue, loading, error, selectedId, onSelect }: QueuePanelP
 }
 
 // ---------------------------------------------------------------------------
-// QueueMethodCell -- phase-aware method/status display in the queue table
+// QueueMethodCell -- kind-aware method/status display
 // ---------------------------------------------------------------------------
 
-function QueueMethodCell({ entry, phase }: { entry: InterceptQueueEntry; phase: InterceptPhase }) {
-  if (phase === "response") {
-    return (
-      <Badge variant={statusVariant(entry.status_code ?? 0)}>
-        {entry.status_code ?? "???"}
-      </Badge>
-    );
-  }
-  if (phase === "websocket_frame") {
-    return (
-      <span className="intercept-ws-info">
-        <Badge variant="info">{entry.opcode ?? "Frame"}</Badge>
-        {entry.direction && (
+function QueueMethodCell({ entry, kind }: { entry: InterceptQueueEntry; kind: InterceptKind }) {
+  switch (kind) {
+    case "request":
+      return (
+        <Badge variant={methodVariant(entry.http?.method ?? "")}>
+          {entry.http?.method ?? ""}
+        </Badge>
+      );
+    case "response":
+      return (
+        <Badge variant={statusVariant(entry.http?.status ?? 0)}>
+          {entry.http?.status ?? "???"}
+        </Badge>
+      );
+    case "websocket_frame":
+      return (
+        <span className="intercept-ws-info">
+          <Badge variant="info">{entry.ws?.opcode ?? "frame"}</Badge>
           <span className="intercept-ws-direction">
-            {entry.direction === "client_to_server" ? "\u2191" : "\u2193"}
+            {entry.direction === "send" ? "↑" : "↓"}
           </span>
-        )}
-      </span>
-    );
+        </span>
+      );
+    case "grpc_end":
+      return <Badge variant="default">{`status ${entry.grpc_end?.status ?? "?"}`}</Badge>;
+    default:
+      return <span className="intercept-ws-direction">{entry.direction === "send" ? "↑" : "↓"}</span>;
   }
-  // request phase
-  return (
-    <Badge variant={methodVariant(entry.method ?? "")}>
-      {entry.method ?? ""}
-    </Badge>
-  );
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Short target description. Built by concatenating the held parts as-is:
+ * no URL parsing, so nothing the wire carried is normalized away.
+ */
+function queueTarget(entry: InterceptQueueEntry, kind: InterceptKind): string {
+  switch (kind) {
+    case "request": {
+      const h = entry.http ?? {};
+      const query = h.raw_query ? `?${h.raw_query}` : "";
+      return `${h.authority ?? ""}${h.path ?? ""}${query}`;
+    }
+    case "grpc_start":
+      return `${entry.grpc_start?.service ?? ""}/${entry.grpc_start?.method ?? ""}`;
+    case "grpc_data":
+      return `${entry.grpc_data?.service ?? ""}/${entry.grpc_data?.method ?? ""}`;
+    default:
+      return entry.flow_id ? `[Flow ${entry.flow_id.slice(0, 8)}]` : "—";
+  }
+}
+
 function truncateId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
 
-function extractHost(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-}
-
-function extractPath(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.pathname + u.search;
-  } catch {
-    return url;
-  }
-}
-
 function formatTime(timestamp: string): string {
-  try {
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString(undefined, {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return timestamp;
-  }
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return timestamp;
+  return date.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
-function formatDirection(direction?: string): string {
-  if (direction === "client_to_server") return "Client \u2192 Server";
-  if (direction === "server_to_client") return "Server \u2192 Client";
-  return direction ?? "Unknown";
+function formatDirection(direction: string): string {
+  if (direction === "send") return "Client → Server";
+  if (direction === "receive") return "Server → Client";
+  return direction;
 }
 
 function methodVariant(method: string): "success" | "warning" | "danger" | "info" | "default" {
@@ -654,8 +677,8 @@ function methodVariant(method: string): "success" | "warning" | "danger" | "info
   }
 }
 
-function phaseVariant(phase: InterceptPhase): "success" | "warning" | "danger" | "info" | "default" {
-  switch (phase) {
+function kindVariant(kind: InterceptKind): "success" | "warning" | "danger" | "info" | "default" {
+  switch (kind) {
     case "request":
       return "info";
     case "response":
@@ -667,16 +690,26 @@ function phaseVariant(phase: InterceptPhase): "success" | "warning" | "danger" |
   }
 }
 
-function phaseLabel(phase: InterceptPhase): string {
-  switch (phase) {
+function kindLabel(kind: InterceptKind): string {
+  switch (kind) {
     case "request":
       return "Request";
     case "response":
       return "Response";
     case "websocket_frame":
       return "WS Frame";
+    case "grpc_start":
+      return "gRPC Start";
+    case "grpc_data":
+      return "gRPC Data";
+    case "grpc_end":
+      return "gRPC End";
+    case "sse":
+      return "SSE Event";
+    case "raw":
+      return "Raw";
     default:
-      return phase;
+      return "Unknown";
   }
 }
 

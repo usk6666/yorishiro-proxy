@@ -1,10 +1,10 @@
 {
   "action": "modify_and_forward",
   "params": {
-    "intercept_id": "INTERCEPT_ID",
-    "override_method": "",
-    "override_url": "",
-    "override_headers": {},
-    "override_body": "pong"
+    "intercept_id": "INTERCEPT_ID"
+  },
+  "ws": {
+    "payload": "pong",
+    "body_encoding": "text"
   }
 }
