@@ -5,12 +5,25 @@ package connector_test
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
+
+// alpnKeyServerName returns the TLS host half of an ALPN cache key for a
+// CONNECT target: CONNECT passes one authority as both the dial target and
+// the TLS authority, so ServerName is target's host (USK-1315).
+func alpnKeyServerName(t *testing.T, target string) string {
+	t.Helper()
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
+		t.Fatalf("split target %q: %v", target, err)
+	}
+	return host
+}
 
 // TestALPNCache_StaleH1_DoesNotPinH2CapableClient_Fallback is the
 // regression guard for USK-884 exercised on the legacy fallback path.
@@ -81,10 +94,10 @@ func TestALPNCache_StaleH1_DoesNotPinH2CapableClient_Fallback(t *testing.T) {
 
 	// Pre-seed the cache with the poisoned value. The cache key shape
 	// matches what the live data path computes via
-	// ALPNCacheKeyFromConfig: HostPort=target, Fingerprint="" (default
+	// ALPNCacheKeyFromConfig: HostPort=target, ServerName=target host, Fingerprint="" (default
 	// crypto/tls profile used by tests), ClientCertHash="" (no mTLS).
 	cache := connector.NewALPNCache(connector.DefaultALPNCacheSize, connector.DefaultALPNCacheTTL)
-	poisonKey := connector.ALPNCacheKey{HostPort: target}
+	poisonKey := connector.ALPNCacheKey{HostPort: target, ServerName: alpnKeyServerName(t, target)}
 	cache.Set(poisonKey, "http/1.1")
 
 	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{
@@ -149,7 +162,7 @@ func TestALPNCache_StaleH1_HTTP1ClientStillWorks_Fallback(t *testing.T) {
 	target := upstreamLn.Addr().String()
 
 	cache := connector.NewALPNCache(connector.DefaultALPNCacheSize, connector.DefaultALPNCacheTTL)
-	cache.Set(connector.ALPNCacheKey{HostPort: target}, "http/1.1")
+	cache.Set(connector.ALPNCacheKey{HostPort: target, ServerName: alpnKeyServerName(t, target)}, "http/1.1")
 
 	proxyAddr, _, wg := startFullListenerProxy(t, ctx, fullListenerOpts{
 		alpnCache:              cache,

@@ -59,6 +59,12 @@ type ConnectionStack struct {
 	// on stack Close). nil when the stack was constructed without
 	// proxybuild wiring (e.g. unit tests).
 	buildCfg *BuildConfig
+
+	// upstreamTarget is the dial target / TLS authority split the stack
+	// was built for (USK-1315). Set only by BuildConnectionStack;
+	// hasUpstreamTarget distinguishes "not set" from a zero value.
+	upstreamTarget    UpstreamTarget
+	hasUpstreamTarget bool
 }
 
 // sideSubStack pairs the stream-scoped client and upstream Layer overlays
@@ -320,6 +326,24 @@ func (s *ConnectionStack) PoolKey() pool.PoolKey {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.poolKey
+}
+
+// UpstreamTarget returns the dial target / TLS authority split the stack was
+// built for (USK-1315). ok is false for stacks BuildConnectionStack did not
+// build; callers that need a value either way use UpstreamTargetOf.
+func (s *ConnectionStack) UpstreamTarget() (ut UpstreamTarget, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.upstreamTarget, s.hasUpstreamTarget
+}
+
+// setUpstreamTarget records the UpstreamTarget the stack was built for.
+// Intended for use by stack_builder.go only.
+func (s *ConnectionStack) setUpstreamTarget(ut UpstreamTarget) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upstreamTarget = ut
+	s.hasUpstreamTarget = true
 }
 
 // setUpstreamH2 stores the pooled upstream HTTP/2 Layer and its pool key.

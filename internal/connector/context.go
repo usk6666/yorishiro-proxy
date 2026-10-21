@@ -105,6 +105,9 @@ type dialTargetCtxKey struct{}
 // Callers must pass the value they will dial — the rotation resolver
 // (USK-959) uses the verbatim string as the per_target_host cache key
 // so distinct services on the same host get distinct rotation slots.
+// BuildConnectionStack stamps UpstreamTarget.Dial, never the TLS
+// authority (USK-1315): when the two differ, rotation follows the
+// address actually dialled.
 func ContextWithDialTarget(ctx context.Context, target string) context.Context {
 	return context.WithValue(ctx, dialTargetCtxKey{}, target)
 }

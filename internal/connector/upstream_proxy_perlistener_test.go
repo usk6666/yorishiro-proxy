@@ -194,8 +194,8 @@ func TestPoolKeyForH2_PerListener_Distinct(t *testing.T) {
 	ctxB := ContextWithListenerName(context.Background(), "b")
 
 	target := "example.com:443"
-	keyA := poolKeyForH2(ctxA, target, cfg, nil)
-	keyB := poolKeyForH2(ctxB, target, cfg, nil)
+	keyA := poolKeyForH2(ctxA, SameUpstreamTarget(target), cfg, nil)
+	keyB := poolKeyForH2(ctxB, SameUpstreamTarget(target), cfg, nil)
 
 	if keyA == keyB {
 		t.Errorf("per-listener upstream_proxy did not distinguish pool key: %+v == %+v", keyA, keyB)
@@ -215,8 +215,8 @@ func TestPoolKeyForH2_PerListener_SameOverride(t *testing.T) {
 	ctxB := ContextWithListenerName(context.Background(), "b")
 
 	target := "example.com:443"
-	keyA := poolKeyForH2(ctxA, target, cfg, nil)
-	keyB := poolKeyForH2(ctxB, target, cfg, nil)
+	keyA := poolKeyForH2(ctxA, SameUpstreamTarget(target), cfg, nil)
+	keyB := poolKeyForH2(ctxB, SameUpstreamTarget(target), cfg, nil)
 
 	if keyA != keyB {
 		t.Errorf("same effective upstream_proxy minted distinct keys: %+v != %+v", keyA, keyB)
@@ -236,8 +236,8 @@ func TestPoolKeyForH2_PerListener_FallbackToGlobal(t *testing.T) {
 	ctxNoName := context.Background()
 
 	target := "example.com:443"
-	keyFoo := poolKeyForH2(ctxFoo, target, cfg, nil)
-	keyNoName := poolKeyForH2(ctxNoName, target, cfg, nil)
+	keyFoo := poolKeyForH2(ctxFoo, SameUpstreamTarget(target), cfg, nil)
+	keyNoName := poolKeyForH2(ctxNoName, SameUpstreamTarget(target), cfg, nil)
 
 	if keyFoo != keyNoName {
 		t.Errorf("global override should yield identical keys regardless of ctx name: %+v != %+v",
@@ -247,7 +247,7 @@ func TestPoolKeyForH2_PerListener_FallbackToGlobal(t *testing.T) {
 	// Per-listener override on a different name does not affect "foo".
 	other, _ := url.Parse("http://other.example.com:7070")
 	cfg.SetUpstreamProxyForListener("bar", other)
-	keyFoo2 := poolKeyForH2(ctxFoo, target, cfg, nil)
+	keyFoo2 := poolKeyForH2(ctxFoo, SameUpstreamTarget(target), cfg, nil)
 	if keyFoo != keyFoo2 {
 		t.Errorf("per-listener override on bar perturbed foo's key: %+v != %+v",
 			keyFoo, keyFoo2)

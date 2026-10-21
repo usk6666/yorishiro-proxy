@@ -107,7 +107,10 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		// OpaqueRoute is wired, and the passthrough list may have
 		// changed since it ran.
 		scope := cfg.Negotiator.Scope
-		route := classifyTunnelRoute(cfg.PassthroughList, cfg.BuildCfg, target)
+		// A SOCKS5 destination is both the dial target and the TLS
+		// authority (USK-1315).
+		ut := SameUpstreamTarget(target)
+		route := classifyTunnelRoute(cfg.PassthroughList, cfg.BuildCfg, ut)
 		if route.opaque() {
 			if allowed, reason := socks5ScopeCheck(scope, target, true); !allowed {
 				connLogger.Info("socks5 target blocked by scope", "reason", reason)
@@ -140,12 +143,12 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		}
 
 		// Step 3: inner-byte peek + dispatch (USK-762).
-		if !socks5ShouldRunTLSMITM(ctx, cfg, pc, target, connLogger) {
+		if !socks5ShouldRunTLSMITM(ctx, cfg, pc, ut, connLogger) {
 			return nil
 		}
 
 		// Step 4-5: TLS MITM path (existing behaviour).
-		runTLSMITM(ctx, cfg.BuildCfg, pc, target, cfg.OnStack, cfg.OnHTTP2Stack, cfg.OnUpstreamTLSError, connLogger)
+		runTLSMITM(ctx, cfg.BuildCfg, pc, ut, cfg.OnStack, cfg.OnHTTP2Stack, cfg.OnUpstreamTLSError, connLogger)
 		return nil
 	}
 }
@@ -199,12 +202,11 @@ func socks5Passthrough(ctx context.Context, cfg SOCKS5HandlerConfig, pc *PeekCon
 // socks5ShouldRunTLSMITM peeks the inner byte stream and returns true when
 // the caller should run the TLS MITM path. Plain HTTP / h2c / bytechunk
 // branches are dispatched in-place; raw passthrough hosts skip the peek.
-func socks5ShouldRunTLSMITM(ctx context.Context, cfg SOCKS5HandlerConfig, pc *PeekConn, target string, logger *slog.Logger) bool {
-	if cfg.BuildCfg != nil && cfg.BuildCfg.ProxyConfig != nil &&
-		cfg.BuildCfg.ProxyConfig.IsRawPassthrough(target) {
+func socks5ShouldRunTLSMITM(ctx context.Context, cfg SOCKS5HandlerConfig, pc *PeekConn, ut UpstreamTarget, logger *slog.Logger) bool {
+	if ut.isRawPassthrough(cfg.BuildCfg) {
 		return true
 	}
-	return dispatchInnerProtocol(ctx, pc, target, innerDispatchConfig{
+	return dispatchInnerProtocol(ctx, pc, ut.Dial, innerDispatchConfig{
 		PeekTimeout:         cfg.InnerPeekTimeout,
 		PeekTimeoutProvider: cfg.InnerPeekTimeoutProvider,
 		BuildCfg:            cfg.BuildCfg,
