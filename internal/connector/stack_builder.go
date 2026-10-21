@@ -1142,7 +1142,7 @@ func buildALPNRoutedStack(
 	}
 
 	slog.Debug("connector: ALPN routed",
-		"target", target, "conn_id", connID,
+		"target", target, "tls_authority", ut.tlsAuthority(), "conn_id", connID,
 		"client_alpn", clientALPN, "upstream_alpn", upstreamALPNObserved,
 		"route", route, "cache_hit", cacheHit,
 	)
@@ -1448,7 +1448,7 @@ func buildSniffFirstStack(
 	}
 
 	slog.Debug("connector: sniff-first ALPN routed",
-		"target", target, "conn_id", connID,
+		"target", target, "tls_authority", ut.tlsAuthority(), "conn_id", connID,
 		"peeked_alpn", peeked.ALPN,
 		"client_alpn", clientALPN, "upstream_alpn", upstreamALPN,
 		"route", route,
@@ -2133,6 +2133,7 @@ func buildRawPassthroughStack(
 
 	slog.Debug("connector: client-side MITM handshake complete",
 		"target", target,
+		"tls_authority", ut.tlsAuthority(),
 		"conn_id", connID,
 	)
 

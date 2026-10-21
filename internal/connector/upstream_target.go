@@ -43,9 +43,7 @@ func SameUpstreamTarget(target string) UpstreamTarget {
 // tlsAuthority returns the "host:port" authority every TLS-name decision is
 // keyed on.
 func (ut UpstreamTarget) tlsAuthority() string {
-	// Red-commit scaffold (USK-1315): every TLS-name decision still reads
-	// the dial target. The routing commit returns ut.TLS.
-	return ut.Dial
+	return ut.TLS
 }
 
 // tlsHost returns the host part of the TLS authority (the MITM certificate
