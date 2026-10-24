@@ -7,7 +7,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 )
 
-// RedialUpstreamH2 establishes a fresh upstream HTTP/2 *Layer for target,
+// RedialUpstreamH2 establishes a fresh upstream HTTP/2 *Layer for ut,
 // reusing the EnvelopeContext template carried by stale (so the new Layer
 // stamps envelopes with the same ConnID / TargetHost / TLS reality the
 // caller already recorded). The TLS knobs (per-host overlay, fingerprint,
@@ -34,6 +34,11 @@ import (
 // GOAWAY observed mid-CONNECT triggers a fresh dial transparently; no
 // cap on chain length (the per-CONNECT lifecycle is the natural bound).
 //
+// ut carries the stack's dial target / TLS authority split (USK-1315;
+// UpstreamTargetOf): the fresh conn dials ut.Dial, sends the TLS authority's
+// host as ServerName and resolves per-host TLS by it — the same routing
+// BuildConnectionStack applied to the original dial.
+//
 // Returned errors are upstream dial / TLS / http2.New errors verbatim so
 // the caller can wrap them via fmt.Errorf("dial: %w", ...) the same way
 // the regular dial closure does, keeping ClassifyError taxonomy intact.
@@ -50,7 +55,7 @@ import (
 // on http2.WithGoAwayObserver.
 func RedialUpstreamH2(
 	ctx context.Context,
-	target string,
+	ut UpstreamTarget,
 	stale *http2.Layer,
 	cfg *BuildConfig,
 	generation int,
@@ -63,12 +68,16 @@ func RedialUpstreamH2(
 		return nil, fmt.Errorf("connector: RedialUpstreamH2: stale is nil")
 	}
 
-	host := extractHost(target)
-	if host == "" {
+	target := ut.Dial
+	if extractHost(target) == "" {
 		return nil, fmt.Errorf("connector: RedialUpstreamH2: invalid target %q", target)
 	}
+	host := ut.tlsHost()
+	if host == "" {
+		return nil, fmt.Errorf("connector: RedialUpstreamH2: invalid TLS authority %q", ut.tlsAuthority())
+	}
 
-	hostTLS, err := resolvePerHostTLS(target, cfg)
+	hostTLS, err := resolvePerHostTLS(ut.tlsAuthority(), cfg)
 	if err != nil {
 		return nil, err
 	}

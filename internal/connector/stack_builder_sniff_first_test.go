@@ -308,7 +308,7 @@ func TestBuildSniffFirstStack_CachesUpstreamPick(t *testing.T) {
 	stack, _, _ := runBuildConnectionStackSniffFirstWithCfg(t, target, []string{"h2", "http/1.1"}, buildCfg)
 	defer stack.Close()
 
-	entry, ok := cache.Get(ALPNCacheKeyFromConfig(target, buildCfg))
+	entry, ok := cache.Get(ALPNCacheKeyFromConfig(SameUpstreamTarget(target), buildCfg))
 	if !ok {
 		t.Fatal("cache entry missing after sniff-first run")
 	}
@@ -390,7 +390,7 @@ func runBuildConnectionStackSniffFirstWithCfg(
 		// Drive the sniff manually here (we're calling
 		// BuildConnectionStack directly, not via runTLSMITM).
 		peeked := peekClientHelloSNIAndALPN(pc)
-		s, cs, us, bErr := BuildConnectionStack(context.Background(), pc, target, buildCfg, peeked)
+		s, cs, us, bErr := BuildConnectionStack(context.Background(), pc, SameUpstreamTarget(target), buildCfg, peeked)
 		var cALPN, uALPN string
 		if cs != nil {
 			cALPN = cs.ALPN

@@ -9,7 +9,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 )
 
-// RedialUpstreamH1 establishes a fresh upstream HTTP/1.x *Layer for target,
+// RedialUpstreamH1 establishes a fresh upstream HTTP/1.x *Layer for ut,
 // reusing the EnvelopeContext template carried by stale (so the new Layer
 // stamps envelopes with the same ConnID / TargetHost / TLS reality the
 // caller already recorded). The TLS knobs (per-host overlay, fingerprint,
@@ -38,6 +38,11 @@ import (
 // h2 would invalidate the Layer type already wired into the client side
 // of the stack.
 //
+// ut carries the stack's dial target / TLS authority split (USK-1315;
+// UpstreamTargetOf): the fresh conn dials ut.Dial and a TLS redial sends the
+// TLS authority's host as ServerName and resolves per-host TLS by it — the
+// same routing BuildConnectionStack applied to the original dial.
+//
 // Returned errors are upstream dial / TLS errors verbatim so the caller
 // can wrap them via fmt.Errorf("dial: %w", ...) the same way the regular
 // dial closure does, keeping ClassifyError taxonomy intact.
@@ -48,7 +53,7 @@ import (
 // with the same wire shape.
 func RedialUpstreamH1(
 	ctx context.Context,
-	target string,
+	ut UpstreamTarget,
 	stale *http1.Layer,
 	cfg *BuildConfig,
 	generation int,
@@ -60,12 +65,15 @@ func RedialUpstreamH1(
 		return nil, fmt.Errorf("connector: RedialUpstreamH1: stale is nil")
 	}
 
-	host := extractHost(target)
+	if extractHost(ut.Dial) == "" {
+		return nil, fmt.Errorf("connector: RedialUpstreamH1: invalid target %q", ut.Dial)
+	}
+	host := ut.tlsHost()
 	if host == "" {
-		return nil, fmt.Errorf("connector: RedialUpstreamH1: invalid target %q", target)
+		return nil, fmt.Errorf("connector: RedialUpstreamH1: invalid TLS authority %q", ut.tlsAuthority())
 	}
 
-	upstreamConn, err := redialUpstreamH1Conn(ctx, target, host, stale.Scheme(), cfg)
+	upstreamConn, err := redialUpstreamH1Conn(ctx, ut, host, stale.Scheme(), cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -103,12 +111,13 @@ func RedialUpstreamH1(
 // or plaintext CONNECT inner) and sits on plain TCP, so the redial is a
 // plain dial — a TLS dial to a plaintext upstream would only fail. Any
 // other scheme is the CONNECT MITM "https" stack and is redialed over TLS.
-func redialUpstreamH1Conn(ctx context.Context, target, host, scheme string, cfg *BuildConfig) (net.Conn, error) {
+func redialUpstreamH1Conn(ctx context.Context, ut UpstreamTarget, host, scheme string, cfg *BuildConfig) (net.Conn, error) {
+	target := ut.Dial
 	if scheme == "http" {
 		return dialPlainUpstream(ContextWithDialTarget(ctx, target), target, cfg)
 	}
 
-	hostTLS, err := resolvePerHostTLS(target, cfg)
+	hostTLS, err := resolvePerHostTLS(ut.tlsAuthority(), cfg)
 	if err != nil {
 		return nil, err
 	}

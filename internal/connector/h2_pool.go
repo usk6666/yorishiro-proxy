@@ -9,10 +9,17 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 )
 
-// poolKeyForH2 builds a pool.PoolKey for the given CONNECT target using the
-// TLS-relevant knobs from cfg and the per-host overlay in hostTLS. The
-// TLSConfigHash canonicalises a byte form covering:
-//   - ServerName (host portion of the target)
+// poolKeyForH2 builds a pool.PoolKey for the given upstream target using the
+// TLS-relevant knobs from cfg and the per-host overlay in hostTLS.
+//
+// USK-1315: the key carries both halves of ut. HostPort is the dial target;
+// the hashed ServerName is the TLS authority's host. Keying on the dial
+// target alone would let two virtual hosts behind one IP:port share a pooled
+// h2 connection — requests for A would ride B's TLS session. For CONNECT /
+// SOCKS5 (Dial == TLS) the key bytes are unchanged.
+//
+// The TLSConfigHash canonicalises a byte form covering:
+//   - ServerName (host portion of the TLS authority)
 //   - NextProtos ({"h2"}, since this is the h2-specific hash)
 //   - InsecureSkipVerify (resolved per-host; falls back to cfg)
 //   - ClientCert hash (first DER bytes via hashCert; resolved per-host)
@@ -37,12 +44,12 @@ import (
 // H2 connections — otherwise listener B's "send my traffic through A"
 // dial would silently reuse a pool entry minted under listener A's own
 // (no-proxy / different-proxy) dial state, defeating the per-listener fix.
-func poolKeyForH2(ctx context.Context, target string, cfg *BuildConfig, hostTLS *resolvedTLS) pool.PoolKey {
+func poolKeyForH2(ctx context.Context, ut UpstreamTarget, cfg *BuildConfig, hostTLS *resolvedTLS) pool.PoolKey {
 	var buf bytes.Buffer
 
-	// ServerName. Kept under a length prefix so "a"+"b" never collides with
-	// "ab"+"".
-	host, _, _ := splitHostOrSelf(target)
+	// ServerName — the host part of the TLS authority (USK-1315). Kept under
+	// a length prefix so "a"+"b" never collides with "ab"+"".
+	host, _, _ := splitHostOrSelf(ut.tlsAuthority())
 	writeField(&buf, "sn", host)
 
 	// NextProtos — always {"h2"} for this helper.
@@ -107,7 +114,7 @@ func poolKeyForH2(ctx context.Context, target string, cfg *BuildConfig, hostTLS 
 	writeField(&buf, "proxy", proxyURL)
 
 	return pool.PoolKey{
-		HostPort:      target,
+		HostPort:      ut.Dial,
 		TLSConfigHash: pool.HashTLSConfig(buf.Bytes()),
 	}
 }
