@@ -25,6 +25,17 @@ import (
 // test ends. Returns the listener address and an accessor for the SNIs.
 func startSNIRecordingTLSUpstream(t *testing.T) (addr string, snis func() []string) {
 	t.Helper()
+	return startSNIRecordingTLSServer(t, []string{"http/1.1"}, func(_ int, c *tls.Conn) {
+		_ = c.Handshake()
+	})
+}
+
+// startSNIRecordingTLSServer is startSNIRecordingTLSUpstream with an ALPN
+// offer and a per-connection handler: handle runs on its own goroutine for
+// the idx-th accepted connection (0-based) and owns the handshake. Every
+// accepted connection is closed when the test ends.
+func startSNIRecordingTLSServer(t *testing.T, nextProtos []string, handle func(idx int, c *tls.Conn)) (addr string, snis func() []string) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +58,7 @@ func startSNIRecordingTLSUpstream(t *testing.T) (addr string, snis func() []stri
 	var seen []string
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
-		NextProtos:   []string{"http/1.1"},
+		NextProtos:   nextProtos,
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			mu.Lock()
 			seen = append(seen, hello.ServerName)
@@ -71,12 +82,13 @@ func startSNIRecordingTLSUpstream(t *testing.T) (addr string, snis func() []stri
 				return
 			}
 			connsMu.Lock()
+			idx := len(conns)
 			conns = append(conns, c)
 			connsMu.Unlock()
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_ = c.(*tls.Conn).Handshake()
+				handle(idx, c.(*tls.Conn))
 			}()
 		}
 	}()
