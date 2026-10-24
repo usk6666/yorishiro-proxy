@@ -190,13 +190,9 @@ type lpmFrame struct {
 }
 
 // wireBytes returns the LPM exactly as observed (verbatim prefix +
-// payload) in a fresh slice.
-//
-// Note: this keeps the flag byte verbatim, whereas the normal, case-3 and
-// decode-failure record paths use dataEnv.Raw, which currently normalizes
-// the flag byte to 0/1. So on the cap-trip path (tooLargeWireEnvelopesLocked)
-// the preceding complete LPMs' rows can differ from what the other paths
-// would record for the same bytes. Tracked by USK-1256.
+// payload) in a fresh slice. It is the source of every LPM's Raw — the
+// semantic Data envelope and all grpc-lpm-frame record paths — so the
+// flag byte is never normalized to 0/1.
 func (f lpmFrame) wireBytes() []byte {
 	out := make([]byte, 0, lpmPrefixLen+len(f.Payload))
 	out = append(out, f.Prefix[:]...)
@@ -855,8 +851,6 @@ func (c *grpcChannel) tooLargeWireEnvelopesLocked(ev *envelope.Envelope, dir *di
 	}
 	envs := make([]*envelope.Envelope, 0, len(frames)+1)
 	for _, f := range frames {
-		// wireBytes keeps the flag byte verbatim, unlike the dataEnv.Raw
-		// used on the other record paths (USK-1256; see wireBytes).
 		envs = append(envs, c.buildLPMWireEnvelopeLocked(ev, f.wireBytes()))
 	}
 	envs = append(envs, c.buildPartialLPMEnvelopeLocked(ev, dir, e.raw, e.compressed, e.declared, evt.EndStream, envelope.Anomaly{
@@ -1074,14 +1068,10 @@ func (c *grpcChannel) buildDataEnvelopeLocked(ev *envelope.Envelope, dir *direct
 		}
 	}
 
-	// Build the wire-form Raw: 5-byte LPM prefix + compressed-payload-as-
-	// observed (NOT the decoded Payload).
-	rawBuf := make([]byte, lpmPrefixLen+len(f.Payload))
-	if f.Compressed {
-		rawBuf[0] = 1
-	}
-	binary.BigEndian.PutUint32(rawBuf[1:5], f.WireLength)
-	copy(rawBuf[lpmPrefixLen:], f.Payload)
+	// Raw is the LPM exactly as observed: the verbatim 5-byte prefix
+	// (flag byte not normalized to 0/1, USK-1256) + the compressed payload
+	// as observed (NOT the decoded Payload).
+	rawBuf := f.wireBytes()
 
 	msg := &envelope.GRPCDataMessage{
 		Service:    dir.service,

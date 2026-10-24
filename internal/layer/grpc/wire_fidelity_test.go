@@ -102,9 +102,18 @@ func relayResponseErrs(t *testing.T, push func(*stubInner), mutate relayMutate) 
 // handed its inner HTTP/2 Channel.
 func relayRequest(t *testing.T, hdr *http2.H2HeadersEvent, mutate relayMutate) []*envelope.Envelope {
 	t.Helper()
+	return relayRequestPush(t, func(s *stubInner) {
+		s.pushHeaders(envelope.Send, []byte("HPACK-req"), hdr)
+		s.pushData(envelope.Send, makeLPM(false, []byte("req")), true)
+	}, mutate)
+}
+
+// relayRequestPush is relayRequest with the client's request events
+// supplied by push instead of the fixed Start + one-LPM shape.
+func relayRequestPush(t *testing.T, push func(*stubInner), mutate relayMutate) []*envelope.Envelope {
+	t.Helper()
 	clientStub := newStubInner("client")
-	clientStub.pushHeaders(envelope.Send, []byte("HPACK-req"), hdr)
-	clientStub.pushData(envelope.Send, makeLPM(false, []byte("req")), true)
+	push(clientStub)
 	client := Wrap(clientStub, nil, RoleServer)
 	defer client.Close()
 
