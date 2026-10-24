@@ -528,17 +528,45 @@ func startGRPCMITMProxy(t *testing.T, ctx context.Context, _ *cert.CA, issuer *c
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	// The per-connection goroutines call t.Logf, so they must be gone
+	// before the test completes: a t.Logf after that is a data race under
+	// -race, or a "Log in goroutine after ... has completed" panic. Cleanup
+	// cancels the proxy's own ctx — which ends every session regardless of
+	// whether the caller cancelled its ctx — and waits for them.
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("gRPC MITM proxy goroutines did not exit within 5s of cleanup")
+		}
+	})
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		<-ctx.Done()
 		_ = tcpLn.Close()
 	}()
 	go func() {
+		defer wg.Done()
 		for {
 			c, aerr := tcpLn.Accept()
 			if aerr != nil {
 				return
 			}
-			go handleProxyConn(ctx, t, c, issuer, maxHdrSize, store, opts)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// readCONNECTTarget and the TLS handshake do not watch
+				// ctx; closing the conn unblocks them at cleanup.
+				stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+				defer stop()
+				handleProxyConn(ctx, t, c, issuer, maxHdrSize, store, opts)
+			}()
 		}
 	}()
 	return tcpLn.Addr().String(), store
