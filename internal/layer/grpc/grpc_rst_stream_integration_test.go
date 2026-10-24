@@ -17,8 +17,10 @@
 //   - client: the grpc-go client cancels its call context after receiving
 //     both messages, which puts RST_STREAM(CANCEL) on the wire.
 //
-// The origin only emits the RST after the client has observed both
-// messages, so the ordering is deterministic without fixed sleeps.
+// The origin answers only once the whole request (HEADERS + DATA with
+// END_STREAM) has arrived, and emits the RST only after the client has
+// observed both messages, so the ordering is deterministic without fixed
+// sleeps.
 package grpc_test
 
 import (
@@ -49,6 +51,13 @@ var rstOriginMessages = [][]byte{[]byte("msg-0"), []byte("msg-1")}
 // stream with response HEADERS + len(rstOriginMessages) LPM DATA frames and
 // then either resets the stream itself (when resetNow is closed) or waits
 // for the peer's RST_STREAM.
+//
+// It answers only after the request's END_STREAM, as a server-streaming
+// handler that reads its request first would. Answering on the request
+// HEADERS let the whole response + reset finish while the proxy was still
+// relaying the request DATA: the reset then cancelled that relay, so the
+// Send-direction Data flow was never recorded and assertRSTRecording
+// flaked on it (nightly e2e, 2026-10-21 / 2026-10-24).
 type rstOrigin struct {
 	ln net.Listener
 
@@ -189,7 +198,13 @@ func (o *rstOrigin) serveConn(c net.Conn) {
 				}
 			}
 		case *http2.MetaHeadersFrame:
-			if responded {
+			if responded || !ff.StreamEnded() {
+				continue
+			}
+			responded = true
+			go o.respond(fr, write, ff.StreamID, connDone)
+		case *http2.DataFrame:
+			if responded || !ff.StreamEnded() {
 				continue
 			}
 			responded = true
@@ -386,10 +401,6 @@ func TestGRPC_ClientRSTStreamMidRPCProducesErrorState(t *testing.T) {
 	// the Skip removed it was observed failing 7/8 runs (at the "upstream
 	// never received RST_STREAM" wait) and passing 1/8. When un-skipping
 	// for USK-1255, verify with repeated runs (e.g. GOFLAGS=-count=20).
-	// On failure, startGRPCMITMProxy's untracked per-connection goroutines
-	// (handleProxyConn / debugChannel) may still call t.Logf after the test
-	// returns, which panics with "Log in goroutine after ... has completed"
-	// and masks the real assertion failure.
 	t.Skip("not yet implemented: USK-1255")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
