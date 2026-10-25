@@ -65,8 +65,12 @@ jobs:
       - name: Build UI
         run: make build-ui
 
+      # Through the Makefile, not a hand-copied test command (USK-1058), so the
+      # release runs exactly the fast tier the PR `test` job runs, with the same
+      # flags (per-package `-timeout 4m` etc.). `ensure-ui` no-ops because the
+      # "Build UI" step above already populated dist/.
       - name: Run tests
-        run: go test -race ./...
+        run: make test
 
       # Cross-compile for all target platforms.
       - name: Build binaries
