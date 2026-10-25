@@ -120,13 +120,11 @@ internal/
                            #   engine.go, rule.go, preset.go (destructive-sql,
                            #   destructive-os-command), preset_pii.go (credit-card,
                            #   japan-my-number, email, japan-phone)
-  job/                     # EnvelopeSource impls (per-protocol resend/fuzz sources)
-                           #   consumed by internal/mcp/{resend_*,fuzz_*}_helpers.go.
+  job/                     # EnvelopeSource impls (per-protocol resend sources)
+                           #   RawResendSource + BytePatch consumed by internal/mcp/{resend_raw,fuzz_raw}_helpers.go.
                            #   source.go (EnvelopeSource interface),
                            #   http_source.go, ws_source.go, grpc_source.go, raw_source.go,
-                           #   fuzz_http_source.go, fuzz_raw_source.go,
-                           #   byte_patch.go (raw-payload patching),
-                           #   template.go (§var§ expansion for fuzz sources)
+                           #   byte_patch.go (raw-payload patching)
   macro/                   # Macro engine: template / guard / extract / encoder
   flow/                    # Stream/Flow Store (sqlite); HAR / JSONL export, import
   cert/                    # Root CA + dynamic server cert issuance
@@ -135,7 +133,6 @@ internal/
                            #   used by macro encoders and MCP body patches;
                            #   protobuf/ (schema-less wire <-> JSON), protoschema/ (schema-aware
                            #   codec, server reflection, protoc), grpclpm/ (gRPC LPM helpers)
-  fuzzer/                  # Iterator / Position / RequestData primitives for typed-fuzz path
   mcp/                     # MCP server, tools, handlers
                            #   typed resend: resend_http / resend_ws / resend_grpc / resend_raw
                            #   typed fuzz:   fuzz_http   / fuzz_ws   / fuzz_grpc   / fuzz_raw

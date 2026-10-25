@@ -832,7 +832,7 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 	// so all readers go through Metadata["variant"]). The column is the
 	// source of truth for the constraint; metadata remains the single
 	// source of truth for read paths (see categorizeMessages /
-	// resolveVariantPair in internal/mcp/query_tool.go).
+	// resolveHeadPair in internal/mcp/query_tool.go).
 	variant := ""
 	if f.Metadata != nil {
 		variant = f.Metadata["variant"]

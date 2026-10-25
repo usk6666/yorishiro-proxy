@@ -10,7 +10,7 @@ function makeFlow(
   return {
     id: "test-id",
     conn_id: "conn-1",
-    protocol: "HTTP/1.x",
+    protocol: "http",
     flow_type: "unary",
     state: "complete",
     method: "GET",

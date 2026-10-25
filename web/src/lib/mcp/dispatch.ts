@@ -2,6 +2,16 @@
  * Pure helpers used by FlowDetailPage and ResendPage to dispatch on a flow's
  * `protocol` string. Kept free of React imports so they can be tested with
  * vitest's pure-TS runner (no @testing-library required).
+ *
+ * Legacy spellings: the server records canonical Stream.Protocol values
+ * (http, ws, grpc, grpc-web, sse, raw, tls-handshake; HTTP/2 is "http" plus
+ * `http_version`). The helpers below that READ a recorded `protocol` still
+ * accept the older display spellings ("HTTP/1.x", "HTTP/2", "WebSocket",
+ * "TCP", ...) because no migration rewrites Stream.Protocol and the Store /
+ * JSONL import accept any string, so old DBs and imports keep legacy
+ * values. This is the only place legacy spellings may appear: filter
+ * values and defaults the WebUI sends must be canonical
+ * (see ./protocols.ts and src/legacyProtocolLiterals.test.ts).
  */
 
 import type {
@@ -128,6 +138,74 @@ export function pickFuzzTool(
     return "fuzz_http";
   }
   return null;
+}
+
+/**
+ * Whether a flow is HTTP/2 (h2 over TLS or h2c cleartext).
+ *
+ * HTTP/2 streams are recorded as `protocol: "http"`; the wire version lives
+ * in `http_version` ("h2" / "h2c"), which `query resource=flow` returns.
+ * gRPC / gRPC-Web also ride on HTTP/2 but are their own protocol families
+ * and are not reported here. Legacy rows whose `protocol` is itself an
+ * HTTP/2 spelling ("HTTP/2", "h2") count even without `http_version`.
+ */
+export function isHttp2(
+  flow: Pick<FlowDetailResult, "protocol" | "http_version"> | null | undefined,
+): boolean {
+  if (!flow) return false;
+  if (pickFlowDetailKind(flow.protocol) !== "http") return false;
+  const proto = (flow.protocol ?? "").toLowerCase();
+  if (proto === "http/2" || proto === "h2") return true;
+  return flow.http_version === "h2" || flow.http_version === "h2c";
+}
+
+/** Whether a recorded protocol is gRPC or gRPC-Web (legacy-tolerant). */
+export function isGrpcProtocol(protocol: string | null | undefined): boolean {
+  const proto = (protocol ?? "").toLowerCase();
+  return proto === "grpc" || proto === "grpc-web";
+}
+
+/**
+ * Whether a recorded protocol is gRPC-Web specifically (legacy-tolerant:
+ * old rows may hold "gRPC-Web"; see the file header).
+ */
+export function isGrpcWebProtocol(protocol: string | null | undefined): boolean {
+  return (protocol ?? "").toLowerCase() === "grpc-web";
+}
+
+/** Whether a recorded protocol is WebSocket (legacy-tolerant). */
+export function isWsProtocol(protocol: string | null | undefined): boolean {
+  const proto = (protocol ?? "").toLowerCase();
+  return proto === "ws" || proto === "websocket";
+}
+
+/** Whether a recorded protocol is a raw TCP byte stream (legacy-tolerant). */
+export function isRawProtocol(protocol: string | null | undefined): boolean {
+  const proto = (protocol ?? "").toLowerCase();
+  return proto === "raw" || proto === "tcp";
+}
+
+/** Badge variants used for protocol badges. */
+export type ProtocolBadgeVariant =
+  | "default"
+  | "success"
+  | "warning"
+  | "danger"
+  | "info";
+
+/**
+ * Badge colour for a recorded protocol, keyed on the protocol family.
+ * Case-insensitive and legacy-tolerant (rows may predate canonical names);
+ * unknown or missing input gets "default".
+ */
+export function protocolVariant(
+  protocol: string | null | undefined,
+): ProtocolBadgeVariant {
+  const proto = (protocol ?? "").toLowerCase();
+  if (isWsProtocol(proto) || proto === "sse") return "info";
+  if (isGrpcProtocol(proto)) return "warning";
+  if (isRawProtocol(proto)) return "danger";
+  return "default";
 }
 
 /**

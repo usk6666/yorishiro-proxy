@@ -1,0 +1,132 @@
+{
+  "count": 9,
+  "flows": [
+    {
+      "duration_ms": 0,
+      "id": "stream-grpc",
+      "message_count": 3,
+      "method": "",
+      "protocol": "grpc",
+      "protocol_summary": {
+        "grpc_status": "0",
+        "grpc_status_name": "OK",
+        "method": "Do",
+        "service": "pkg.Svc"
+      },
+      "scheme": "https",
+      "state": "complete",
+      "status_code": 0,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://grpc.example.com/pkg.Svc/Do"
+    },
+    {
+      "duration_ms": 0,
+      "id": "stream-grpc-web",
+      "message_count": 3,
+      "method": "",
+      "protocol": "grpc-web",
+      "protocol_summary": {
+        "grpc_status": "0",
+        "grpc_status_name": "OK",
+        "method": "Do",
+        "service": "pkg.Svc"
+      },
+      "scheme": "https",
+      "state": "complete",
+      "status_code": 0,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://grpc.example.com/pkg.Svc/Do"
+    },
+    {
+      "duration_ms": 0,
+      "id": "stream-http-h1",
+      "message_count": 2,
+      "method": "GET",
+      "protocol": "http",
+      "scheme": "http",
+      "state": "complete",
+      "status_code": 200,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "http://h1.example.com/api/items"
+    },
+    {
+      "duration_ms": 0,
+      "id": "stream-http-h2",
+      "message_count": 2,
+      "method": "GET",
+      "protocol": "http",
+      "scheme": "https",
+      "state": "complete",
+      "status_code": 200,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://h2.example.com/api/items"
+    },
+    {
+      "duration_ms": 0,
+      "id": "stream-http-h2c",
+      "message_count": 2,
+      "method": "GET",
+      "protocol": "http",
+      "scheme": "http",
+      "state": "complete",
+      "status_code": 200,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "http://h2.example.com/api/items"
+    },
+    {
+      "duration_ms": 0,
+      "id": "stream-raw",
+      "message_count": 1,
+      "method": "",
+      "protocol": "raw",
+      "protocol_summary": {
+        "receive_bytes": "0",
+        "send_bytes": "6"
+      },
+      "state": "complete",
+      "status_code": 0,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": ""
+    },
+    {
+      "duration_ms": 0,
+      "id": "stream-sse",
+      "message_count": 3,
+      "method": "GET",
+      "protocol": "sse",
+      "scheme": "https",
+      "state": "complete",
+      "status_code": 200,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://sse.example.com/events"
+    },
+    {
+      "duration_ms": 0,
+      "id": "stream-tls-handshake",
+      "message_count": 1,
+      "method": "",
+      "protocol": "tls-handshake",
+      "state": "complete",
+      "status_code": 0,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": ""
+    },
+    {
+      "duration_ms": 0,
+      "id": "stream-ws",
+      "message_count": 3,
+      "method": "GET",
+      "protocol": "ws",
+      "protocol_summary": {
+        "last_frame_type": "Text",
+        "message_count": "3"
+      },
+      "scheme": "https",
+      "state": "complete",
+      "status_code": 101,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://ws.example.com/echo"
+    }
+  ],
+  "total": 9
+}

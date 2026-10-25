@@ -1,7 +1,12 @@
 /**
- * FlowDetailHTTPMessage — Renders the request/response panels for HTTP/1.x,
- * HTTPS, and HTTP/2 (including gRPC and gRPC-Web, which ride on HTTP/2 wire
- * frames). Includes the original-vs-modified variant diff.
+ * FlowDetailHTTPMessage — Renders the request/response panels for HTTP flows
+ * (HTTP/1.x and HTTP/2) and the HTTP side of WS / gRPC / gRPC-Web / SSE
+ * streams. Includes the original-vs-modified variant diff.
+ *
+ * HTTP/2 needs no separate pseudo-header view: the recorder moves
+ * :method / :path / :authority / :scheme / :status into the message fields,
+ * so recorded headers never contain them and the Headers tab shows them as
+ * recorded for every version.
  *
  * Extracted from FlowDetailPage as part of RFC-001 N8 (USK-668) so the parent
  * page can dispatch on protocol without keeping per-protocol logic inline.
@@ -15,12 +20,10 @@ import { hasResponse } from "../../lib/mcp/dispatch.js";
 import { BodyViewer } from "./BodyViewer.js";
 import "./FlowDetailPage.css";
 import { HeadersTable } from "./HeadersTable.js";
-import { Http2PseudoHeaders, filterRegularHeaders } from "./Http2Info.js";
 import { RawBytesViewer } from "./RawBytesViewer.js";
 
 // ---------------------------------------------------------------------------
-// Tab definitions (kept local to the HTTP panel; HTTP/2 adds a Pseudo-Headers
-// tab the other protocols don't need).
+// Tab definitions
 // ---------------------------------------------------------------------------
 
 const REQUEST_TABS = [
@@ -29,19 +32,6 @@ const REQUEST_TABS = [
 ];
 
 const REQUEST_TABS_RAW = [
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-  { id: "raw", label: "Raw" },
-];
-
-const REQUEST_TABS_H2 = [
-  { id: "pseudo", label: "Pseudo-Headers" },
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-];
-
-const REQUEST_TABS_H2_RAW = [
-  { id: "pseudo", label: "Pseudo-Headers" },
   { id: "headers", label: "Headers" },
   { id: "body", label: "Body" },
   { id: "raw", label: "Raw" },
@@ -58,19 +48,6 @@ const RESPONSE_TABS_RAW = [
   { id: "raw", label: "Raw" },
 ];
 
-const RESPONSE_TABS_H2 = [
-  { id: "pseudo", label: "Pseudo-Headers" },
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-];
-
-const RESPONSE_TABS_H2_RAW = [
-  { id: "pseudo", label: "Pseudo-Headers" },
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-  { id: "raw", label: "Raw" },
-];
-
 export interface FlowDetailHTTPMessageProps {
   flow: FlowDetailResult;
 }
@@ -79,31 +56,8 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
   const [requestTab, setRequestTab] = useState("headers");
   const [responseTab, setResponseTab] = useState("headers");
 
-  const isH2 = flow.protocol === "HTTP/2";
-  const hasRawReq = !!flow.raw_request;
-  const hasRawResp = !!flow.raw_response;
-  const reqTabs = isH2
-    ? hasRawReq
-      ? REQUEST_TABS_H2_RAW
-      : REQUEST_TABS_H2
-    : hasRawReq
-      ? REQUEST_TABS_RAW
-      : REQUEST_TABS;
-  const resTabs = isH2
-    ? hasRawResp
-      ? RESPONSE_TABS_H2_RAW
-      : RESPONSE_TABS_H2
-    : hasRawResp
-      ? RESPONSE_TABS_RAW
-      : RESPONSE_TABS;
-
-  // For HTTP/2, separate pseudo-headers from regular headers.
-  const displayReqHeaders = isH2
-    ? filterRegularHeaders(flow.request_headers)
-    : flow.request_headers;
-  const displayRespHeaders = isH2
-    ? filterRegularHeaders(flow.response_headers)
-    : flow.response_headers;
+  const reqTabs = flow.raw_request ? REQUEST_TABS_RAW : REQUEST_TABS;
+  const resTabs = flow.raw_response ? RESPONSE_TABS_RAW : RESPONSE_TABS;
 
   const responseStatus = flow.response_status_code ?? 0;
   const isSseStreaming = flow.tags?.streaming_type === "sse";
@@ -128,21 +82,9 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                 activeTab={requestTab}
                 onTabChange={setRequestTab}
               >
-                {requestTab === "pseudo" && isH2 && (
-                  <Http2PseudoHeaders
-                    headers={flow.original_request.headers}
-                    type="request"
-                  />
-                )}
                 {requestTab === "headers" && (
                   <HeadersTable
-                    headers={
-                      isH2
-                        ? filterRegularHeaders(
-                            flow.original_request.headers,
-                          )
-                        : flow.original_request.headers
-                    }
+                    headers={flow.original_request.headers}
                   />
                 )}
                 {requestTab === "body" && (
@@ -178,14 +120,8 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                 activeTab={requestTab}
                 onTabChange={setRequestTab}
               >
-                {requestTab === "pseudo" && isH2 && (
-                  <Http2PseudoHeaders
-                    headers={flow.request_headers}
-                    type="request"
-                  />
-                )}
                 {requestTab === "headers" && (
-                  <HeadersTable headers={displayReqHeaders} />
+                  <HeadersTable headers={flow.request_headers} />
                 )}
                 {requestTab === "body" && (
                   <BodyViewer
@@ -245,21 +181,9 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                 activeTab={responseTab}
                 onTabChange={setResponseTab}
               >
-                {responseTab === "pseudo" && isH2 && (
-                  <Http2PseudoHeaders
-                    headers={flow.original_response.headers}
-                    type="response"
-                  />
-                )}
                 {responseTab === "headers" && (
                   <HeadersTable
-                    headers={
-                      isH2
-                        ? filterRegularHeaders(
-                            flow.original_response.headers,
-                          )
-                        : flow.original_response.headers
-                    }
+                    headers={flow.original_response.headers}
                   />
                 )}
                 {responseTab === "body" && (
@@ -310,14 +234,8 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                 activeTab={responseTab}
                 onTabChange={setResponseTab}
               >
-                {responseTab === "pseudo" && isH2 && (
-                  <Http2PseudoHeaders
-                    headers={flow.response_headers}
-                    type="response"
-                  />
-                )}
                 {responseTab === "headers" && (
-                  <HeadersTable headers={displayRespHeaders} />
+                  <HeadersTable headers={flow.response_headers} />
                 )}
                 {responseTab === "body" && (
                   <BodyViewer
@@ -356,14 +274,8 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
               activeTab={requestTab}
               onTabChange={setRequestTab}
             >
-              {requestTab === "pseudo" && isH2 && (
-                <Http2PseudoHeaders
-                  headers={flow.request_headers}
-                  type="request"
-                />
-              )}
               {requestTab === "headers" && (
-                <HeadersTable headers={displayReqHeaders} />
+                <HeadersTable headers={flow.request_headers} />
               )}
               {requestTab === "body" && (
                 <BodyViewer
@@ -421,14 +333,8 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                 activeTab={responseTab}
                 onTabChange={setResponseTab}
               >
-                {responseTab === "pseudo" && isH2 && (
-                  <Http2PseudoHeaders
-                    headers={flow.response_headers}
-                    type="response"
-                  />
-                )}
                 {responseTab === "headers" && (
-                  <HeadersTable headers={displayRespHeaders} />
+                  <HeadersTable headers={flow.response_headers} />
                 )}
                 {responseTab === "body" &&
                   (isSseStreaming ? (

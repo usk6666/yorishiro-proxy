@@ -6,7 +6,18 @@ import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Tabs } from "../../components/ui/Tabs.js";
 import { useToast } from "../../components/ui/Toast.js";
+import {
+  firstGrpcDataMessage,
+  firstGrpcDataPayload,
+  grpcDataPayloadWithFallback,
+} from "../../lib/grpcPayload.js";
 import { useMcpContext } from "../../lib/mcp/context.js";
+import {
+  isGrpcProtocol,
+  isHttp2,
+  isRawProtocol,
+  isWsProtocol,
+} from "../../lib/mcp/dispatch.js";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import type {
   BodyPatch,
@@ -34,6 +45,7 @@ import { GrpcRequestEditor, type GrpcRequestEditorState } from "./GrpcRequestEdi
 import { GrpcResponseViewer } from "./GrpcResponseViewer.js";
 import { HeaderEditor } from "./HeaderEditor.js";
 import { RawPatchEditor } from "./RawPatchEditor.js";
+import { initialRawHttpText } from "./rawHttpText.js";
 import "./ResendPage.css";
 import { ResponseViewer } from "./ResponseViewer.js";
 import { TcpMessageList } from "./TcpMessageList.js";
@@ -194,26 +206,17 @@ function statusBadgeVariant(
 
 /** Detect whether a flow uses TCP/raw protocol. */
 function isTcpFlow(flow: FlowDetailResult): boolean {
-  const proto = (flow.protocol || "").toLowerCase();
-  return proto === "tcp" || proto === "raw";
-}
-
-/** Check if a flow is HTTP/2, gRPC, or gRPC-Web (no raw bytes stored). */
-function isHttp2Flow(flow: FlowDetailResult): boolean {
-  const proto = (flow.protocol || "").toLowerCase();
-  return proto === "http/2" || proto === "h2" || proto === "grpc" || proto === "grpc-web";
+  return isRawProtocol(flow.protocol);
 }
 
 /** Detect whether a flow is gRPC / gRPC-Web (uses resend_grpc dispatch). */
 function isGrpcFlow(flow: FlowDetailResult): boolean {
-  const proto = (flow.protocol || "").toLowerCase();
-  return proto === "grpc" || proto === "grpc-web";
+  return isGrpcProtocol(flow.protocol);
 }
 
 /** Detect whether a flow is a WebSocket flow (uses resend_ws dispatch). */
 function isWsFlow(flow: FlowDetailResult): boolean {
-  const proto = (flow.protocol || "").toLowerCase();
-  return proto === "ws" || proto === "websocket";
+  return isWsProtocol(flow.protocol);
 }
 
 /**
@@ -304,86 +307,6 @@ function headersRecordToRows(
     }
   }
   return rows;
-}
-
-/**
- * Decode base64-encoded raw request bytes to a text string.
- * Returns null if decoding fails or the data is empty.
- */
-function decodeRawRequest(base64Data: string): string | null {
-  if (!base64Data) return null;
-  try {
-    return atob(base64Data);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Reconstruct an HTTP/1.1 raw message from parsed flow data.
- * Used for HTTP/2, gRPC, and gRPC-Web flows that don't store raw bytes.
- *
- * Format:
- *   {Method} {RequestURI} HTTP/1.1\r\n
- *   Host: {host}\r\n
- *   {Headers}\r\n
- *   \r\n
- *   {Body}
- */
-function reconstructHttp11(flow: FlowDetailResult): string {
-  const method = flow.method || "GET";
-  const urlStr = flow.url || "/";
-
-  // Extract request URI (path + query) and host from the URL.
-  let requestUri = "/";
-  let host = "";
-  try {
-    const parsed = new URL(urlStr);
-    requestUri = parsed.pathname + parsed.search;
-    host = parsed.host;
-  } catch {
-    // If URL parsing fails, use the raw URL as-is.
-    requestUri = urlStr;
-  }
-
-  const lines: string[] = [];
-  lines.push(`${method} ${requestUri} HTTP/1.1`);
-
-  // Track which headers have been added to avoid duplicating Host.
-  const addedHeaders = new Set<string>();
-
-  // Add Host header first if not already in request_headers.
-  const hasHostHeader = flow.request_headers
-    ? Object.keys(flow.request_headers).some((k) => k.toLowerCase() === "host")
-    : false;
-
-  if (!hasHostHeader && host) {
-    lines.push(`Host: ${host}`);
-  }
-
-  // Add all recorded headers.
-  if (flow.request_headers) {
-    for (const [key, values] of Object.entries(flow.request_headers)) {
-      for (const value of values) {
-        lines.push(`${key}: ${value}`);
-      }
-      addedHeaders.add(key.toLowerCase());
-    }
-  }
-
-  // Empty line to separate headers from body.
-  lines.push("");
-
-  // Join with \r\n (HTTP line endings).
-  let raw = lines.join("\r\n");
-
-  // Append body if present.
-  const bodyText = flow.request_body || "";
-  if (bodyText) {
-    raw += "\r\n" + bodyText;
-  }
-
-  return raw;
 }
 
 /**
@@ -708,7 +631,7 @@ export function ResendPage() {
   // Determine protocol mode from flow data.
   const flow = flowData as FlowDetailResult | null;
   const isTcp = useMemo(() => flow != null && isTcpFlow(flow), [flow]);
-  const isH2 = useMemo(() => flow != null && isHttp2Flow(flow), [flow]);
+  const isH2 = useMemo(() => isHttp2(flow), [flow]);
   const isGrpc = useMemo(() => flow != null && isGrpcFlow(flow), [flow]);
   const isWs = useMemo(() => flow != null && isWsFlow(flow), [flow]);
 
@@ -741,9 +664,12 @@ export function ResendPage() {
     if (isGrpcFlow(flow)) {
       // gRPC / gRPC-Web flow: populate the typed editor from the source flow.
       //
-      // NOTE (USK-936 MVP scope): `flow.request_body` may carry a
-      // base64-encoded protobuf payload (when `flow.request_body_encoding ===
-      // "base64"`), but the editor only emits `body_encoding: "text"`. That
+      // The payload comes from the first send-direction Data message: the
+      // top-level `request_body` belongs to the Start message and is empty.
+      //
+      // NOTE (USK-936 MVP scope): the Data body may carry a base64-encoded
+      // protobuf payload (when its `body_encoding === "base64"`), but the
+      // editor only emits `body_encoding: "text"`. That
       // means binary-protobuf payloads pre-populate as base64 text and round-
       // trip incorrectly on send. Proto-schema-aware editing + base64 mode
       // are deferred to the follow-up Issue (see Issue body "out of scope")
@@ -757,7 +683,7 @@ export function ResendPage() {
         service,
         method,
         metadata: metadataRows,
-        messagePayload: flow.request_body || "",
+        messagePayload: firstGrpcDataPayload(flow.message_preview, "send"),
       });
     } else if (isWsFlow(flow)) {
       // WebSocket flow: populate single-frame editor from the handshake URL
@@ -826,15 +752,7 @@ export function ResendPage() {
       setHeaders(headerPairs);
 
       // Populate raw editor fields.
-      const isH2Flow = isHttp2Flow(flow);
-      if (!isH2Flow && flow.raw_request) {
-        // HTTP/1.x: decode the recorded raw bytes.
-        const decoded = decodeRawRequest(flow.raw_request);
-        setRawHttpText(decoded ?? reconstructHttp11(flow));
-      } else {
-        // HTTP/2 or no raw bytes: reconstruct HTTP/1.1 from parsed data.
-        setRawHttpText(reconstructHttp11(flow));
-      }
+      setRawHttpText(initialRawHttpText(flow));
 
       // Set target address for raw mode.
       setRawTargetAddr(extractTargetAddr(flow));
@@ -843,6 +761,40 @@ export function ResendPage() {
     // re-fetch must not overwrite in-flight edits; trigger only on flow id change
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flow?.id]);
+
+  // gRPC payload fallback: the server emits message_preview only for flows
+  // with more than two messages, so a gRPC flow that stopped early (send
+  // Start + Data, no receive rows) has no preview and the populate effect
+  // above leaves the payload empty. Fetch the messages list for that flow
+  // and fill the payload, unless the user has already typed one.
+  useEffect(() => {
+    if (!flow || !isGrpcFlow(flow) || !client) return;
+    if (firstGrpcDataMessage(flow.message_preview, "send")) return;
+    let cancelled = false;
+    const preview = flow.message_preview;
+    client
+      .query({ resource: "messages", id: flow.id })
+      .then((res) => {
+        if (cancelled) return;
+        const payload = grpcDataPayloadWithFallback(
+          preview,
+          (res as MessagesResult).messages,
+          "send",
+        );
+        if (!payload) return;
+        setGrpcState((prev) =>
+          prev.messagePayload === "" ? { ...prev, messagePayload: payload } : prev,
+        );
+      })
+      .catch(() => {
+        // Best-effort pre-fill: leave the payload empty on failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Same trigger as the populate effect: only on flow id change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flow?.id, client]);
 
   // Sync route param changes.
   useEffect(() => {
@@ -941,7 +893,7 @@ export function ResendPage() {
       setHttpResponse(adaptedResult);
       recordResendSuccess({
         id: typedResult.stream_id,
-        protocol: flow.protocol ?? "HTTP",
+        protocol: flow.protocol ?? "http",
         method,
         url,
         statusCode: typedResult.status_code,
@@ -1026,7 +978,7 @@ export function ResendPage() {
 
       recordResendSuccess({
         id: typedResult.stream_id,
-        protocol: flow?.protocol ?? "Raw",
+        protocol: flow?.protocol ?? "raw",
         method: "RAW",
         url: rawTargetAddr.trim(),
         durationMs: typedResult.duration_ms,
@@ -1137,7 +1089,7 @@ export function ResendPage() {
       setTcpResponse(adapted);
       recordResendSuccess({
         id: typedResult.stream_id,
-        protocol: flow?.protocol ?? "TCP",
+        protocol: flow?.protocol ?? "raw",
         method: "RAW",
         url: targetAddr.trim(),
         durationMs: typedResult.duration_ms,
@@ -1201,7 +1153,7 @@ export function ResendPage() {
       setGrpcResponse(result);
       recordResendSuccess({
         id: result.stream_id,
-        protocol: flow?.protocol ?? "gRPC",
+        protocol: flow?.protocol ?? "grpc",
         method: flow?.method ?? "POST",
         url: flow?.url ?? `${grpcState.service}/${grpcState.method}`,
         statusCode: result.end?.status,
@@ -1270,7 +1222,7 @@ export function ResendPage() {
       setWsResponse(result);
       recordResendSuccess({
         id: result.stream_id,
-        protocol: flow?.protocol ?? "WebSocket",
+        protocol: flow?.protocol ?? "ws",
         method: result.opcode.toUpperCase(),
         url: flow?.url ?? wsState.path,
         durationMs: result.duration_ms,
@@ -1348,7 +1300,7 @@ export function ResendPage() {
 
       recordResendSuccess({
         id: typedResult.stream_id,
-        protocol: flow?.protocol ?? "TCP",
+        protocol: flow?.protocol ?? "raw",
         method: "REPLAY",
         url: targetAddr.trim(),
         durationMs: typedResult.duration_ms,
@@ -1440,7 +1392,9 @@ export function ResendPage() {
             <div className="resend-panel-header">
               <span className="resend-panel-title">Request</span>
               <Badge variant="info">{activeFlowId.slice(0, 8)}</Badge>
-              <Badge variant="default">{isH2 ? "HTTP/2" : "HTTP"}</Badge>
+              <Badge variant={isH2 ? "info" : "default"}>
+                {flow?.http_version || "HTTP"}
+              </Badge>
               {httpEditorMode === "raw" && (
                 <Badge variant="warning">RAW</Badge>
               )}
@@ -1750,7 +1704,7 @@ export function ResendPage() {
             <div className="resend-panel-header">
               <span className="resend-panel-title">gRPC Request</span>
               <Badge variant="info">{activeFlowId.slice(0, 8)}</Badge>
-              <Badge variant="default">{flow?.protocol ?? "gRPC"}</Badge>
+              <Badge variant="default">{flow?.protocol ?? "grpc"}</Badge>
             </div>
 
             <div className="resend-tag-row">
