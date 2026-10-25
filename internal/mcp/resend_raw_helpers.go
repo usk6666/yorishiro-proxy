@@ -534,19 +534,6 @@ func buildResendRawSendEnvelope(plan *resendRawPlan) *envelope.Envelope {
 	}
 }
 
-// applyResendRawTag persists the user-supplied tag on the new Stream
-// row after the pipeline-driven RecordStep has created it.
-func (s *Server) applyResendRawTag(ctx context.Context, streamID, tag string) {
-	update := flow.StreamUpdate{Tags: map[string]string{"tag": tag}}
-	if err := s.flowStore.store.UpdateStream(ctx, streamID, update); err != nil {
-		slog.WarnContext(ctx, "resend_raw: tag update failed",
-			"stream_id", streamID,
-			"tag", tag,
-			"error", err,
-		)
-	}
-}
-
 // formatResendRawResult builds the structured result. response_bytes
 // is always base64 — raw payloads are binary by definition; never
 // attempt UTF-8 sniffing.

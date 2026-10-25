@@ -877,19 +877,6 @@ func buildResendWSPongEnvelope(plan *resendWSPlan, streamID string, sequence int
 	}
 }
 
-// applyResendWSTag persists the user-supplied tag on the new Stream row
-// after the pipeline-driven RecordStep has created it.
-func (s *Server) applyResendWSTag(ctx context.Context, streamID, tag string) {
-	update := flow.StreamUpdate{Tags: map[string]string{"tag": tag}}
-	if err := s.flowStore.store.UpdateStream(ctx, streamID, update); err != nil {
-		slog.WarnContext(ctx, "resend_ws: tag update failed",
-			"stream_id", streamID,
-			"tag", tag,
-			"error", err,
-		)
-	}
-}
-
 // formatResendWSResult turns the response envelope into the wire-shape
 // MCP result. SafetyFilter output masking is applied to the payload
 // before it leaves the proxy boundary; the unmasked variant is on disk

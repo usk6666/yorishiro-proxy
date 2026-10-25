@@ -1103,10 +1103,10 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	endEnv, recvData, _, err := s.runResendGRPC(rtCtx, variantPlan, p)
 	// USK-1347 (parity with fuzz_http / fuzz_ws): fuzz_grpc bypasses
 	// session.RunSession, so the per-variant Stream created by RecordStep
-	// must be finalised here (State + Duration) or it stays
-	// State="active" forever. Use the parent ctx (not rtCtx) so the
-	// terminal UPDATE lands even when the per-variant timeout expired.
-	finalizeResendStream(ctx, s.flowStore.store, variantPlan.streamID, err)
+	// must be finalised here (State + Duration + user tag, USK-1362) or
+	// it stays State="active" forever. Use the parent ctx (not rtCtx) so
+	// the terminal UPDATE lands even when the per-variant timeout expired.
+	finalizeResendStream(ctx, s.flowStore.store, variantPlan.streamID, tag, err)
 	if err != nil {
 		return row, 0, nil, err
 	}
@@ -1131,12 +1131,6 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 		}
 	}
 
-	// Tag persistence uses the parent ctx (not the per-variant rtCtx) so
-	// the tag write is not bound to the variant's RPC timeout — matches
-	// fuzz_http behaviour.
-	if tag != "" && s.flowStore.store != nil {
-		s.applyResendGRPCTag(ctx, variantPlan.streamID, tag)
-	}
 	return row, row.Status, body, nil
 }
 

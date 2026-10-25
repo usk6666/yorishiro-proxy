@@ -253,16 +253,12 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 	// OnComplete-driven Stream finalisation never fires. Mirror the
 	// contract here so the new Stream transitions out of State="active"
 	// before the MCP result returns.
-	finalizeResendStream(ctx, s.flowStore.store, plan.streamID, err)
+	finalizeResendStream(ctx, s.flowStore.store, plan.streamID, input.Tag, err)
 	if err != nil {
 		// USK-1056: warnings[] never ships on the failure path, so a dial
 		// the proxy upgraded to TLS on its own must explain itself through
 		// the error instead.
 		return nil, nil, wrapResendGRPCRunError(plan, err)
-	}
-
-	if input.Tag != "" && s.flowStore.store != nil {
-		s.applyResendGRPCTag(ctx, plan.streamID, input.Tag)
 	}
 
 	duration := time.Since(start)

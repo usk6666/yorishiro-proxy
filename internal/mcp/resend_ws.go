@@ -175,13 +175,9 @@ func (s *Server) handleResendWS(ctx context.Context, _ *gomcp.CallToolRequest, i
 	// OnComplete-driven Stream finalisation never fires. Mirror the
 	// contract here so the new Stream transitions out of State="active"
 	// before the MCP result returns.
-	finalizeResendStream(ctx, s.flowStore.store, sendEnv.StreamID, err)
+	finalizeResendStream(ctx, s.flowStore.store, sendEnv.StreamID, input.Tag, err)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resend_ws: %w", err)
-	}
-
-	if input.Tag != "" && s.flowStore.store != nil {
-		s.applyResendWSTag(ctx, sendEnv.StreamID, input.Tag)
 	}
 
 	duration := time.Since(start)
