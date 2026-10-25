@@ -2,11 +2,11 @@ import { useCallback, useState } from "react";
 import { Badge, Button, Input, Spinner, useToast } from "../../components/ui/index.js";
 import { useProxyControl, useQuery } from "../../lib/mcp/hooks.js";
 import type { ProxyStartParams, StatusResult } from "../../lib/mcp/types.js";
+import { UpstreamProxyEditor } from "./UpstreamProxyEditor.js";
 import {
-  UpstreamProxyEditor,
   type UpstreamProxyEditorValue,
   validateUpstreamProxyPayload,
-} from "./UpstreamProxyEditor.js";
+} from "./upstreamProxyPayload.js";
 
 /**
  * ProxyControl — manage proxy listeners (start/stop).

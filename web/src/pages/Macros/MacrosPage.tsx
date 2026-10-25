@@ -4,7 +4,7 @@ import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useToast } from "../../components/ui/toastContext.js";
 import { useMacro, useQuery } from "../../lib/mcp/hooks.js";
 import type { MacroDeleteResult, MacrosEntry } from "../../lib/mcp/types.js";
 import "./MacrosPage.css";

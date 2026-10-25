@@ -120,13 +120,11 @@ internal/
                            #   engine.go, rule.go, preset.go (destructive-sql,
                            #   destructive-os-command), preset_pii.go (credit-card,
                            #   japan-my-number, email, japan-phone)
-  job/                     # EnvelopeSource impls (per-protocol resend/fuzz sources)
-                           #   consumed by internal/mcp/{resend_*,fuzz_*}_helpers.go.
+  job/                     # EnvelopeSource impls (per-protocol resend sources)
+                           #   RawResendSource + BytePatch consumed by internal/mcp/{resend_raw,fuzz_raw}_helpers.go.
                            #   source.go (EnvelopeSource interface),
                            #   http_source.go, ws_source.go, grpc_source.go, raw_source.go,
-                           #   fuzz_http_source.go, fuzz_raw_source.go,
-                           #   byte_patch.go (raw-payload patching),
-                           #   template.go (§var§ expansion for fuzz sources)
+                           #   byte_patch.go (raw-payload patching)
   macro/                   # Macro engine: template / guard / extract / encoder
   flow/                    # Stream/Flow Store (sqlite); HAR / JSONL export, import
   cert/                    # Root CA + dynamic server cert issuance
@@ -135,7 +133,6 @@ internal/
                            #   used by macro encoders and MCP body patches;
                            #   protobuf/ (schema-less wire <-> JSON), protoschema/ (schema-aware
                            #   codec, server reflection, protoc), grpclpm/ (gRPC LPM helpers)
-  fuzzer/                  # Iterator / Position / RequestData primitives for typed-fuzz path
   mcp/                     # MCP server, tools, handlers
                            #   typed resend: resend_http / resend_ws / resend_grpc / resend_raw
                            #   typed fuzz:   fuzz_http   / fuzz_ws   / fuzz_grpc   / fuzz_raw
@@ -157,6 +154,7 @@ make test           # fast tier: ensure-ui → go test -race -v ./... (unit test
 make test-fast      # alias for `make test`; explicit naming for the fast tier (USK-728)
 make test-pkg PKG=./internal/<pkg>/... [RUN=<regexp>] [TAGS=e2e]
                     # one package/pattern only — the TDD red/green loop
+make test-ui        # web/ only: pnpm install --frozen-lockfile → vitest run
 make test-depsec    # tools/depsec module only: gofmt check + go vet + go test -race (no UI needed)
 make test-e2e-smoke # smoke tier (merge gate): ensure-ui → tools/smokeselect → go test -race -v -tags 'e2e e2e_smoke'
                     #   -run <smoke tests only> <smoke packages>  (untagged tests are NOT re-run; USK-1209)
@@ -165,6 +163,7 @@ make test-cover     # ensure-ui → test with coverage report
 make vet            # ensure-ui → go vet ./...
 make fmt            # Format all files with gofmt -w .
 make lint           # gofmt check + golangci-lint (govet/staticcheck/unused/ineffassign/gocyclo)
+make lint-ui        # web/ only: eslint with --max-warnings 0 (`make lint` stays Go-only)
 make lint-workflows # .github/ checks: status-check needs + job permissions guards (yq), pinact, ghalint, actionlint+shellcheck
                     #   (needs network; tools pinned + sha256-verified in .workflow-lint-tools)
 make bench          # ensure-ui → run benchmarks

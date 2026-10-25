@@ -287,6 +287,35 @@ jobs:
       - name: Test (web UI)
         run: make test-ui
 
+  # eslint over web/ (rule layer only; type errors are already gated by
+  # `tsc -b` inside build-ui). `--max-warnings 0` lives in web/package.json's
+  # "lint" script, so warnings fail the job too. A separate job rather than a
+  # step in test-ui for the same reason test-ui is not a step in setup: a lint
+  # failure must not mask the vitest result. Like test-ui it has no `needs:`
+  # (it reads web/ source only) and runs through the Makefile (USK-1058).
+  lint-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 10 # >= 10.16 honors web/.npmrc minimum-release-age
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Lint (web UI)
+        run: make lint-ui
+
   # tools/depsec is a separate Go module (stdlib only, not shipped in the binary)
   # that drives the weekly Dependabot security-update workflow. Gate its
   # supply-chain-critical decision logic on every PR that touches it.
@@ -371,6 +400,7 @@ jobs:
       - test-e2e-smoke
       - test-e2e-full
       - test-ui
+      - lint-ui
       - depsec-tool
       - lint-workflows
     steps:

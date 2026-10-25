@@ -5,7 +5,7 @@ import {
   markDialogSettled,
   type DialogOptions,
   type DialogState,
-} from "./Dialog.js";
+} from "./dialogContext.js";
 
 // ---------------------------------------------------------------------------
 // buildDialogState — defaults + override behaviour

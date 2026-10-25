@@ -256,11 +256,11 @@ type StreamListOptions struct {
 	// Mutually exclusive with Protocols; if both are set, Protocols wins.
 	Protocol string
 	// Protocols filters streams by a set of acceptable protocol literals,
-	// matched as `s.protocol IN (...)`. Used by the MCP query tool to expand
-	// canonical Message-type families (e.g. "http") into the legacy and new
-	// recorded protocol strings that share the family during the RFC-001
-	// parallel-coexistence window. The Store performs no normalization on
-	// the values; callers pass the literal strings to match.
+	// matched as `s.protocol IN (...)`. Currently unused by the MCP query and
+	// manage tools: their protocol filter sets the single Protocol field, so
+	// matching is exact against the canonical value and no family expansion
+	// to legacy spellings takes place. The Store performs no normalization
+	// on the values; callers pass the literal strings to match.
 	Protocols []string
 	// Scheme filters streams by Stream.Scheme — the wire-observed
 	// handshake transport (canonical live values: "https", "http",
@@ -311,6 +311,11 @@ type StreamListOptions struct {
 	// the requested destination in tags.target (audit / error streams), or
 	// the host portion of the URL in send flows.
 	Host string
+	// Tag filters streams by the user label stored in tags["tag"] — the
+	// value resend_* / fuzz_* record from their tag parameter. Exact,
+	// case-sensitive match; the value is not trimmed or folded. Empty
+	// disables the filter.
+	Tag string
 	// SortBy specifies the field to sort results by.
 	// Valid values: "timestamp", "duration_ms".
 	// Default (empty): "timestamp".

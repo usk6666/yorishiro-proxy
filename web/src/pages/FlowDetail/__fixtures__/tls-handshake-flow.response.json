@@ -1,0 +1,20 @@
+{
+  "conn_id": "conn-stream-tls-handshake",
+  "duration_ms": 0,
+  "id": "stream-tls-handshake",
+  "message_count": 1,
+  "method": "",
+  "protocol": "tls-handshake",
+  "request_body": "",
+  "request_body_encoding": "text",
+  "request_body_truncated": false,
+  "request_headers": {},
+  "response_body": "",
+  "response_body_encoding": "",
+  "response_body_truncated": false,
+  "response_headers": {},
+  "response_status_code": 0,
+  "state": "complete",
+  "timestamp": "2026-01-01T00:00:00Z",
+  "url": ""
+}

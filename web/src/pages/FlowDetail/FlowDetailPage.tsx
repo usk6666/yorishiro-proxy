@@ -2,14 +2,15 @@ import { useCallback, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
-import { useDialog } from "../../components/ui/Dialog.js";
+import { useDialog } from "../../components/ui/dialogContext.js";
 import { Spinner } from "../../components/ui/Spinner.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useToast } from "../../components/ui/toastContext.js";
 import { generateCurl } from "../../lib/export/curl.js";
 import { buildHar, downloadHar } from "../../lib/export/har.js";
 import {
-  isStreamingFlow,
+  needsMessagesQuery,
   pickFlowDetailKind,
+  protocolVariant,
 } from "../../lib/mcp/dispatch.js";
 import { useManage, useQuery } from "../../lib/mcp/hooks.js";
 import type {
@@ -22,7 +23,7 @@ import "./FlowDetailPage.css";
 import { FlowDetailRawMessage } from "./FlowDetailRawMessage.js";
 import { FlowDetailSSEMessage } from "./FlowDetailSSEMessage.js";
 import { FlowDetailWSMessage } from "./FlowDetailWSMessage.js";
-import { Http2Badge, Http2Info, Http2StreamGroups } from "./Http2Info.js";
+import { HttpVersionMeta } from "./HttpVersionMeta.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,29 +33,6 @@ import { Http2Badge, Http2Info, Http2StreamGroups } from "./Http2Info.js";
 function shortId(id: string): string {
   if (!id) return "";
   return id.length > 8 ? id.slice(0, 8) : id;
-}
-
-/** Get the Badge variant for a protocol. */
-function protocolVariant(
-  protocol: string,
-): "default" | "success" | "warning" | "danger" | "info" {
-  switch (protocol) {
-    case "HTTP/1.x":
-      return "default";
-    case "HTTPS":
-      return "success";
-    case "WebSocket":
-      return "info";
-    case "HTTP/2":
-      return "info";
-    case "gRPC":
-    case "gRPC-Web":
-      return "warning";
-    case "TCP":
-      return "danger";
-    default:
-      return "default";
-  }
 }
 
 /** Get the CSS class for a status code. */
@@ -120,7 +98,7 @@ export function FlowDetailPage() {
   const { showDialog } = useDialog();
   const { manage, loading: executeLoading } = useManage();
 
-  // Messages pagination state (for streaming flows)
+  // Messages pagination state (for message-timeline protocols)
   const [messagesOffset, setMessagesOffset] = useState(0);
   const messagesLimit = 50;
 
@@ -135,7 +113,8 @@ export function FlowDetailPage() {
     enabled: !!id,
   });
 
-  // Fetch messages for streaming flows
+  // Fetch messages for every protocol that renders a message timeline
+  // (all but a single HTTP exchange).
   const {
     data: messagesData,
     loading: messagesLoading,
@@ -143,7 +122,7 @@ export function FlowDetailPage() {
     id: id ?? "",
     limit: messagesLimit,
     offset: messagesOffset,
-    enabled: !!id && !!flowData && isStreamingFlow(flowData),
+    enabled: !!id && needsMessagesQuery(flowData),
   });
 
   // Delete flow handler
@@ -263,7 +242,6 @@ export function FlowDetailPage() {
     );
   }
 
-  const streaming = isStreamingFlow(flowData);
   const messages: MessageEntry[] =
     messagesData?.messages ?? flowData.message_preview ?? [];
   const totalMessages = messagesData?.total ?? flowData.message_count ?? 0;
@@ -332,8 +310,8 @@ export function FlowDetailPage() {
             <Badge variant={protocolVariant(flowSafe.protocol ?? "")}>
               {flowSafe.protocol || "unknown"}
             </Badge>
-            {flowSafe.protocol === "HTTP/2" && <Http2Badge flow={flowSafe} />}
           </div>
+          <HttpVersionMeta flow={flowSafe} />
           {responseStatus > 0 && (
             <div className="sd-meta-item">
               <span className="sd-meta-label">Status</span>
@@ -383,10 +361,6 @@ export function FlowDetailPage() {
             <span className="sd-meta-value">
               {formatTimestamp(flowSafe.timestamp ?? "")}
             </span>
-          </div>
-          <div className="sd-meta-item">
-            <span className="sd-meta-label">Type</span>
-            <Badge variant="default">{flowSafe.flow_type || "unknown"}</Badge>
           </div>
           <div className="sd-meta-item">
             <span className="sd-meta-label">State</span>
@@ -460,9 +434,6 @@ export function FlowDetailPage() {
             </div>
           )}
 
-        {/* HTTP/2 specific info */}
-        {flowSafe.protocol === "HTTP/2" && <Http2Info flow={flowSafe} />}
-
         {/* Connection info */}
         {flowSafe.conn_info && (
           <div className="sd-conn-info">
@@ -502,13 +473,6 @@ export function FlowDetailPage() {
         )}
       </div>
 
-      {/* HTTP/2 Stream Grouping (for multi-stream message previews) */}
-      {flowSafe.protocol === "HTTP/2" && messages.length > 0 && (
-        <div className="sd-section">
-          <Http2StreamGroups messages={messages} />
-        </div>
-      )}
-
       {/* Per-protocol body dispatch */}
       {flowKind === "ws" && (
         <>
@@ -537,7 +501,6 @@ export function FlowDetailPage() {
             limit={messagesLimit}
             loading={messagesLoading}
             onPageChange={handleMessagesPageChange}
-            showMessageTimeline={streaming}
           />
           <FlowDetailHTTPMessage flow={flowSafe} />
         </>
@@ -567,7 +530,6 @@ export function FlowDetailPage() {
           limit={messagesLimit}
           loading={messagesLoading}
           onPageChange={handleMessagesPageChange}
-          showMessageTimeline={streaming}
         />
       )}
 

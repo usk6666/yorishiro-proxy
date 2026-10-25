@@ -1,0 +1,87 @@
+{
+  "conn_id": "conn-stream-sse",
+  "duration_ms": 0,
+  "http_version": "http/1.1",
+  "id": "stream-sse",
+  "message_count": 3,
+  "message_preview": [
+    {
+      "body": "GET /events HTTP/1.1\r\nHost: sse.example.com\r\nAccept: text/event-stream\r\n\r\n",
+      "body_encoding": "text",
+      "direction": "send",
+      "headers": {
+        "Accept": [
+          "text/event-stream"
+        ],
+        "Host": [
+          "sse.example.com"
+        ]
+      },
+      "id": "stream-sse-0",
+      "metadata": {
+        "protocol": "http"
+      },
+      "method": "GET",
+      "sequence": 0,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://sse.example.com/events"
+    },
+    {
+      "body": "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n",
+      "body_encoding": "text",
+      "direction": "receive",
+      "headers": {
+        "Content-Type": [
+          "text/event-stream"
+        ]
+      },
+      "id": "stream-sse-1",
+      "metadata": {
+        "protocol": "http"
+      },
+      "sequence": 1,
+      "status_code": 200,
+      "timestamp": "2026-01-01T00:00:00Z"
+    },
+    {
+      "body": "1",
+      "body_encoding": "text",
+      "direction": "receive",
+      "id": "stream-sse-2",
+      "metadata": {
+        "protocol": "sse",
+        "sse_event": "tick"
+      },
+      "sequence": 2,
+      "timestamp": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "method": "GET",
+  "protocol": "sse",
+  "raw_request": "R0VUIC9ldmVudHMgSFRUUC8xLjENCkhvc3Q6IHNzZS5leGFtcGxlLmNvbQ0KQWNjZXB0OiB0ZXh0L2V2ZW50LXN0cmVhbQ0KDQo=",
+  "raw_response": "SFRUUC8xLjEgMjAwIE9LDQpDb250ZW50LVR5cGU6IHRleHQvZXZlbnQtc3RyZWFtDQoNCg==",
+  "request_body": "",
+  "request_body_encoding": "text",
+  "request_body_truncated": false,
+  "request_headers": {
+    "Accept": [
+      "text/event-stream"
+    ],
+    "Host": [
+      "sse.example.com"
+    ]
+  },
+  "response_body": "",
+  "response_body_encoding": "text",
+  "response_body_truncated": false,
+  "response_headers": {
+    "Content-Type": [
+      "text/event-stream"
+    ]
+  },
+  "response_status_code": 200,
+  "scheme": "https",
+  "state": "complete",
+  "timestamp": "2026-01-01T00:00:00Z",
+  "url": "https://sse.example.com/events"
+}

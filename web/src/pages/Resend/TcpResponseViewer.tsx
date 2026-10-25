@@ -89,6 +89,7 @@ function DecodedView({ base64Data }: { base64Data: string }) {
     if (!base64Data) return "";
     try {
       const decoded = atob(base64Data);
+      // eslint-disable-next-line no-control-regex -- intentional: keep TAB/LF/CR, replace other non-printables with "." for display
       return decoded.replace(/[^\x09\x0A\x0D\x20-\x7E]/g, ".");
     } catch {
       return "(failed to decode base64)";

@@ -6,7 +6,8 @@
  * - HTML/XML: displayed as-is with syntax highlighting
  * - Binary (base64): hex dump display
  * - Images: inline preview for an allowlisted set of safe image MIME types
- *   (PNG/JPEG/GIF/WebP/AVIF). SVG is excluded — see PREVIEWABLE_IMAGE_TYPES.
+ *   (PNG/JPEG/GIF/WebP/AVIF). SVG is excluded — see PREVIEWABLE_IMAGE_TYPES
+ *   (bodyViewerHelpers.ts).
  *
  * When the server reports a Content-Encoding decode (gzip / br / deflate /
  * zstd) via `bodyEncodingApplied` (USK-731), an additional source toggle is
@@ -23,6 +24,12 @@ import { CodeViewer } from "../../components/ui/CodeViewer.js";
 import { decodeBase64, formatHexDump } from "../../lib/rawBytes.js";
 import type { DecodeAnomaly } from "../../lib/mcp/types.js";
 import "./FlowDetailPage.css";
+import {
+  anomalyLabel,
+  isPreviewableImage,
+  resolveBodySourceState,
+  type BodySource,
+} from "./bodyViewerHelpers.js";
 
 /** Cap on bytes shown in the hex-dump preview (4 KB). */
 const HEX_DUMP_MAX_BYTES = 4096;
@@ -50,16 +57,6 @@ export interface BodyViewerProps {
 }
 
 type ViewMode = "raw" | "pretty" | "hex" | "preview";
-export type BodySource = "decoded" | "original";
-
-export interface BodySourceState {
-  /** Whether the source toggle should be shown at all. */
-  showToggle: boolean;
-  /** Whether the "Decoded" toggle button should be selectable. */
-  decodedAvailable: boolean;
-  /** Default source to select on first render. */
-  defaultSource: BodySource;
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -92,34 +89,6 @@ function isXmlContentType(ct: string): boolean {
   return ct.includes("text/xml") || ct.includes("application/xml") || ct.includes("+xml");
 }
 
-/**
- * MIME types that are safe to render via `<img src="data:...">`.
- *
- * `image/svg+xml` is intentionally excluded: SVG can carry inline `<script>`
- * which executes in the `data:` origin, and the WebUI renders attacker-
- * controlled MITM-observed bodies. With no CSP yet (USK-743), this allowlist
- * is the sole barrier against SVG-based XSS through the body preview.
- */
-const PREVIEWABLE_IMAGE_TYPES = new Set<string>([
-  "image/png",
-  "image/jpeg",
-  "image/jpg",
-  "image/gif",
-  "image/webp",
-  "image/avif",
-]);
-
-/**
- * Check if Content-Type is an image format that is safe to inline as a
- * `data:` URL. Strips parameters (e.g. `; charset=...`), trims whitespace,
- * and lowercases the main type before matching against `PREVIEWABLE_IMAGE_TYPES`.
- */
-export function isPreviewableImage(ct: string | null | undefined): boolean {
-  if (!ct) return false;
-  const main = ct.split(";")[0].trim().toLowerCase();
-  return PREVIEWABLE_IMAGE_TYPES.has(main);
-}
-
 /** Try to pretty-print JSON. Returns null if not valid JSON. */
 function tryPrettyJson(body: string): string | null {
   try {
@@ -142,52 +111,6 @@ function hexDump(base64: string): string {
   const bytes = decodeBase64(base64);
   if (bytes.length === 0) return "(Failed to decode base64 content)";
   return formatHexDump(bytes, HEX_DUMP_MAX_BYTES);
-}
-
-/**
- * Resolve which body source toggle state should be shown for a body.
- *
- * - If a codec was applied AND a decoded body is present, the toggle is
- *   shown and "decoded" is the default (this is the user's main reason for
- *   visiting the panel: read the body content).
- * - If decode was attempted but produced an anomaly, the toggle is still
- *   shown (so the operator can see the warning + Original) but the Decoded
- *   button is disabled.
- * - If neither happened (no Content-Encoding, identity, or server-side decode
- *   disabled), the toggle is hidden and the original body is shown — exactly
- *   the pre-USK-738 behavior.
- */
-export function resolveBodySourceState(
-  bodyDecoded: string | undefined,
-  bodyEncodingApplied: string | undefined,
-  bodyDecodeAnomaly: DecodeAnomaly | undefined,
-): BodySourceState {
-  const decodedAvailable =
-    !!bodyEncodingApplied && bodyEncodingApplied !== "" && !!bodyDecoded && bodyDecoded.length > 0;
-  const showToggle = decodedAvailable || !!bodyDecodeAnomaly;
-  return {
-    showToggle,
-    decodedAvailable,
-    defaultSource: decodedAvailable ? "decoded" : "original",
-  };
-}
-
-/** Render-friendly label for an anomaly type. */
-export function anomalyLabel(type: string): string {
-  switch (type) {
-    case "unknown_encoding":
-      return "Unknown Content-Encoding";
-    case "malformed":
-      return "Malformed compressed body";
-    case "size_exceeded":
-      return "Decoded body exceeds size cap";
-    case "chain_rejected":
-      return "Chained Content-Encoding not supported";
-    case "truncated_decode":
-      return "Body was truncated at storage time";
-    default:
-      return type;
-  }
 }
 
 // ---------------------------------------------------------------------------

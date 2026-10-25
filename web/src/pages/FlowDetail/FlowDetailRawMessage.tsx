@@ -21,8 +21,6 @@ export interface FlowDetailRawMessageProps {
   limit: number;
   loading: boolean;
   onPageChange: (offset: number) => void;
-  /** When false, the per-message timeline is hidden (only raw bytes are shown). */
-  showMessageTimeline: boolean;
 }
 
 export function FlowDetailRawMessage({
@@ -33,27 +31,24 @@ export function FlowDetailRawMessage({
   limit,
   loading,
   onPageChange,
-  showMessageTimeline,
 }: FlowDetailRawMessageProps) {
   const hasRawReq = !!flow.raw_request;
   const hasRawResp = !!flow.raw_response;
 
   return (
     <>
-      {showMessageTimeline && (
-        <div className="sd-section">
-          <h2 className="sd-section-title">Messages</h2>
-          <MessageList
-            messages={messages ?? []}
-            total={total ?? 0}
-            offset={offset}
-            limit={limit}
-            loading={loading}
-            onPageChange={onPageChange}
-            protocol={flow.protocol}
-          />
-        </div>
-      )}
+      <div className="sd-section">
+        <h2 className="sd-section-title">Messages</h2>
+        <MessageList
+          messages={messages ?? []}
+          total={total ?? 0}
+          offset={offset}
+          limit={limit}
+          loading={loading}
+          onPageChange={onPageChange}
+          protocol={flow.protocol}
+        />
+      </div>
 
       <div className="sd-panels">
         <div className="sd-panel">

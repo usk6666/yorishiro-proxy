@@ -233,6 +233,8 @@ make build
 make test
 ```
 
+If `web/` changed, also run `make test-ui` and `make lint-ui` (eslint, `--max-warnings 0`).
+
 - Auto-format with `gofmt -w .`
 - `make lint` runs a `gofmt -l .` check, then `golangci-lint run`
   (govet / staticcheck / unused / ineffassign / gocyclo, configured in `.golangci.yml`)
@@ -307,6 +309,7 @@ Confirm the following before completing implementation:
 - [ ] `make lint` passes completely (gofmt check + golangci-lint: govet, staticcheck, unused, ineffassign, gocyclo)
 - [ ] `make build` succeeds
 - [ ] `make test` passes completely
+- [ ] If `web/` changed: `make test-ui` and `make lint-ui` pass
 - [ ] Commit message is in Conventional Commits format
 - [ ] PR is created with an appropriate description
 - [ ] No unnecessary files included (debug output, temp files)

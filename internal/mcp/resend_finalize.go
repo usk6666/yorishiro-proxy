@@ -14,15 +14,36 @@
 // after runResend* returns. It mirrors the OnComplete contract used by
 // proxybuild.buildSessionOptions:
 //
-//   - nil err  → State="complete", FailureReason untouched
-//   - err != nil → State="error",   FailureReason = session.ClassifyError(err)
+//   - nil err  → State="complete", FailureReason untouched, no tags["error"]
+//   - err != nil → State="error",   FailureReason = session.ClassifyError(err),
+//     tags["error"] = flow.TruncateErrorTag(err.Error()) merged via
+//     AppendTags so tags written earlier (RecordStep etc.) survive
+//     (USK-1350; same text and 1 KiB cap as the proxy path)
 //
 // session.ClassifyError extracts the *layer.StreamError code when the
 // failure carries one (typed RST_STREAM-class errors); other failure
 // shapes — dial errors, context cancellations, parse errors — surface as
 // FailureReason="" exactly as they do on the proxy path. The empty
 // FailureReason is a deliberate "we don't know — see logs" rather than a
-// best-effort string we'd have to maintain in two places.
+// best-effort string we'd have to maintain in two places; the full
+// message lives in tags["error"].
+//
+// Deliberate divergences from the proxy-path OnComplete predicate
+// (USK-1350):
+//
+//   - No io.EOF / session.ErrClientGoneAcked → "complete" carve-out.
+//     ErrClientGoneAcked is only produced inside session.RunSession, which
+//     no resend / fuzz runner calls. An io.EOF after a successful exchange
+//     never reaches this function: the raw / gRPC receive loops convert it
+//     to nil, and the HTTP / WS runners return on the final response. The
+//     only EOF that does arrive is wrapped ("upstream receive: EOF", e.g.
+//     resend_ws when the upstream closes before replying; the HTTP/1.x
+//     layer reclassifies the same close as an aborted StreamError) and
+//     marks a genuine pre-response failure for which the tool returns
+//     IsError — copying the live predicate would record it as "complete".
+//   - errBudgetExhausted is tagged like any other error. The live path
+//     skips OnComplete for budget-blocked Streams; here the blocked audit
+//     Stream additionally receives tags["error"] next to its blocked_by.
 package mcp
 
 import (
@@ -73,6 +94,15 @@ func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID
 		State:         state,
 		FailureReason: failureReason,
 		Duration:      flow.StreamElapsed(ctx, reader, streamID),
+	}
+	// USK-1350: keep the error text on the Stream like the proxy path's
+	// OnComplete does, so `query flows` shows why the resend / fuzz
+	// Stream failed. AppendTags merges rather than replaces, preserving
+	// tags RecordStep and friends wrote earlier.
+	if runErr != nil {
+		update.AppendTags = map[string]string{
+			"error": flow.TruncateErrorTag(runErr.Error()),
+		}
 	}
 	if err := store.UpdateStream(ctx, streamID, update); err != nil {
 		slog.WarnContext(ctx, "resend: stream finalize update failed",

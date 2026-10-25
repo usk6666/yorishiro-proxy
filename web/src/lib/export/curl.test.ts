@@ -13,7 +13,6 @@ function makeFlow(
     id: "test-id",
     conn_id: "conn-1",
     protocol: "http",
-    flow_type: "http",
     state: "complete",
     method: "GET",
     url: "http://example.com/",
@@ -246,7 +245,8 @@ describe("generateCurl", () => {
   it("filters HTTP/2 request pseudo-headers", () => {
     const result = generateCurl(
       makeFlow({
-        protocol: "HTTP/2",
+        protocol: "http",
+        http_version: "h2",
         method: "GET",
         url: "https://example.com/api",
         request_headers: {
@@ -270,7 +270,8 @@ describe("generateCurl", () => {
   it("filters HTTP/2 pseudo-headers regardless of casing", () => {
     const result = generateCurl(
       makeFlow({
-        protocol: "HTTP/2",
+        protocol: "http",
+        http_version: "h2",
         method: "POST",
         url: "https://example.com/upload",
         request_body: "hello",
@@ -289,7 +290,8 @@ describe("generateCurl", () => {
   it("preserves the method and URL when pseudo-headers are present", () => {
     const result = generateCurl(
       makeFlow({
-        protocol: "HTTP/2",
+        protocol: "http",
+        http_version: "h2",
         method: "DELETE",
         url: "https://example.com/items/42",
         request_headers: {

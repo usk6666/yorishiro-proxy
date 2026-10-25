@@ -2,14 +2,21 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
-import { useDialog } from "../../components/ui/Dialog.js";
+import { useDialog } from "../../components/ui/dialogContext.js";
 import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useToast } from "../../components/ui/toastContext.js";
 import { buildHarFromList, downloadHar } from "../../lib/export/har.js";
 import { useManage, useQuery } from "../../lib/mcp/hooks.js";
+import {
+  HTTP_VERSION_FILTER_VALUES,
+  PROTOCOL_FILTER_VALUES,
+  SCHEME_FILTER_VALUES,
+} from "../../lib/mcp/protocols.js";
 import type { FlowEntry, ManageImportFlowsResult, QueryFilter } from "../../lib/mcp/types.js";
+import { FlowProtocolCell } from "./FlowProtocolCell.js";
+import { buildFlowsFilter } from "./flowsFilter.js";
 import "./FlowsPage.css";
 
 // ---------------------------------------------------------------------------
@@ -29,10 +36,8 @@ function useDebounce<T>(value: T, delay: number): T {
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "gRPC-Web", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"] as const;
 const METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] as const;
 const FLOW_STATES = ["active", "complete", "error"] as const;
-const SCHEMES = ["https", "http", "wss", "ws", "tcp"] as const;
 const BLOCKED_BY = ["target_scope", "intercept_drop", "intercept_cancelled", "rate_limit", "safety_filter", "budget", "capacity"] as const;
 const PAGE_SIZES = [25, 50, 100] as const;
 const POLL_INTERVALS = [
@@ -59,31 +64,6 @@ function statusCodeClass(code: number): string {
   if (code >= 400 && code < 500) return "status-code--4xx";
   if (code >= 500 && code < 600) return "status-code--5xx";
   return "status-code--other";
-}
-
-/** Get the Badge variant for a protocol. */
-function protocolVariant(protocol: string): "default" | "success" | "warning" | "danger" | "info" {
-  switch (protocol) {
-    case "HTTP/1.x":
-      return "default";
-    case "HTTPS":
-      return "success";
-    case "WebSocket":
-      return "info";
-    case "HTTP/2":
-      return "info";
-    case "gRPC":
-    case "gRPC-Web":
-      return "warning";
-    case "TCP":
-      return "danger";
-    case "SOCKS5+HTTPS":
-      return "success";
-    case "SOCKS5+HTTP":
-      return "default";
-    default:
-      return "default";
-  }
 }
 
 /** Format duration in milliseconds to a human-readable string. */
@@ -141,11 +121,11 @@ export function FlowsPage() {
   // --- Filter state ---
   const [showFilters, setShowFilters] = useState(false);
   const [selectedProtocol, setSelectedProtocol] = useState<string>("");
+  const [selectedHttpVersion, setSelectedHttpVersion] = useState<string>("");
   const [selectedMethod, setSelectedMethod] = useState<string>("");
   const [statusCodeRange, setStatusCodeRange] = useState<string>("");
   const [urlPattern, setUrlPattern] = useState<string>("");
   const [selectedState, setSelectedState] = useState<string>("");
-  const [bodyContains, setBodyContains] = useState<string>("");
   const [tagFilter, setTagFilter] = useState<string>("");
   const [selectedScheme, setSelectedScheme] = useState<string>("");
   const [selectedBlockedBy, setSelectedBlockedBy] = useState<string>("");
@@ -153,7 +133,6 @@ export function FlowsPage() {
 
   // Debounce text inputs to avoid firing expensive queries on every keystroke
   const debouncedUrlPattern = useDebounce(urlPattern, 300);
-  const debouncedBodyContains = useDebounce(bodyContains, 300);
   const debouncedTagFilter = useDebounce(tagFilter, 300);
   const debouncedHostFilter = useDebounce(hostFilter, 300);
 
@@ -177,44 +156,22 @@ export function FlowsPage() {
   const [importResult, setImportResult] = useState<ManageImportFlowsResult | null>(null);
 
   // --- Build query filter ---
-  const filter = useMemo<QueryFilter | undefined>(() => {
-    const f: QueryFilter = {};
-    // Protocol filter: query tool accepts a single protocol string
-    if (selectedProtocol) {
-      f.protocol = selectedProtocol;
-    }
-    if (selectedScheme) {
-      f.scheme = selectedScheme;
-    }
-    if (selectedMethod) {
-      f.method = selectedMethod;
-    }
-    if (debouncedUrlPattern.trim()) {
-      f.url_pattern = debouncedUrlPattern.trim();
-    }
-    if (statusCodeRange) {
-      const code = parseInt(statusCodeRange, 10);
-      if (!isNaN(code)) {
-        f.status_code = code;
-      }
-    }
-    if (selectedBlockedBy) {
-      f.blocked_by = selectedBlockedBy;
-    }
-    if (selectedState) {
-      f.state = selectedState;
-    }
-    if (debouncedHostFilter.trim()) {
-      f.host = debouncedHostFilter.trim();
-    }
-    if (debouncedBodyContains.trim()) {
-      f.body_contains = debouncedBodyContains.trim();
-    }
-    if (debouncedTagFilter.trim()) {
-      f.tag = debouncedTagFilter.trim();
-    }
-    return Object.keys(f).length > 0 ? f : undefined;
-  }, [selectedProtocol, selectedScheme, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedBlockedBy, selectedState, debouncedHostFilter, debouncedBodyContains, debouncedTagFilter]);
+  const filter = useMemo<QueryFilter | undefined>(
+    () =>
+      buildFlowsFilter({
+        protocol: selectedProtocol,
+        httpVersion: selectedHttpVersion,
+        scheme: selectedScheme,
+        method: selectedMethod,
+        urlPattern: debouncedUrlPattern,
+        statusCode: statusCodeRange,
+        blockedBy: selectedBlockedBy,
+        state: selectedState,
+        host: debouncedHostFilter,
+        tag: debouncedTagFilter,
+      }),
+    [selectedProtocol, selectedHttpVersion, selectedScheme, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedBlockedBy, selectedState, debouncedHostFilter, debouncedTagFilter],
+  );
 
   // --- Query flows ---
   const { data, loading, error, refetch } = useQuery("flows", {
@@ -225,7 +182,7 @@ export function FlowsPage() {
     offset,
   });
 
-  const flows = data?.flows ?? [];
+  const flows = useMemo(() => data?.flows ?? [], [data?.flows]);
   const total = data?.total ?? 0;
 
   // Reset offset and selection on any filter change. Called synchronously
@@ -242,6 +199,15 @@ export function FlowsPage() {
   const selectProtocol = useCallback(
     (protocol: string) => {
       setSelectedProtocol(protocol);
+      handleFilterChange();
+    },
+    [handleFilterChange],
+  );
+
+  // --- HTTP version select ---
+  const handleHttpVersionChange = useCallback(
+    (e: React.ChangeEvent<HTMLSelectElement>) => {
+      setSelectedHttpVersion(e.target.value);
       handleFilterChange();
     },
     [handleFilterChange],
@@ -305,15 +271,6 @@ export function FlowsPage() {
   const handleUrlChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setUrlPattern(e.target.value);
-      handleFilterChange();
-    },
-    [handleFilterChange],
-  );
-
-  // --- Body contains (debounced query, immediate offset reset) ---
-  const handleBodyContainsChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      setBodyContains(e.target.value);
       handleFilterChange();
     },
     [handleFilterChange],
@@ -590,7 +547,7 @@ export function FlowsPage() {
                 />
                 All
               </label>
-              {PROTOCOLS.map((proto) => (
+              {PROTOCOL_FILTER_VALUES.map((proto) => (
                 <label key={proto} className="flows-filter-checkbox">
                   <input
                     type="radio"
@@ -602,6 +559,22 @@ export function FlowsPage() {
                 </label>
               ))}
             </div>
+          </div>
+
+          <div className="flows-filter-group">
+            <span className="flows-filter-label">HTTP Version</span>
+            <select
+              className="flows-filter-select"
+              value={selectedHttpVersion}
+              onChange={handleHttpVersionChange}
+            >
+              <option value="">All</option>
+              {HTTP_VERSION_FILTER_VALUES.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="flows-filter-group">
@@ -659,7 +632,7 @@ export function FlowsPage() {
               onChange={handleSchemeChange}
             >
               <option value="">All</option>
-              {SCHEMES.map((s) => (
+              {SCHEME_FILTER_VALUES.map((s) => (
                 <option key={s} value={s}>
                   {s}
                 </option>
@@ -702,18 +675,9 @@ export function FlowsPage() {
           </div>
 
           <div className="flows-filter-group flows-text-filter">
-            <span className="flows-filter-label">Body Contains</span>
-            <Input
-              placeholder="Search response body..."
-              value={bodyContains}
-              onChange={handleBodyContainsChange}
-            />
-          </div>
-
-          <div className="flows-filter-group flows-text-filter">
             <span className="flows-filter-label">Tag</span>
             <Input
-              placeholder="Filter by tag..."
+              placeholder="resend/fuzz tag (exact)"
               value={tagFilter}
               onChange={handleTagFilterChange}
             />
@@ -832,12 +796,7 @@ export function FlowsPage() {
                     </td>
                     <td className="flows-cell-id">{shortId(flow.id)}</td>
                     <td>
-                      <Badge variant={protocolVariant(flow.protocol)}>
-                        {flow.protocol}
-                      </Badge>
-                      {flow.tags?.streaming_type === "sse" && (
-                        <Badge variant="warning">SSE</Badge>
-                      )}
+                      <FlowProtocolCell flow={flow} />
                     </td>
                     <td>
                       <Badge variant={stateVariant(flow.state)}>

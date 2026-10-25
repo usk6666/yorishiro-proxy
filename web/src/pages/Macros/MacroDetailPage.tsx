@@ -6,7 +6,7 @@ import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
 import { Tabs } from "../../components/ui/Tabs.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useToast } from "../../components/ui/toastContext.js";
 import { useMacro, useQuery } from "../../lib/mcp/hooks.js";
 import type {
   ExtractionFrom,

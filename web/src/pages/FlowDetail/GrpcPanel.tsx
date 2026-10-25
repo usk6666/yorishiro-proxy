@@ -12,6 +12,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { Badge } from "../../components/ui/Badge.js";
 import { firstGrpcDataMessage } from "../../lib/grpcPayload.js";
+import { isGrpcWebProtocol } from "../../lib/mcp/dispatch.js";
 import type { FlowDetailResult, MessageEntry } from "../../lib/mcp/types.js";
 import "./FlowDetailPage.css";
 
@@ -72,36 +73,6 @@ function grpcStatusVariant(
       return "info";
     default:
       return "danger";
-  }
-}
-
-/** Human-readable label for gRPC streaming type. */
-function streamTypeLabel(flowType: string): string {
-  switch (flowType) {
-    case "unary":
-      return "Unary";
-    case "stream":
-      return "Streaming";
-    case "bidirectional":
-      return "Bidi Streaming";
-    default:
-      return flowType;
-  }
-}
-
-/** Badge variant for streaming type. */
-function streamTypeBadgeVariant(
-  flowType: string,
-): "default" | "success" | "warning" | "danger" | "info" {
-  switch (flowType) {
-    case "unary":
-      return "default";
-    case "stream":
-      return "info";
-    case "bidirectional":
-      return "warning";
-    default:
-      return "default";
   }
 }
 
@@ -422,7 +393,7 @@ export function GrpcPanel({ flow, messages }: GrpcPanelProps) {
   const method = summary.method ?? "";
   const grpcStatus = summary.grpc_status ?? "";
   const grpcStatusName = summary.grpc_status_name ?? "";
-  const isGrpcWeb = flow.protocol === "grpc-web" || flow.protocol === "gRPC-Web";
+  const isGrpcWeb = isGrpcWebProtocol(flow.protocol);
   const panelTitle = isGrpcWeb ? "gRPC-Web Details" : "gRPC Details";
 
   return (
@@ -435,16 +406,9 @@ export function GrpcPanel({ flow, messages }: GrpcPanelProps) {
           {/* Service / Method */}
           <ServiceMethodDisplay service={service} method={method} />
 
-          {/* Status + Stream Type badges row */}
+          {/* Status badges row. No unary/streaming badge: the recording
+              cannot know RPC cardinality without the proto schema. */}
           <div className="sd-grpc-badges">
-            {/* Stream Type badge */}
-            <div className="sd-meta-item">
-              <span className="sd-meta-label">Stream Type</span>
-              <Badge variant={streamTypeBadgeVariant(flow.flow_type)}>
-                {streamTypeLabel(flow.flow_type)}
-              </Badge>
-            </div>
-
             {/* gRPC Status */}
             {grpcStatus && (
               <div className="sd-meta-item">

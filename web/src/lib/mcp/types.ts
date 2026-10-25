@@ -368,6 +368,8 @@ export type QueryResource =
 export interface QueryFilter {
   protocol?: string;
   scheme?: string;
+  /** Wire HTTP version filter: "http/1.0" | "http/1.1" | "h2" | "h2c". */
+  http_version?: string;
   method?: string;
   url_pattern?: string;
   status_code?: number;
@@ -430,7 +432,12 @@ export interface FlowEntry {
   id: string;
   protocol: string;
   scheme?: string;
-  flow_type: string;
+  /**
+   * Wire HTTP version of the head message ("http/1.1", "h2", "h2c", ...),
+   * identical to `query resource=flow`'s. Absent for non-HTTP streams and
+   * rows predating the field.
+   */
+  http_version?: string;
   state: string;
   /** Name of the listener that accepted the connection (proxy_start name). */
   listener_name?: string;
@@ -541,7 +548,14 @@ export interface FlowDetailResult {
   conn_id: string;
   protocol: string;
   scheme?: string;
-  flow_type: string;
+  /**
+   * Wire-observed HTTP version of the request (or, failing that, response)
+   * flow: "http/1.0" | "http/1.1" | "h2" | "h2c". Empty / absent for
+   * non-HTTP streams and for rows recorded before the field existed.
+   * HTTP/2 streams report `protocol: "http"`; this is the only field that
+   * distinguishes them from HTTP/1.x.
+   */
+  http_version?: string;
   state: string;
   /** Name of the listener that accepted the connection (proxy_start name). */
   listener_name?: string;
@@ -728,53 +742,11 @@ export interface CACertResult {
   install_hint?: string;
 }
 
-// ---------------------------------------------------------------------------
-// Per-protocol Message-typed flow shapes (light-touch discriminated union).
-//
-// These types layer over the existing FlowDetailResult wire shape for callers
-// that want to narrow on `flow.protocol`. The MCP wire format is unchanged;
-// these types provide compile-time discrimination and explicit field maps for
-// per-protocol UI components.
-// ---------------------------------------------------------------------------
-
 /** Ordered header pair preserving wire case/order/duplicates. */
 export interface HeaderKV {
   name: string;
   value: string;
 }
-
-/** HTTP/1.x or HTTP/2 (and HTTPS) Message-typed flow shape. */
-export interface HTTPMessageFlow extends FlowDetailResult {
-  protocol: "HTTP/1.x" | "HTTP/2" | "HTTPS";
-}
-
-/** WebSocket Message-typed flow shape. */
-export interface WSMessageFlow extends FlowDetailResult {
-  protocol: "WebSocket";
-}
-
-/** gRPC / gRPC-Web Message-typed flow shape (covers Start / Data / End frames). */
-export interface GRPCMessageFlow extends FlowDetailResult {
-  protocol: "gRPC" | "gRPC-Web";
-}
-
-/** SSE (Server-Sent Events) Message-typed flow shape. */
-export interface SSEMessageFlow extends FlowDetailResult {
-  protocol: "SSE";
-}
-
-/** Raw / TCP Message-typed flow shape. */
-export interface RawMessageFlow extends FlowDetailResult {
-  protocol: "TCP" | "Raw";
-}
-
-/** Discriminated Message-typed flow union. */
-export type MessageFlow =
-  | HTTPMessageFlow
-  | WSMessageFlow
-  | GRPCMessageFlow
-  | SSEMessageFlow
-  | RawMessageFlow;
 
 /**
  * `protocol` of an intercept queue entry: names which per-Message-type view

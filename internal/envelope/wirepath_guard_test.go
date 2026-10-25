@@ -65,7 +65,7 @@ var wireURLGuardRules = []wireURLGuardRule{
 		dirs: []string{
 			"internal/mcp/", "internal/job/", "internal/connector/",
 			"internal/flow/", "internal/pipeline/", "internal/session/",
-			"internal/rules/", "internal/macro/", "internal/fuzzer/",
+			"internal/rules/", "internal/macro/",
 		},
 		allow: []string{
 			// net/http server request in the Web UI handler.

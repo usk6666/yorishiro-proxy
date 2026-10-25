@@ -19,7 +19,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 # `make clean` still works when the file is broken.
 GOLANGCI_LINT_VERSION := $(shell cat .golangci-lint-version 2>/dev/null)
 
-.PHONY: build build-ui ensure-ui dev-ui test test-fast test-pkg test-depsec test-ui test-e2e test-e2e-smoke test-cover vet lint lint-workflows fmt clean bench bench-compare
+.PHONY: build build-ui ensure-ui dev-ui test test-fast test-pkg test-depsec test-ui lint-ui test-e2e test-e2e-smoke test-cover vet lint lint-workflows fmt clean bench bench-compare
 
 build: build-ui vet
 	go build -ldflags "$(LDFLAGS)" -o $(BINDIR)/$(BINARY) ./cmd/yorishiro-proxy
@@ -35,6 +35,12 @@ dev-ui:
 
 test-ui:
 	cd web && pnpm install --frozen-lockfile && pnpm test
+
+# lint-ui runs eslint over web/. The --max-warnings 0 gate lives in
+# web/package.json's "lint" script so a local `pnpm run lint` and CI agree.
+# `make lint` stays Go-only.
+lint-ui:
+	cd web && pnpm install --frozen-lockfile && pnpm run lint
 
 # test runs the fast tier: untagged unit tests only. Used as the per-PR gate.
 test: ensure-ui
