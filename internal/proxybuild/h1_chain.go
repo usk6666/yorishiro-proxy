@@ -50,6 +50,10 @@ type h1Chain struct {
 	// upstream.TLS.
 	upstream connector.UpstreamTarget
 
+	// shape is how the stack's first upstream TLS connection was dialed
+	// (connector.UpstreamTLSShapeOf); every redial dials the same way.
+	shape connector.UpstreamTLSShape
+
 	// logger is used for stale-detect / redial-success / redial-failure
 	// observability per CLAUDE.md Log Level Guidelines. Debug for normal
 	// detect/success, Warn for dial failures (matches h2's
@@ -73,12 +77,14 @@ type h1Chain struct {
 
 // newH1Chain wraps the initial upstream Layer (the one constructed at
 // CONNECT-time by buildStackFromRoute) so subsequent dial-time stale checks
-// can redial transparently. logger and metrics are USK-1000 plumbing
+// can redial transparently. shape is the stack's first-dial TLS shape
+// (connector.UpstreamTLSShapeOf), reproduced by every redial. logger and metrics are USK-1000 plumbing
 // (see h1UpstreamMetrics); both may be nil — the chain operates
 // identically minus the observability emit.
 func newH1Chain(
 	initial *http1.Layer,
 	upstream connector.UpstreamTarget,
+	shape connector.UpstreamTLSShape,
 	cfg *connector.BuildConfig,
 	logger *slog.Logger,
 	metrics *H1UpstreamMetrics,
@@ -89,6 +95,7 @@ func newH1Chain(
 		target:   upstream.Dial,
 		cfg:      cfg,
 		upstream: upstream,
+		shape:    shape,
 		logger:   logger,
 		metrics:  metrics,
 	}
@@ -121,7 +128,7 @@ func (c *h1Chain) EnsureFresh(ctx context.Context) (*http1.Layer, error) {
 		c.logger.Debug("proxybuild: http1 stale detected, redialing",
 			"target", c.target, "trigger", "healthcheck", "generation", len(c.layers))
 	}
-	fresh, err := connector.RedialUpstreamH1(ctx, c.upstream, c.current, c.cfg, len(c.layers))
+	fresh, err := connector.RedialUpstreamH1(ctx, c.upstream, c.shape, c.current, c.cfg, len(c.layers))
 	if err != nil {
 		c.metrics.incRedialFailedHealthcheck()
 		if c.logger != nil {
@@ -168,7 +175,7 @@ func (c *h1Chain) EnsureFresh(ctx context.Context) (*http1.Layer, error) {
 func (c *h1Chain) Redial(ctx context.Context) (*http1.Layer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	fresh, err := connector.RedialUpstreamH1(ctx, c.upstream, c.current, c.cfg, len(c.layers))
+	fresh, err := connector.RedialUpstreamH1(ctx, c.upstream, c.shape, c.current, c.cfg, len(c.layers))
 	if err != nil {
 		c.metrics.incRedialFailedWriteEpipe()
 		if c.logger != nil {

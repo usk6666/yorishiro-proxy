@@ -285,13 +285,7 @@ func buildTransparentNoALPNStack(
 	}
 	connID := uuid.New().String()
 
-	// Standard crypto/tls, not the configured uTLS profile: a uTLS
-	// profile's ClientHello carries its own ALPN offer (Firefox:
-	// [h2 http/1.1]), which tlslayer replaces only with a non-empty offer.
-	// Offering nothing therefore needs a ClientHello without the ALPN
-	// extension — at the cost of tls_fingerprint on this leg only.
-	upstreamConn, upstreamSnap, err := dialUpstreamTLS(ctx, ut.Dial, host,
-		nil, "", hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
+	upstreamConn, upstreamSnap, err := dialUpstreamStandardNoALPN(ctx, ut, host, hostTLS, cfg)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -314,5 +308,25 @@ func buildTransparentNoALPNStack(
 		return nil, nil, nil, err
 	}
 	stack.setUpstreamTarget(ut)
+	// An h1 redial (RedialUpstreamH1) must dial this leg the same way.
+	stack.setUpstreamTLSShape(UpstreamTLSStandardNoALPN)
 	return stack, clientSnap, upstreamSnap, nil
+}
+
+// dialUpstreamStandardNoALPN dials ut.Dial with Go's standard crypto/tls
+// and no ALPN extension, under SNI host — the UpstreamTLSStandardNoALPN
+// shape, shared by buildTransparentNoALPNStack and the h1 redial so the two
+// cannot drift.
+//
+// Standard crypto/tls, not the configured uTLS profile: a uTLS profile's
+// ClientHello carries its own ALPN offer (Firefox: [h2 http/1.1]), which
+// tlslayer replaces only with a non-empty offer. Offering nothing therefore
+// needs a ClientHello without the ALPN extension — at the cost of
+// tls_fingerprint on this leg only.
+//
+// ctx is used as given (plus the dial target), so a socket hook the caller
+// attached (the transparent listener's own-dial tracking) sees the socket.
+func dialUpstreamStandardNoALPN(ctx context.Context, ut UpstreamTarget, host string, hostTLS *resolvedTLS, cfg *BuildConfig) (net.Conn, *envelope.TLSSnapshot, error) {
+	return dialUpstreamTLS(ContextWithDialTarget(ctx, ut.Dial), ut.Dial, host,
+		nil, "", hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
 }

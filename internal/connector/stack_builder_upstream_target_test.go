@@ -33,7 +33,14 @@ type sniRecordingUpstream struct {
 
 	mu      sync.Mutex
 	snis    []string
+	hellos  []recordedHello
 	accepts int
+}
+
+// recordedHello is the ALPN offer and supported_groups of one ClientHello.
+type recordedHello struct {
+	protos []string
+	curves []tls.CurveID
 }
 
 // startSNIRecordingUpstream starts the upstream. nextProtos is its ALPN
@@ -53,6 +60,10 @@ func startSNIRecordingUpstream(t *testing.T, nextProtos []string) *sniRecordingU
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			u.mu.Lock()
 			u.snis = append(u.snis, hello.ServerName)
+			u.hellos = append(u.hellos, recordedHello{
+				protos: slices.Clone(hello.SupportedProtos),
+				curves: slices.Clone(hello.SupportedCurves),
+			})
 			u.mu.Unlock()
 			return nil, nil
 		},
@@ -127,6 +138,12 @@ func (u *sniRecordingUpstream) recordedSNIs() []string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return slices.Clone(u.snis)
+}
+
+func (u *sniRecordingUpstream) recordedHellos() []recordedHello {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return slices.Clone(u.hellos)
 }
 
 func (u *sniRecordingUpstream) acceptCount() int {
@@ -628,7 +645,7 @@ func TestRedialUpstream_UpstreamTargetSplit(t *testing.T) {
 		if !ok {
 			t.Fatalf("UpstreamTopmost = %T, want *http1.Layer", got.stack.UpstreamTopmost())
 		}
-		fresh, err := RedialUpstreamH1(context.Background(), UpstreamTargetOf(got.stack, ut.Dial), stale, cfg, 1)
+		fresh, err := RedialUpstreamH1(context.Background(), UpstreamTargetOf(got.stack, ut.Dial), UpstreamTLSShapeOf(got.stack), stale, cfg, 1)
 		if err != nil {
 			t.Fatalf("RedialUpstreamH1: %v", err)
 		}

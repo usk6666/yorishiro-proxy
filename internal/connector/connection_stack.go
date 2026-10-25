@@ -65,7 +65,30 @@ type ConnectionStack struct {
 	// hasUpstreamTarget distinguishes "not set" from a zero value.
 	upstreamTarget    UpstreamTarget
 	hasUpstreamTarget bool
+
+	// upstreamTLSShape is how the stack's first upstream TLS connection
+	// was dialed, so an h1 redial can dial the same way. Zero value
+	// (UpstreamTLSProfiled) unless a builder set it.
+	upstreamTLSShape UpstreamTLSShape
 }
+
+// UpstreamTLSShape is how a stack's upstream TLS ClientHello was built — a
+// build-produced fact an HTTP/1 redial (RedialUpstreamH1) reproduces so
+// the redialed connection keeps the first one's shape.
+type UpstreamTLSShape int
+
+const (
+	// UpstreamTLSProfiled is the zero value and today's redial: the
+	// configured uTLS profile (tls_fingerprint) offering [http/1.1].
+	// CONNECT / SOCKS5 and ALPN-carrying transparent stacks use it.
+	UpstreamTLSProfiled UpstreamTLSShape = iota
+
+	// UpstreamTLSStandardNoALPN is Go's standard crypto/tls with no ALPN
+	// extension — the transparent no-ALPN MITM leg
+	// (buildTransparentNoALPNStack). A uTLS profile would inject its own
+	// ALPN offer, so this shape cannot carry tls_fingerprint.
+	UpstreamTLSStandardNoALPN
+)
 
 // sideSubStack pairs the stream-scoped client and upstream Layer overlays
 // installed by a per-stream upgrade. The pair is closed together when the
@@ -344,6 +367,31 @@ func (s *ConnectionStack) setUpstreamTarget(ut UpstreamTarget) {
 	defer s.mu.Unlock()
 	s.upstreamTarget = ut
 	s.hasUpstreamTarget = true
+}
+
+// UpstreamTLSShape returns how the stack's first upstream TLS connection
+// was dialed. UpstreamTLSProfiled unless the stack's builder recorded
+// another shape.
+func (s *ConnectionStack) UpstreamTLSShape() UpstreamTLSShape {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.upstreamTLSShape
+}
+
+// UpstreamTLSShapeOf is the nil-safe form of ConnectionStack.UpstreamTLSShape.
+func UpstreamTLSShapeOf(stack *ConnectionStack) UpstreamTLSShape {
+	if stack == nil {
+		return UpstreamTLSProfiled
+	}
+	return stack.UpstreamTLSShape()
+}
+
+// setUpstreamTLSShape records how the stack's upstream TLS connection was
+// dialed. Intended for the stack builders only.
+func (s *ConnectionStack) setUpstreamTLSShape(shape UpstreamTLSShape) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upstreamTLSShape = shape
 }
 
 // setUpstreamH2 stores the pooled upstream HTTP/2 Layer and its pool key.
