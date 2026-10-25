@@ -263,6 +263,10 @@ func TestTransparent_TLS_MITMClassScopeDeny(t *testing.T) {
 			if st.Protocol != "tls-handshake" || st.Tags["name"] != tc.wantSNI || st.Tags["route"] != "tls" {
 				t.Errorf("audit Stream = %s tags %v, want tls-handshake name=%s route=tls", st.Protocol, st.Tags, tc.wantSNI)
 			}
+			// The deny itself refused it — not a later name-binding failure.
+			if st.FailureReason != "target_scope" {
+				t.Errorf("FailureReason = %q, want target_scope", st.FailureReason)
+			}
 		})
 	}
 }
