@@ -84,7 +84,7 @@ func TestTransparent_RateLimit_PlainHTTP(t *testing.T) {
 	if resp.StatusCode != 429 || resp.Status != "429 Too Many Requests" {
 		t.Errorf("second connection status %q, want 429 Too Many Requests", resp.Status)
 	}
-	if body != "yorishiro-proxy: target blocked by rate limit" {
+	if body != "yorishiro-proxy: target blocked by rate limit\r\n" {
 		t.Errorf("second connection body %q", body)
 	}
 	expectAccepts(t, &up.accepts, 1)
