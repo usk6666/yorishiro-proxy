@@ -20,6 +20,7 @@ const empty: FlowsFilterInputs = {
   state: "",
   host: "",
   tag: "",
+  connId: "",
 };
 
 describe("buildFlowsFilter", () => {
@@ -48,6 +49,7 @@ describe("buildFlowsFilter", () => {
         state: "complete",
         host: " example.com ",
         tag: "scratch",
+        connId: "conn-1",
       }),
     ).toEqual({
       protocol: "http",
@@ -60,6 +62,24 @@ describe("buildFlowsFilter", () => {
       state: "complete",
       host: "example.com",
       tag: "scratch",
+      conn_id: "conn-1",
+    });
+  });
+
+  it("sends the connection ID as filter.conn_id", () => {
+    expect(buildFlowsFilter({ ...empty, connId: "conn-h2-multiplexed" })).toEqual({
+      conn_id: "conn-h2-multiplexed",
+    });
+  });
+
+  it("sends the connection ID verbatim, since the server matches it exactly", () => {
+    expect(buildFlowsFilter({ ...empty, connId: " Conn-A " })).toEqual({ conn_id: " Conn-A " });
+  });
+
+  it("ANDs the connection ID with the other filters", () => {
+    expect(buildFlowsFilter({ ...empty, connId: "conn-1", method: "GET" })).toEqual({
+      conn_id: "conn-1",
+      method: "GET",
     });
   });
 });

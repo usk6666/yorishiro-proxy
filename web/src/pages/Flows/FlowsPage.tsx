@@ -169,6 +169,7 @@ export function FlowsPage() {
         state: selectedState,
         host: debouncedHostFilter,
         tag: debouncedTagFilter,
+        connId: "",
       }),
     [selectedProtocol, selectedHttpVersion, selectedScheme, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedBlockedBy, selectedState, debouncedHostFilter, debouncedTagFilter],
   );

@@ -1,0 +1,32 @@
+{
+  "count": 2,
+  "flows": [
+    {
+      "duration_ms": 0,
+      "http_version": "h2",
+      "id": "s1-sameconn-h2",
+      "message_count": 2,
+      "method": "GET",
+      "protocol": "http",
+      "scheme": "https",
+      "state": "complete",
+      "status_code": 200,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://h2.example.com/api/items"
+    },
+    {
+      "duration_ms": 0,
+      "http_version": "h2",
+      "id": "s3-sameconn-h2",
+      "message_count": 2,
+      "method": "GET",
+      "protocol": "http",
+      "scheme": "https",
+      "state": "complete",
+      "status_code": 200,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://h2.example.com/api/items"
+    }
+  ],
+  "total": 2
+}
