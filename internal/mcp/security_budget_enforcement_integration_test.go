@@ -470,6 +470,7 @@ func TestBudget_FuzzRaw_BlockedTrialLeavesAuditStream(t *testing.T) {
 	if st.ID != result.Variants[1].StreamID {
 		t.Errorf("audit stream ID = %q, want variants[1].StreamID %q", st.ID, result.Variants[1].StreamID)
 	}
+	assertFuzzOriginStreamCount(t, store, 2)
 
 	// Exactly one upstream connection: the blocked trial never dialed.
 	// waitForCaptures returns once the first connection's capture lands;
