@@ -390,6 +390,19 @@ func (r *bodyBufRegistry) drain() {
 //     The backstop always owns this Retain (one per Pipeline.Run invocation
 //     with a non-nil pre-Run BodyBuffer).
 //
+// Substituted envelopes. A Step may return a different envelope than the one
+// it was given (intercept modify_and_forward, plugin mutation). The rules
+// above then apply to the returned envelope as an alias of the input: it
+// carries the input's Layer reference while it still points at pre, and
+// holds no references of its own. A Step whose substitute owns references —
+// InterceptStep's HoldAction.Modified is a control-plane Clone — must
+// normalize it before returning (pipeline.adoptForward): release the
+// substitute's own reference on every buffer it shares with the input, and
+// release the input's BodyBuffer reference itself when the substitute no
+// longer points at it. Pointer identity alone cannot tell an owning
+// substitute from an aliasing one, so the accounting cannot be inferred
+// here after the fact.
+//
 // For the synthetic resp envelope on the Respond path: its BodyBuffer (if
 // any) was not traversed by Pipeline.Run so it holds only the Layer Retain
 // — one track is enough. No current Step populates resp.Message.BodyBuffer

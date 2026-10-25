@@ -440,6 +440,11 @@ func TestLargeBody_HTTP1_FastPathNoTempFileBelowThreshold(t *testing.T) {
 	for time.Now().Before(deadline) {
 		if entries := holdQueue.List(); len(entries) > 0 {
 			held = entries[0]
+			// List clones hold their own buffer references; release the
+			// ones not inspected below.
+			for _, e := range entries[1:] {
+				e.Envelope.ReleaseBuffers()
+			}
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -463,6 +468,7 @@ func TestLargeBody_HTTP1_FastPathNoTempFileBelowThreshold(t *testing.T) {
 		t.Errorf("BodySpillDir has %d files mid-flight on fast path, want 0", n)
 	}
 
+	held.Envelope.ReleaseBuffers()
 	if err := holdQueue.Release(held.ID, &common.HoldAction{Type: common.ActionRelease}); err != nil {
 		t.Fatalf("release: %v", err)
 	}

@@ -34,6 +34,11 @@ func (a ActionType) String() string {
 
 // HoldAction is the action returned by HoldQueue.Hold() after an external
 // agent decides what to do with a held envelope.
+//
+// Modified is typically a Clone of the held envelope and then owns its own
+// references on the disk-backed buffers it shares with it. Ownership moves
+// with the action: the releaser owns it until HoldQueue.Release succeeds,
+// the Hold caller owns it once Hold returns the action.
 type HoldAction struct {
 	Type     ActionType
 	Modified *envelope.Envelope // non-nil when Type == ActionModifyAndForward

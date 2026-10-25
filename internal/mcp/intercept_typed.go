@@ -1,12 +1,17 @@
 package mcp
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 )
@@ -130,13 +135,13 @@ type sseMessageModify struct {
 // rawMode signals that the caller already routed via Mode=raw and supplied
 // a RawOverrideBase64 OR rawMessageModify.BytesOverride; the helper
 // preserves Envelope.Raw for downstream encoders.
-func dispatchTypedModify(env *envelope.Envelope, input interceptInput, rawMode bool) (*envelope.Envelope, error) {
+func dispatchTypedModify(ctx context.Context, env *envelope.Envelope, input interceptInput, rawMode bool) (*envelope.Envelope, error) {
 	switch m := env.Message.(type) {
 	case *envelope.HTTPMessage:
 		if input.HTTP == nil {
 			return nil, fmt.Errorf("modify_and_forward: held envelope is HTTP; expected http payload")
 		}
-		return applyHTTPModify(env, m, input.HTTP)
+		return applyHTTPModify(ctx, env, m, input.HTTP)
 	case *envelope.WSMessage:
 		if input.WS == nil {
 			return nil, fmt.Errorf("modify_and_forward: held envelope is WebSocket; expected ws payload")
@@ -215,6 +220,11 @@ func applyHoldQueueRawOverride(env *envelope.Envelope, b64 string) (*envelope.En
 		return nil, fmt.Errorf("raw_override_base64: decoded size %d exceeds limit %d", len(bytesNew), maxRawOverrideSize)
 	}
 	clone := env.Clone()
+	// The override replaces the whole message: release the references the
+	// clone took on the held body (HTTPMessage.BodyBuffer) and on the held
+	// wire body (RawBuffer) — the latter would otherwise be stitched after
+	// the override bytes by Envelope.WireBytes.
+	clone.ReleaseBuffers()
 	clone.Message = &envelope.RawMessage{Bytes: bytesNew}
 	clone.Raw = bytesNew
 	return clone, nil
@@ -244,7 +254,7 @@ func checkBase64EncodedSize(b64, field string) error {
 // entry and produces the HoldAction to send back through the queue. It
 // runs *after* stage-1 schema validation (mutual exclusion, etc.) and
 // *before* dispatch — see Decision R24.
-func resolveHoldQueueAction(entry *common.HeldEntry, input interceptInput, action string) (*common.HoldAction, error) {
+func resolveHoldQueueAction(ctx context.Context, entry *common.HeldEntry, input interceptInput, action string) (*common.HoldAction, error) {
 	switch action {
 	case "release":
 		return &common.HoldAction{Type: common.ActionRelease}, nil
@@ -265,7 +275,7 @@ func resolveHoldQueueAction(entry *common.HeldEntry, input interceptInput, actio
 			}
 			return &common.HoldAction{Type: common.ActionModifyAndForward, Modified: modified}, nil
 		}
-		modified, err := dispatchTypedModify(entry.Envelope, input, rawMode)
+		modified, err := dispatchTypedModify(ctx, entry.Envelope, input, rawMode)
 		if err != nil {
 			return nil, err
 		}
@@ -282,7 +292,7 @@ func resolveHoldQueueAction(entry *common.HeldEntry, input interceptInput, actio
 // the wire bytes via WireEncoderRegistry on Send; this preserves the
 // invariant that Raw always reflects either the wire-observed bytes or a
 // freshly encoded post-mutation snapshot, never a stale mix.
-func applyHTTPModify(env *envelope.Envelope, _ *envelope.HTTPMessage, params *httpMessageModify) (*envelope.Envelope, error) {
+func applyHTTPModify(ctx context.Context, env *envelope.Envelope, _ *envelope.HTTPMessage, params *httpMessageModify) (*envelope.Envelope, error) {
 	if params == nil {
 		// No-op modify; return a clone for safety so InterceptStep can
 		// not observe a shared pointer.
@@ -297,6 +307,7 @@ func applyHTTPModify(env *envelope.Envelope, _ *envelope.HTTPMessage, params *ht
 	clone := env.Clone()
 	hm, ok := clone.Message.(*envelope.HTTPMessage)
 	if !ok {
+		clone.ReleaseBuffers()
 		return nil, fmt.Errorf("internal: clone produced non-HTTP message")
 	}
 	applyHTTPScalarOverrides(hm, params)
@@ -306,10 +317,22 @@ func applyHTTPModify(env *envelope.Envelope, _ *envelope.HTTPMessage, params *ht
 	if params.Trailers != nil {
 		hm.Trailers = headerKVsToKeyValues(params.Trailers)
 	}
-	if err := applyHTTPBodyOverrides(hm, params); err != nil {
+	if err := applyHTTPBodyOverrides(ctx, hm, params); err != nil {
+		// The clone never leaves this function: give back the buffer
+		// references Clone took so the held body's temp file is not
+		// pinned past the session.
+		clone.ReleaseBuffers()
 		return nil, err
 	}
 	clone.Raw = nil
+	// RawBuffer is the disk-backed body section of the held wire snapshot
+	// (Envelope.WireBytes stitches Raw + RawBuffer). With Raw cleared it is
+	// a stale fragment, so drop the clone's reference too; the session
+	// backstop still owns the held envelope's own reference.
+	if clone.RawBuffer != nil {
+		_ = clone.RawBuffer.Release()
+		clone.RawBuffer = nil
+	}
 	return clone, nil
 }
 
@@ -342,7 +365,19 @@ func applyHTTPScalarOverrides(hm *envelope.HTTPMessage, params *httpMessageModif
 
 // applyHTTPBodyOverrides handles the body-replacement and body_patches
 // arms; body is applied first, then patches on top (Decision R12).
-func applyHTTPBodyOverrides(hm *envelope.HTTPMessage, params *httpMessageModify) error {
+//
+// hm belongs to an intercept modify clone, so a non-nil hm.BodyBuffer is a
+// reference the clone owns (Envelope.Clone Retained it). A body that was
+// spilled to disk has Body nil and its content in BodyBuffer; body_patches
+// then run on the materialized bytes (BodyBuffer.Bytes, capped at the
+// buffer's own max size and aborted by ctx), mirroring the Transform
+// replace_body commit in internal/rules/http. Whenever the result is
+// committed to Body the clone's BodyBuffer reference is released and
+// cleared, because the senders prefer Body and a lingering buffer would be
+// stale. A patch that changes nothing on a spilled body commits nothing:
+// moving identical bytes into Body would still re-frame an HTTP/1.x request
+// (Transfer-Encoding dropped, Content-Length re-stamped).
+func applyHTTPBodyOverrides(ctx context.Context, hm *envelope.HTTPMessage, params *httpMessageModify) error {
 	if params.Body != nil {
 		body, err := decodeBodyEncoded(*params.Body, params.BodyEncoding, "body")
 		if err != nil {
@@ -351,16 +386,57 @@ func applyHTTPBodyOverrides(hm *envelope.HTTPMessage, params *httpMessageModify)
 		hm.Body = body
 		// Spilled body buffer no longer represents truth — drop the
 		// reference so the wire-encoder treats hm.Body as authoritative.
-		hm.BodyBuffer = nil
+		dropBodyBuffer(hm)
 	}
-	if len(params.BodyPatches) > 0 {
-		patched, err := applyBodyPatches(hm.Body, params.BodyPatches)
+	if len(params.BodyPatches) == 0 {
+		return nil
+	}
+	src := hm.Body
+	spilled := src == nil && hm.BodyBuffer != nil
+	if spilled {
+		b, err := hm.BodyBuffer.Bytes(ctx)
 		if err != nil {
-			return fmt.Errorf("body_patches: %w", err)
+			return spilledBodyMaterializeError(ctx, err)
 		}
-		hm.Body = patched
+		src = b
 	}
+	patched, err := applyBodyPatches(src, params.BodyPatches)
+	if err != nil {
+		return fmt.Errorf("body_patches: %w", err)
+	}
+	if spilled && bytes.Equal(patched, src) {
+		return nil
+	}
+	hm.Body = patched
+	dropBodyBuffer(hm)
 	return nil
+}
+
+// spilledBodyMaterializeError builds the MCP-facing error for a failed
+// BodyBuffer.Bytes. Path-free causes (ctx cancellation / deadline, the
+// buffer's max-size cap) are wrapped as-is. Anything else — typically an
+// *os.PathError because the spill file vanished under a live reference —
+// carries the spill directory and file name, so it is logged here and the
+// MCP client receives a generic message instead (CWE-209).
+func spilledBodyMaterializeError(ctx context.Context, err error) error {
+	const prefix = "body_patches: materialize spilled body"
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, bodybuf.ErrMaxSizeExceeded) {
+		return fmt.Errorf("%s: %w", prefix, err)
+	}
+	slog.WarnContext(ctx, "intercept: spilled body could not be read for body_patches",
+		"error", err)
+	return fmt.Errorf("%s: spilled body unavailable", prefix)
+}
+
+// dropBodyBuffer releases the BodyBuffer reference an intercept modify
+// clone owns and clears the field, leaving hm.Body authoritative.
+func dropBodyBuffer(hm *envelope.HTTPMessage) {
+	if hm.BodyBuffer == nil {
+		return
+	}
+	_ = hm.BodyBuffer.Release()
+	hm.BodyBuffer = nil
 }
 
 // applyWSModify clones the envelope and applies the WS frame override

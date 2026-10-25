@@ -127,6 +127,9 @@ func (s *Server) handleInterceptTool(ctx context.Context, _ *gomcp.CallToolReque
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", input.Action, err)
 	}
+	// Get hands out a Clone holding its own buffer references; this
+	// handler is its only owner.
+	defer entry.Envelope.ReleaseBuffers()
 	return s.handleInterceptHoldQueue(ctx, input, entry)
 }
 
@@ -144,13 +147,19 @@ func (s *Server) handleInterceptTool(ctx context.Context, _ *gomcp.CallToolReque
 // closed shortly after the release (typical when the hold exceeded the
 // upstream's WS idle timeout). The pipeline.releaseTracker is also
 // stamped so the live session relay loops can append that tag on EOF.
-func (s *Server) handleInterceptHoldQueue(_ context.Context, input interceptInput, entry *common.HeldEntry) (*gomcp.CallToolResult, *holdQueueInterceptResult, error) {
-	action, err := resolveHoldQueueAction(entry, input, input.Action)
+func (s *Server) handleInterceptHoldQueue(ctx context.Context, input interceptInput, entry *common.HeldEntry) (*gomcp.CallToolResult, *holdQueueInterceptResult, error) {
+	action, err := resolveHoldQueueAction(ctx, entry, input, input.Action)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", input.Action, err)
 	}
 
 	if err := s.pipeline.holdQueue.Release(entry.ID, action); err != nil {
+		// The hold ended (timeout, session teardown) between Get and
+		// Release, so the modified envelope was never handed over and
+		// its buffer references are still ours.
+		if action.Modified != nil {
+			action.Modified.ReleaseBuffers()
+		}
 		return nil, nil, fmt.Errorf("%s: %w", input.Action, err)
 	}
 

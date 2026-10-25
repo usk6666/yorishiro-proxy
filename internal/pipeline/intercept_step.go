@@ -279,6 +279,11 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 	if !ok {
 		return blocked
 	}
+	if action.Type != common.ActionModifyAndForward && action.Modified != nil {
+		// Only modify_and_forward consumes Modified; any other action owns
+		// an envelope nobody will forward.
+		discardForward(env, action.Modified)
+	}
 
 	switch action.Type {
 	case common.ActionRelease:
@@ -311,63 +316,74 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		}
 		return Result{Action: Drop, BlockedBy: BlockedByInterceptDrop}
 	case common.ActionModifyAndForward:
-		// USK-1159: re-check scope on the envelope that will actually be
-		// forwarded — the modified one, whose authority / path the
-		// operator or agent may have rewritten — before the safety
-		// re-check (Pipeline order: Scope → Safety). A nil Modified is
-		// forwarded as the held envelope (Result.Envelope nil keeps env).
-		forward := action.Modified
-		if forward == nil {
-			forward = env
-		}
-		restoreLayerOpaque(env, forward)
-		if r := s.recheckReleaseScope(ctx, env, forward, action.Type); r.Action != Continue {
-			return r
-		}
-		// Defense-in-depth: re-check the user-supplied modified envelope
-		// against SafetyStep. The original held envelope already passed
-		// SafetyStep at hold time (Pipeline order: Safety → Intercept), but
-		// modify_and_forward lets the operator/AI agent inject content that
-		// bypasses that gate. Mirroring SafetyStep ensures the same Send-
-		// only / per-protocol coverage as the inline check (USK-702).
-		var annotations map[string]string
-		if s.safety != nil {
-			recheck := s.safety.Process(ctx, action.Modified)
-			// USK-1109: a log_only SafetyStep passes the modified envelope
-			// and annotates the observation; carry it to RecordStep.
-			annotations = recheck.Annotations
-			// USK-829: SafetyStep now returns Respond (with a synthetic
-			// 403 envelope) for HTTPMessage blocks instead of Drop. The
-			// recheck must forward both Action shapes — Drop for WS /
-			// gRPC-Web, Respond for HTTPMessage and native gRPC (USK-1202) —
-			// so the modify_and_forward bypass is rejected with the same
-			// wire behaviour as a direct SafetyStep block.
-			if recheck.Action == Drop || recheck.Action == Respond {
-				if s.logger != nil {
-					s.logger.DebugContext(ctx, "intercept: modify_and_forward blocked by safety re-check",
-						slog.String("flow_id", env.FlowID),
-						slog.String("direction", env.Direction.String()),
-						slog.String("protocol", string(env.Protocol)),
-						slog.String("action", recheck.Action.String()),
-					)
-				}
-				// Forward the recheck Result verbatim. The Response (if
-				// any) was constructed by SafetyStep against the modified
-				// envelope, which is the appropriate target for wire
-				// attribution — the original held envelope was safe.
-				return Result{
-					Action:    recheck.Action,
-					Response:  recheck.Response,
-					BlockedBy: recheck.BlockedBy,
-				}
-			}
-		}
-		return Result{Envelope: action.Modified, Annotations: annotations}
+		return s.forwardModified(ctx, env, action)
 	default:
 		// An unknown action forwards the held envelope like a release, so
 		// it is scope-checked like one.
 		return s.recheckReleaseScope(ctx, env, env, action.Type)
 	}
+}
+
+// forwardModified resolves a modify_and_forward action: the modified
+// envelope is scope- and safety-re-checked and, if it passes, replaces env
+// in the Pipeline. Split out of holdAndDispatch to keep its cyclomatic
+// complexity within the lint threshold.
+func (s *InterceptStep) forwardModified(ctx context.Context, env *envelope.Envelope, action *common.HoldAction) Result {
+	// USK-1159: re-check scope on the envelope that will actually be
+	// forwarded — the modified one, whose authority / path the
+	// operator or agent may have rewritten — before the safety
+	// re-check (Pipeline order: Scope → Safety). A nil Modified is
+	// forwarded as the held envelope (Result.Envelope nil keeps env).
+	forward := action.Modified
+	if forward == nil {
+		forward = env
+	}
+	restoreLayerOpaque(env, forward)
+	if r := s.recheckReleaseScope(ctx, env, forward, action.Type); r.Action != Continue {
+		discardForward(env, forward)
+		return r
+	}
+	// Defense-in-depth: re-check the user-supplied modified envelope
+	// against SafetyStep. The original held envelope already passed
+	// SafetyStep at hold time (Pipeline order: Safety → Intercept), but
+	// modify_and_forward lets the operator/AI agent inject content that
+	// bypasses that gate. Mirroring SafetyStep ensures the same Send-
+	// only / per-protocol coverage as the inline check (USK-702).
+	var annotations map[string]string
+	if s.safety != nil {
+		recheck := s.safety.Process(ctx, action.Modified)
+		// USK-1109: a log_only SafetyStep passes the modified envelope
+		// and annotates the observation; carry it to RecordStep.
+		annotations = recheck.Annotations
+		// USK-829: SafetyStep now returns Respond (with a synthetic
+		// 403 envelope) for HTTPMessage blocks instead of Drop. The
+		// recheck must forward both Action shapes — Drop for WS /
+		// gRPC-Web, Respond for HTTPMessage and native gRPC (USK-1202) —
+		// so the modify_and_forward bypass is rejected with the same
+		// wire behaviour as a direct SafetyStep block.
+		if recheck.Action == Drop || recheck.Action == Respond {
+			if s.logger != nil {
+				s.logger.DebugContext(ctx, "intercept: modify_and_forward blocked by safety re-check",
+					slog.String("flow_id", env.FlowID),
+					slog.String("direction", env.Direction.String()),
+					slog.String("protocol", string(env.Protocol)),
+					slog.String("action", recheck.Action.String()),
+				)
+			}
+			// Forward the recheck Result verbatim. The Response (if
+			// any) was constructed by SafetyStep against the modified
+			// envelope, which is the appropriate target for wire
+			// attribution — the original held envelope was safe.
+			discardForward(env, forward)
+			return Result{
+				Action:    recheck.Action,
+				Response:  recheck.Response,
+				BlockedBy: recheck.BlockedBy,
+			}
+		}
+	}
+	adoptForward(env, forward)
+	return Result{Envelope: action.Modified, Annotations: annotations}
 }
 
 // restoreLayerOpaque gives a modify_and_forward envelope the held
@@ -396,6 +412,63 @@ func restoreLayerOpaque(held, forward *envelope.Envelope) {
 		return
 	}
 	forward.Opaque = held.Opaque
+}
+
+// adoptForward hands the held envelope's disk-backed buffer ownership to
+// the modify_and_forward envelope that replaces it in the Pipeline.
+//
+// The session backstop (session.runPipelineTracked) accounts for buffers
+// through the envelope the Pipeline was given and the one it returns: it
+// always owns the held envelope's Envelope.RawBuffer reference, and owns
+// its HTTPMessage.BodyBuffer reference while the returned envelope still
+// points at that buffer (a Transform commit Releases and clears it, which
+// consumes the reference). It cannot see references a substitute envelope
+// took on its own — and forward is a control-plane Clone that owns one
+// reference per buffer it shares with held (HoldAction.Modified contract).
+// adoptForward therefore normalizes forward to the alias shape the
+// backstop expects:
+//
+//   - A buffer forward shares with held: forward's extra reference is
+//     released and forward carries held's reference from here on, so a
+//     downstream Transform commit consumes it exactly as it would on held.
+//   - A BodyBuffer held carries but forward dropped (body replaced or
+//     patched): the returned envelope no longer points at it, so the
+//     backstop will not release held's reference — release it here and
+//     clear held's field. The Pipeline snapshot keeps its own reference,
+//     so variant recording can still read the original body.
+//   - A RawBuffer forward dropped needs nothing: the backstop releases
+//     held's reference regardless of the returned envelope.
+//
+// A forward carrying a buffer held does not is not produced by any control
+// plane path and is not adopted (its reference would outlive the session).
+func adoptForward(held, forward *envelope.Envelope) {
+	if forward == nil || forward == held {
+		return
+	}
+	if forward.RawBuffer != nil && forward.RawBuffer == held.RawBuffer {
+		_ = forward.RawBuffer.Release()
+	}
+	hm, _ := held.Message.(*envelope.HTTPMessage)
+	if hm == nil || hm.BodyBuffer == nil {
+		return
+	}
+	if fm, ok := forward.Message.(*envelope.HTTPMessage); ok && fm != nil && fm.BodyBuffer == hm.BodyBuffer {
+		_ = fm.BodyBuffer.Release()
+		return
+	}
+	_ = hm.BodyBuffer.Release()
+	hm.BodyBuffer = nil
+}
+
+// discardForward releases a HoldAction.Modified envelope that will not be
+// forwarded (scope / safety re-check blocked it, or the action type does
+// not forward it). It owns its buffer references outright; the held
+// envelope's references stay with the session backstop.
+func discardForward(held, forward *envelope.Envelope) {
+	if forward == nil || forward == held {
+		return
+	}
+	forward.ReleaseBuffers()
 }
 
 // pinLiveConnForHold pins the live connection carried by ctx for the
