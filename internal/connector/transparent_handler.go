@@ -79,6 +79,13 @@ type TransparentBlock struct {
 	Reason string
 	// Name is the SNI / Host the decision looked at, if any.
 	Name string
+	// ClientJA3 / ClientJA4 are the ClientHello fingerprints of a TLS
+	// route connection (USK-1317), if any.
+	ClientJA3 string
+	ClientJA4 string
+	// Error is the underlying error of a TLS MITM failure
+	// (client_tls_error / upstream_tls_error), if any.
+	Error string
 }
 
 // TransparentObserver persists transparent audit records. Calls are
@@ -111,6 +118,16 @@ type TransparentHandlerConfig struct {
 	// OnHTTPStack runs the L7 session on the assembled [http1 → http1]
 	// stack of the HTTP route; it owns the stack and must close it.
 	OnHTTPStack func(ctx context.Context, stack *ConnectionStack, target string)
+	// PassthroughList names the TLS hosts relayed without MITM, matched
+	// against the ClientHello SNI (USK-1317). Nil passes nothing through
+	// by name.
+	PassthroughList *PassthroughList
+	// OnStack / OnHTTP2Stack run the session of a TLS MITM route stack
+	// (USK-1317), with the CONNECT handler's contract: OnStack owns a
+	// non-h2 stack, OnHTTP2Stack an h2 one (the pooled upstream Layer is
+	// returned to the pool by the handler). Nil closes the stack.
+	OnStack      OnStackFunc
+	OnHTTP2Stack OnHTTP2StackFunc
 	// Logger; nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -716,6 +733,13 @@ const (
 type TransparentScope struct {
 	Dst    netip.AddrPort
 	Binder *NameBindingCache
+	// AdmittedBySNI is the ClientHello SNI that admitted a TLS MITM
+	// connection whose original destination no allow rule admits
+	// (USK-1317, owner decision U4): set only when the SNI matched an
+	// allow rule, no deny matched the destination or the SNI, and the SNI
+	// was bound to the destination by DNS. Empty on every other
+	// connection.
+	AdmittedBySNI string
 }
 
 type transparentScopeKey struct{}

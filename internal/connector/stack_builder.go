@@ -727,6 +727,16 @@ type ClientHelloPeek struct {
 	// unimplemented (deferred).
 	ClientJA3 string
 	ClientJA4 string
+
+	// ExtensionsParsed reports that the ClientHello's extensions block —
+	// including its server_name and ALPN extensions, when present — was
+	// parsed without error (USK-1317). It disambiguates the four cases
+	// that all leave ALPN nil: no ALPN extension (or an empty list) is
+	// ExtensionsParsed with ALPN nil; a peek failure, an oversized or
+	// split ClientHello, or a malformed extension is !ExtensionsParsed.
+	// Only the transparent listener reads it; BuildConnectionStack does
+	// not, so the CONNECT / SOCKS5 paths are unchanged.
+	ExtensionsParsed bool
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given upstream
