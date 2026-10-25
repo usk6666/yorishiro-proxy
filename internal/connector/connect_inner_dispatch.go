@@ -324,7 +324,12 @@ func cfgPluginEngine(cfg *BuildConfig) *pluginv2.Engine {
 //
 // The dial timeout is the package-level defaultDialTimeout; the inner-peek
 // timeout that brackets the client-side peek is independent.
+//
+// target is stamped on ctx as the dial target, so per_target_host rotation
+// is keyed on the address dialled even when the caller's ctx carries none
+// (the plaintext CONNECT / SOCKS5 inner first dial; USK-1382).
 func dialPlainUpstream(ctx context.Context, target string, cfg *BuildConfig) (net.Conn, error) {
+	ctx = ContextWithDialTarget(ctx, target)
 	var dialOpts DialRawOpts
 	if cfg != nil {
 		u, err := cfg.EffectiveUpstreamProxyForCtxErr(ctx)
