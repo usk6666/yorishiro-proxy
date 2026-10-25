@@ -96,10 +96,13 @@ type SessionOptions struct {
 
 	// WSMaxFrameSize, when positive, is the per-frame WebSocket payload cap
 	// applied to the post-Upgrade *ws.Layer pair on both client- and
-	// upstream-facing sides. Zero falls back to the layer default
-	// (config.MaxWebSocketFrameSize, 16 MiB). Bridged from
-	// connector.BuildConfig.WSMaxFrameSize by proxybuild.buildSessionOptions.
-	// USK-806.
+	// upstream-facing sides, for received and sent frames and the
+	// permessage-deflate decompression (ws.WithMaxFrameSize). Zero falls
+	// back to the layer default (config.MaxWebSocketFrameSize, 16 MiB).
+	// Bridged from connector.BuildConfig.WSMaxFrameSize by
+	// proxybuild.buildSessionOptions and, for TCP forward listeners, by
+	// proxybuild.tcpForwardSessionOpts / tcpForwardH2SessionOpts.
+	// USK-806, USK-1322.
 	WSMaxFrameSize int64
 
 	// SSEMaxEventSize, when positive, caps the per-event raw byte size on the

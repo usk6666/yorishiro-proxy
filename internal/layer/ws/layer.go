@@ -27,13 +27,16 @@ type options struct {
 	clientDeflate deflateParams
 	serverDeflate deflateParams
 
-	// maxFrameSize caps Receive payloads (pre-decompression) and Send
-	// payloads (pre-mask). Default = maxFramePayloadSize (16 MiB).
+	// maxFrameSize is the per-frame payload cap (web_socket.max_frame_size).
+	// It bounds a received frame's payload (checked from the header,
+	// before allocation), a Send frame's pre-mask payload, the
+	// permessage-deflate compressed input and fragment accumulator, and
+	// the decompressed message surfaced as WSMessage.Payload. Default =
+	// maxFramePayloadSize (16 MiB). Read through (*options).frameCap.
 	maxFrameSize int64
 
-	// inflateCap bounds the decompressed size of one permessage-deflate
-	// message that is surfaced as WSMessage.Payload. Default =
-	// maxFramePayloadSize (16 MiB). Read through (*options).decompressCap.
+	// inflateCap overrides the decompression cap (tests only; zero =
+	// follow maxFrameSize). Read through (*options).decompressCap.
 	inflateCap int64
 
 	// stateReleaser is the optional pluginv2 hook invoked when the Channel
@@ -115,9 +118,21 @@ func WithServerDeflate(p deflateParams) Option {
 	return func(o *options) { o.serverDeflate = p }
 }
 
-// WithMaxFrameSize caps the per-frame payload byte count. The cap applies
-// to both Receive (pre-decompression) and Send (pre-mask). Non-positive n
-// leaves the default in place.
+// WithMaxFrameSize sets the per-frame payload cap (web_socket.max_frame_size,
+// default 16 MiB). It applies to both directions of the Channel:
+//
+//   - Receive: a frame whose header claims more than n payload bytes fails
+//     Next with *layer.StreamError{Code: ErrorProtocol} before the payload
+//     is read; the Channel terminates and nothing is emitted.
+//   - Send: a frame whose pre-mask payload exceeds n is refused with
+//     *layer.StreamError{Code: ErrorAborted}; nothing is written.
+//   - permessage-deflate (RFC 7692): n also bounds the compressed input
+//     (including a fragmented message's accumulated fragments) and the
+//     decompressed message surfaced as WSMessage.Payload. A message that
+//     decompresses past n is recorded truncated with a
+//     WSDecompressedTooLarge anomaly and forwarded verbatim.
+//
+// Non-positive n leaves the default in place.
 func WithMaxFrameSize(n int64) Option {
 	return func(o *options) {
 		if n > 0 {
@@ -126,8 +141,8 @@ func WithMaxFrameSize(n int64) Option {
 	}
 }
 
-// withInflateCap overrides the decompression cap (tests only; the
-// receive-side max_frame_size follow-up decides the public knob).
+// withInflateCap overrides the decompression cap independently of
+// WithMaxFrameSize (tests only: keeps the over-cap scenarios small).
 func withInflateCap(n int64) Option {
 	return func(o *options) {
 		if n > 0 {
@@ -153,14 +168,23 @@ func WithLifecycleEngine(e *pluginv2.Engine) Option {
 	return func(o *options) { o.lifecycleEngine = e }
 }
 
-// decompressCap returns the decompression cap every permessage-deflate
-// inflate of this Layer runs with (USK-1321). It is the single read point
-// so the receive-side max_frame_size follow-up can swap the source.
-func (o *options) decompressCap() int64 {
-	if o == nil || o.inflateCap <= 0 {
+// frameCap returns the per-frame payload cap (WithMaxFrameSize), falling
+// back to the 16 MiB default.
+func (o *options) frameCap() int64 {
+	if o == nil || o.maxFrameSize <= 0 {
 		return maxFramePayloadSize
 	}
-	return o.inflateCap
+	return o.maxFrameSize
+}
+
+// decompressCap returns the decompression cap every permessage-deflate
+// inflate of this Layer runs with: the frame cap (USK-1322), unless a test
+// overrode it with withInflateCap.
+func (o *options) decompressCap() int64 {
+	if o != nil && o.inflateCap > 0 {
+		return o.inflateCap
+	}
+	return o.frameCap()
 }
 
 // WithInitialSequence seeds the Channel's Sequence counter to start so
@@ -275,7 +299,6 @@ type Layer struct {
 func New(reader io.Reader, writer io.Writer, closer io.Closer, streamID string, role Role, opts ...Option) *Layer {
 	o := options{
 		maxFrameSize: maxFramePayloadSize,
-		inflateCap:   maxFramePayloadSize,
 	}
 	for _, opt := range opts {
 		opt(&o)

@@ -12,7 +12,10 @@
 //
 // Pre-USK-806 the BuildConfig field was populated but never read, so the
 // effective cap was the compile-time `maxFramePayloadSize` (16 MiB)
-// regardless of operator config.
+// regardless of operator config. Pre-USK-1322 the cap reached only the
+// Send path; it now also governs received frames and the
+// permessage-deflate caps (max_frame_size_test.go), and TCP forward
+// listeners bridge it too.
 //
 // Test shape mirrors the USK-802 per_stream_record_cap_integration_test.go
 // precedent: paired Layer construction with the operator option layered on
@@ -39,12 +42,10 @@ import (
 // TestLayer_Send_OversizedPayload_ErrorAborted (layer_test.go), tagged for
 // the e2e tier so it runs alongside the rest of the WS layer e2e suite.
 //
-// The ws.WithMaxFrameSize cap currently enforces only on the Send path
-// (channel.go:573 reads c.opts.maxFrameSize); the Receive path uses the
-// compile-time const maxFramePayloadSize. This is fine for USK-806's
-// purposes — the production wiring path is symmetric (both ws.New calls
-// receive the same Option slice), and the Send-side enforcement is what
-// activates the operator override semantically.
+// This test pins the Send side (checkSendPayloadSize); the receive side
+// is covered by TestMaxFrameSize_Next_* in max_frame_size_test.go. The
+// production wiring path is symmetric (both ws.New calls receive the same
+// Option slice).
 //
 // Without USK-806's wiring, the operator setting was silently ignored and
 // the only effective cap was 16 MiB (compile-time). With a 1 MiB cap from

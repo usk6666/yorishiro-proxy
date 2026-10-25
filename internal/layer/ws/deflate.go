@@ -35,10 +35,12 @@ type deflateParams struct {
 // dictionary context for subsequent messages.
 const maxDictSize = 32768
 
-// maxCompressedPayloadSize is a hard upper bound on the compressed payload size
-// accepted by the permessage-deflate decompressor. It is derived from
-// maxFramePayloadSize (the WebSocket frame payload cap) to maintain a single
-// source of truth and prevent oversized allocations from attacker-controlled data.
+// maxCompressedPayloadSize is the default upper bound on the compressed
+// payload size accepted by the permessage-deflate decompressor (inflate's
+// inCap when the caller passes a non-positive one). It equals
+// maxFramePayloadSize; the Layer passes its frame cap (WithMaxFrameSize)
+// explicitly so the compressed-input cap always matches the frame cap and
+// attacker-controlled data cannot drive an oversized allocation.
 const maxCompressedPayloadSize = maxFramePayloadSize
 
 // deflateState manages the decompression state for one relay direction.
@@ -118,9 +120,9 @@ type inflateResult struct {
 }
 
 // decompress decompresses a permessage-deflate payload and returns at most
-// maxSize bytes of it. See inflate.
+// maxSize bytes of it, with the default compressed-input cap. See inflate.
 func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error) {
-	res, err := ds.inflate(payload, maxSize)
+	res, err := ds.inflate(payload, maxCompressedPayloadSize, maxSize)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +132,10 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 // inflate decompresses a permessage-deflate payload.
 // Per RFC 7692 Section 7.2.2, the 4-byte trailer (0x00 0x00 0xFF 0xFF) must be
 // appended before decompression.
+//
+// inCap bounds the compressed payload length (a non-positive inCap selects
+// maxCompressedPayloadSize); a longer payload is rejected before any
+// allocation.
 //
 // maxSize limits the decompressed output that is returned, to bound memory
 // against decompression bombs. A message that decompresses past maxSize is
@@ -142,7 +148,7 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 // Concurrency: acquires ds.mu for the full duration of the call so the
 // internal dict update is atomic with respect to any concurrent compress
 // / decompress / close on the same *deflateState (USK-867 defense-in-depth).
-func (ds *deflateState) inflate(payload []byte, maxSize int64) (inflateResult, error) {
+func (ds *deflateState) inflate(payload []byte, inCap, maxSize int64) (inflateResult, error) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	if len(payload) == 0 {
@@ -152,8 +158,11 @@ func (ds *deflateState) inflate(payload []byte, maxSize int64) (inflateResult, e
 	// Enforce a hard upper bound on the compressed payload size to avoid
 	// pathological allocations and satisfy static analysis that this value
 	// cannot be arbitrarily large.
-	if int64(len(payload)) > maxCompressedPayloadSize {
-		return inflateResult{}, fmt.Errorf("deflate decompress: compressed payload too large: %d > %d", len(payload), maxCompressedPayloadSize)
+	if inCap <= 0 {
+		inCap = maxCompressedPayloadSize
+	}
+	if int64(len(payload)) > inCap {
+		return inflateResult{}, fmt.Errorf("deflate decompress: compressed payload too large: %d > %d", len(payload), inCap)
 	}
 
 	// Guard against integer overflow when computing the allocation size

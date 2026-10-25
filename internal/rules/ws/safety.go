@@ -99,8 +99,9 @@ func (e *SafetyEngine) SetRules(rules []common.CompiledRule) {
 // safe, *Violation on the first matching rule (fail-fast).
 //
 // ctx is accepted for symmetry with rules/http; the current implementation
-// does not block on ctx (WS payloads are bounded by WSLayer's
-// maxFramePayloadSize=16 MiB and held in memory, not disk-backed).
+// does not block on ctx (WS payloads are bounded by WSLayer's frame cap —
+// web_socket.max_frame_size, default 16 MiB — and held in memory, not
+// disk-backed).
 func (e *SafetyEngine) CheckInput(ctx context.Context, msg *envelope.WSMessage) *Violation {
 	if msg == nil {
 		return nil

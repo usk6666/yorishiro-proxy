@@ -42,8 +42,9 @@
 //     OpcodeFilter of [WSText] does NOT match a WSContinuation frame even
 //     if the original stream began with a Text frame. Operators must list
 //     WSContinuation explicitly when they need to inspect continuations.
-//   - TargetPayload size: bounded by WSLayer's maxFramePayloadSize
-//     (16 MiB). The engine does not enforce its own cap.
+//   - TargetPayload size: bounded by WSLayer's frame cap
+//     (web_socket.max_frame_size, default 16 MiB). The engine does not
+//     enforce its own cap.
 //
 // # Match field sources
 //
