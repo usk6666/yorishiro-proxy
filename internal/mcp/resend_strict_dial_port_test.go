@@ -332,3 +332,43 @@ func TestStrictDialPort_SecurityTestTarget(t *testing.T) {
 		}
 	}
 }
+
+// TestStrictDialPort_SecurityTestTargetReport is the reporting half of T13:
+// test_target's tested_target.port, matched_rule and layer describe the
+// port the strict rule yields. A port the scope check refused as
+// uninterpretable is reported as 0 with no matched rule — not as the
+// digit run's value (or its overflow) and not as a hostname-only deny that
+// never took part in the decision. Strict ports, leading zeros and scheme
+// defaults keep their values.
+func TestStrictDialPort_SecurityTestTargetReport(t *testing.T) {
+	cs := setupUnspecifiedScopeSession(t, newScopeWithRules(t, nil,
+		[]connector.TargetRule{{Hostname: "127.0.0.1"}}, nil, nil))
+	for _, tc := range []struct {
+		raw         string
+		wantPort    int
+		wantAllowed bool
+		wantRule    bool
+		wantLayer   string
+	}{
+		{"http://127.0.0.1:" + strictPortWrap("8080") + "/", 0, false, false, ""},
+		{"http://127.0.0.1:99999999999999999999999/", 0, false, false, ""},
+		{"http://127.0.0.1:65536/", 0, false, false, ""},
+		{"http://127.0.0.1:0/", 0, false, false, ""},
+		{"http://127.0.0.1:8080/", 8080, false, true, "policy"},
+		{"http://127.0.0.1:0080/", 80, false, true, "policy"},
+		{"https://127.0.0.1/", 443, false, true, "policy"},
+		{"http://example.com:00443/", 443, true, false, ""},
+		{"http://example.com/", 80, true, false, ""},
+	} {
+		res := testTarget(t, cs, tc.raw)
+		if res.Allowed != tc.wantAllowed {
+			t.Errorf("test_target(%s).allowed = %v (%q), want %v", tc.raw, res.Allowed, res.Reason, tc.wantAllowed)
+		}
+		if res.TestedTarget == nil || res.TestedTarget.Port != tc.wantPort {
+			t.Errorf("test_target(%s).tested_target = %+v, want port %d", tc.raw, res.TestedTarget, tc.wantPort)
+		}
+		if (res.MatchedRule != nil) != tc.wantRule || res.Layer != tc.wantLayer {
+			t.Errorf("test_target(%s) matched_rule = %v, layer = %q; want rule %v, layer %q", tc.raw, res.MatchedRule, res.Layer, tc.wantRule, tc.wantLayer)
+		}
+	}
+}
