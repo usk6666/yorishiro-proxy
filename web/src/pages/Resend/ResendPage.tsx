@@ -6,6 +6,11 @@ import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Tabs } from "../../components/ui/Tabs.js";
 import { useToast } from "../../components/ui/Toast.js";
+import {
+  firstGrpcDataMessage,
+  firstGrpcDataPayload,
+  grpcDataPayloadWithFallback,
+} from "../../lib/grpcPayload.js";
 import { useMcpContext } from "../../lib/mcp/context.js";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import type {
@@ -741,9 +746,12 @@ export function ResendPage() {
     if (isGrpcFlow(flow)) {
       // gRPC / gRPC-Web flow: populate the typed editor from the source flow.
       //
-      // NOTE (USK-936 MVP scope): `flow.request_body` may carry a
-      // base64-encoded protobuf payload (when `flow.request_body_encoding ===
-      // "base64"`), but the editor only emits `body_encoding: "text"`. That
+      // The payload comes from the first send-direction Data message: the
+      // top-level `request_body` belongs to the Start message and is empty.
+      //
+      // NOTE (USK-936 MVP scope): the Data body may carry a base64-encoded
+      // protobuf payload (when its `body_encoding === "base64"`), but the
+      // editor only emits `body_encoding: "text"`. That
       // means binary-protobuf payloads pre-populate as base64 text and round-
       // trip incorrectly on send. Proto-schema-aware editing + base64 mode
       // are deferred to the follow-up Issue (see Issue body "out of scope")
@@ -757,7 +765,7 @@ export function ResendPage() {
         service,
         method,
         metadata: metadataRows,
-        messagePayload: flow.request_body || "",
+        messagePayload: firstGrpcDataPayload(flow.message_preview, "send"),
       });
     } else if (isWsFlow(flow)) {
       // WebSocket flow: populate single-frame editor from the handshake URL
@@ -843,6 +851,40 @@ export function ResendPage() {
     // re-fetch must not overwrite in-flight edits; trigger only on flow id change
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flow?.id]);
+
+  // gRPC payload fallback: the server emits message_preview only for flows
+  // with more than two messages, so a gRPC flow that stopped early (send
+  // Start + Data, no receive rows) has no preview and the populate effect
+  // above leaves the payload empty. Fetch the messages list for that flow
+  // and fill the payload, unless the user has already typed one.
+  useEffect(() => {
+    if (!flow || !isGrpcFlow(flow) || !client) return;
+    if (firstGrpcDataMessage(flow.message_preview, "send")) return;
+    let cancelled = false;
+    const preview = flow.message_preview;
+    client
+      .query({ resource: "messages", id: flow.id })
+      .then((res) => {
+        if (cancelled) return;
+        const payload = grpcDataPayloadWithFallback(
+          preview,
+          (res as MessagesResult).messages,
+          "send",
+        );
+        if (!payload) return;
+        setGrpcState((prev) =>
+          prev.messagePayload === "" ? { ...prev, messagePayload: payload } : prev,
+        );
+      })
+      .catch(() => {
+        // Best-effort pre-fill: leave the payload empty on failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Same trigger as the populate effect: only on flow id change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flow?.id, client]);
 
   // Sync route param changes.
   useEffect(() => {

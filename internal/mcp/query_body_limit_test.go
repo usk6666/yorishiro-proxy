@@ -714,7 +714,7 @@ func TestQueryFlow_VariantFlow_HonorsLimits(t *testing.T) {
 	if err := store.SaveFlow(ctx, &flow.Flow{
 		ID:        id + "-send-mod",
 		StreamID:  id,
-		Sequence:  1,
+		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Method:    "POST",
@@ -728,7 +728,7 @@ func TestQueryFlow_VariantFlow_HonorsLimits(t *testing.T) {
 	if err := store.SaveFlow(ctx, &flow.Flow{
 		ID:         id + "-recv",
 		StreamID:   id,
-		Sequence:   2,
+		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
 		StatusCode: 200,
