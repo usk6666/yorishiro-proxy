@@ -5,7 +5,7 @@ go 1.25.4
 require (
 	github.com/andybalholm/brotli v1.0.6
 	github.com/google/uuid v1.6.0
-	github.com/klauspost/compress v1.18.4
+	github.com/klauspost/compress v1.18.7
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/refraction-networking/utls v1.8.2
 	go.starlark.net v0.0.0-20260210143700-b62fd896b91b
