@@ -769,7 +769,10 @@ func newConnectProxy(t *testing.T) *connectProxy {
 		}
 		defer up.Close()
 		_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
-		go func() { _, _ = io.Copy(up, br) }()
+		go func() {
+			_, _ = io.Copy(up, br)
+			_ = up.Close()
+		}()
 		_, _ = io.Copy(c, up)
 	})
 	return cp
