@@ -69,6 +69,17 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 // On error the raw byte slice is the bytes consumed up to the error point;
 // callers may discard or surface them as part of an Anomaly.
 func ReadFrameRaw(r io.Reader) (*Frame, []byte, error) {
+	return readFrameRaw(r)
+}
+
+// ReadFrameRawLimit is ReadFrameRaw with an explicit payload cap.
+// (USK-1322 red-phase scaffolding: still enforces the default cap.)
+func ReadFrameRawLimit(r io.Reader, maxPayload int64) (*Frame, []byte, error) {
+	_ = maxPayload
+	return readFrameRaw(r)
+}
+
+func readFrameRaw(r io.Reader) (*Frame, []byte, error) {
 	var raw bytes.Buffer
 	tee := io.TeeReader(r, &raw)
 

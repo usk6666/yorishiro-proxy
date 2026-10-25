@@ -102,6 +102,12 @@ type HarnessOptions struct {
 	// in waitForListening rather than at first tool call.
 	ConfigJSON string
 
+	// WSUpstreamMaxFrameSize is the per-frame payload cap the "ws"
+	// upstream's frame reader enforces (ws.ReadFrameRawLimit). Zero keeps
+	// the 16 MiB default. Raise it together with web_socket.max_frame_size
+	// in ConfigJSON to exercise frames above the default.
+	WSUpstreamMaxFrameSize int64
+
 	// ExtraArgs is appended verbatim to the mcpserver.Run argument list
 	// after the harness defaults, so a flag given here overrides the
 	// default of the same name (flag.FlagSet keeps the last value). Use it
@@ -509,7 +515,7 @@ func buildUpstream(tb testing.TB, opts HarnessOptions, mtlsDir string) (*httptes
 		}
 		return srv, nil, fpObs, nil, hits, nil, nil, nil
 	case "ws":
-		srv, fpObs, hits, err := buildWSUpstream()
+		srv, fpObs, hits, err := buildWSUpstream(opts.WSUpstreamMaxFrameSize)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build ws upstream: %w", err)
 		}
