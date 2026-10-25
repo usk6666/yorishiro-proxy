@@ -458,7 +458,12 @@ func TestTransparent_TLS_ExplicitProxyNoALPNUnchanged(t *testing.T) {
 			if len(hellos) == 0 || strings.Join(hellos[0].protos, ",") != "h2,http/1.1" {
 				t.Errorf("upstream ClientHellos = %+v, want the legacy [h2 http/1.1] offer", hellos)
 			}
-			waitStream(t, p.store, 2, isMITMHTTPSStream)
+			st, _ := waitStream(t, p.store, 2, isMITMHTTPSStream)
+			// USK-1318: an explicit-proxy Stream is not transparent and
+			// carries no original_dst tag.
+			if v, ok := st.Tags["original_dst"]; ok {
+				t.Errorf("Tags[original_dst] = %q on an explicit-proxy Stream, want absent", v)
+			}
 		})
 	}
 }

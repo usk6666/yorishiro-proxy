@@ -1109,8 +1109,19 @@ func (s *RecordStep) createStream(ctx context.Context, env *envelope.Envelope) {
 	// client's SNI. TargetHost is the original destination IP:port there,
 	// so the name the client asked for is otherwise visible only in the
 	// TLS snapshot. Only transparent connections carry a TransparentScope.
-	if env.Context.TLS != nil && env.Context.TLS.SNI != "" && connector.TransparentScopeFromContext(ctx) != nil {
-		st.Tags = map[string]string{"sni": env.Context.TLS.SNI}
+	// USK-1318: every transparent Stream also records the original
+	// destination — ServerAddr is the upstream proxy when one is used.
+	if connector.TransparentScopeFromContext(ctx) != nil {
+		tags := map[string]string{}
+		if originalDst := connector.TransparentOriginalDst(ctx); originalDst != "" {
+			tags[connector.TagOriginalDst] = originalDst
+		}
+		if env.Context.TLS != nil && env.Context.TLS.SNI != "" {
+			tags["sni"] = env.Context.TLS.SNI
+		}
+		if len(tags) > 0 {
+			st.Tags = tags
+		}
 	}
 
 	st.Scheme = semanticScheme(env)

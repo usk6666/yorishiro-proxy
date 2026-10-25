@@ -473,6 +473,12 @@ func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 // whole query.
 const streamTagsTargetExpr = "(CASE WHEN json_valid(s.tags) THEN json_extract(s.tags, '$.target') END)"
 
+// streamTagsOriginalDstExpr reads tags.original_dst, the original
+// destination (pre-REDIRECT IP:port) every transparent-mode Stream
+// records; server_addr is the upstream proxy when one is used (USK-1318).
+// The json_valid guard has the same purpose as in streamTagsTargetExpr.
+const streamTagsOriginalDstExpr = "(CASE WHEN json_valid(s.tags) THEN json_extract(s.tags, '$.original_dst') END)"
+
 // streamTagsTagExpr reads tags.tag, the user label resend_* / fuzz_*
 // record from their tag parameter. The json_valid guard has the same
 // purpose as in streamTagsTargetExpr.
@@ -486,11 +492,15 @@ const streamTagsTagExpr = "(CASE WHEN json_valid(s.tags) THEN json_extract(s.tag
 //     that never had an upstream socket. It is an authority for CONNECT /
 //     TLS-error / request-head / TCP forward rows and the request-target as
 //     received (possibly an absolute URL) for HTTP/1.x capacity rows;
+//   - tags.original_dst — the original destination IP:port of a
+//     transparent-mode Stream, which differs from server_addr when an
+//     upstream proxy is used;
 //   - the URL of a send flow.
 //
-// server_addr and authority-shaped tags.target values are compared exactly
-// or as a "host:" prefix. URL-shaped values use LIKE patterns with
-// right-side boundary anchoring to avoid subdomain false positives:
+// server_addr, tags.original_dst and authority-shaped tags.target values
+// are compared exactly or as a "host:" prefix. URL-shaped values use LIKE
+// patterns with right-side boundary anchoring to avoid subdomain false
+// positives:
 //
 //	%://host/  — path follows
 //	%://host?  — query string follows (no path)
@@ -507,13 +517,16 @@ func appendStreamHostPredicate(conds []string, args []interface{}, host string) 
 	}
 	urlArgs := []interface{}{"%://" + escaped + "/%", "%://" + escaped + "?%", "%://" + escaped + ":%", "%://" + escaped}
 	tgt := streamTagsTargetExpr
+	odst := streamTagsOriginalDstExpr
 
 	conds = append(conds, "(s.server_addr = ? OR s.server_addr LIKE ? ESCAPE '\\'"+
 		" OR "+tgt+" = ? OR "+tgt+" LIKE ? ESCAPE '\\' OR "+urlLike(tgt)+
+		" OR "+odst+" = ? OR "+odst+" LIKE ? ESCAPE '\\'"+
 		" OR EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND ("+urlLike("m.url")+")))")
 	args = append(args, host, escaped+":%")
 	args = append(args, host, escaped+":%")
 	args = append(args, urlArgs...)
+	args = append(args, host, escaped+":%")
 	args = append(args, urlArgs...)
 	return conds, args
 }

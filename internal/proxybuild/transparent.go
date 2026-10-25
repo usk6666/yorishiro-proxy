@@ -193,6 +193,9 @@ func (r *transparentRecorder) OnStart(ctx context.Context, obs connector.Transpa
 			"transparent": "passthrough",
 			"route":       string(obs.Route),
 			"target":      obs.OriginalDst,
+			// USK-1318: kept next to "target" so every transparent
+			// Stream (passthrough or MITM) shares one key.
+			connector.TagOriginalDst: obs.OriginalDst,
 		},
 	}
 	saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -273,9 +276,10 @@ func (r *transparentRecorder) OnBlocked(ctx context.Context, b connector.Transpa
 	}
 	protocol, scheme := transparentProtocol(b.Route)
 	tags := map[string]string{
-		"via":    "transparent",
-		"route":  string(b.Route),
-		"target": b.OriginalDst,
+		"via":                    "transparent",
+		"route":                  string(b.Route),
+		"target":                 b.OriginalDst,
+		connector.TagOriginalDst: b.OriginalDst,
 	}
 	if b.Reason != "" {
 		tags["reason"] = b.Reason

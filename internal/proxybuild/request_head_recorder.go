@@ -82,7 +82,7 @@ func buildRequestHeadRecorder(store flow.Writer, scope *flow.RecordScope, listen
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return func(_ context.Context, f requestHeadFailure) {
+	return func(connCtx context.Context, f requestHeadFailure) {
 		head := f.Head
 		if head == nil || head.Reason == "" {
 			return
@@ -123,6 +123,10 @@ func buildRequestHeadRecorder(store flow.Writer, scope *flow.RecordScope, listen
 				ClientAddr: f.ClientAddr,
 			},
 		}
+
+		// USK-1318: on a transparent connection the original destination
+		// is recorded like on every other transparent Stream.
+		st.Tags = withOriginalDstTag(connCtx, st.Tags)
 
 		ctx, cancel := context.WithTimeout(context.Background(), requestHeadRecordTimeout)
 		defer cancel()

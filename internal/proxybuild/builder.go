@@ -2425,6 +2425,21 @@ func blockAnnotationTags(ctx context.Context) map[string]string {
 	return tags
 }
 
+// withOriginalDstTag adds connector.TagOriginalDst to tags when ctx is a
+// transparent connection (USK-1318), allocating the map if needed, and
+// returns tags. On any other connection tags is returned unchanged.
+func withOriginalDstTag(ctx context.Context, tags map[string]string) map[string]string {
+	originalDst := connector.TransparentOriginalDst(ctx)
+	if originalDst == "" {
+		return tags
+	}
+	if tags == nil {
+		tags = make(map[string]string, 1)
+	}
+	tags[connector.TagOriginalDst] = originalDst
+	return tags
+}
+
 // dropStreamListenerName resolves Stream.ListenerName for a Pipeline-Drop
 // audit Stream (USK-1116): the recorder's configured listener when set,
 // else the parent listener name the TCP-forward handlers stamp on ctx
@@ -2509,7 +2524,9 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		// USK-1109: annotations of Steps that continued before the Drop
 		// (e.g. safety_log_only:<rule_id> from a log_only SafetyStep)
 		// stay on the audit Stream.
-		st.Tags = blockAnnotationTags(ctx)
+		// USK-1318: a drop on a transparent session records the original
+		// destination like every other transparent Stream.
+		st.Tags = withOriginalDstTag(ctx, blockAnnotationTags(ctx))
 
 		// Use a background-derived context so a cancelled handler ctx does
 		// not abort the audit record.

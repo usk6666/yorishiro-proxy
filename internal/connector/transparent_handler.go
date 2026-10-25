@@ -818,6 +818,25 @@ func TransparentScopeFromContext(ctx context.Context) *TransparentScope {
 	return ts
 }
 
+// TagOriginalDst is the Stream tag key every transparent-mode Stream
+// carries: the original destination (the pre-REDIRECT IP:port read with
+// SO_ORIGINAL_DST, netip.AddrPort form, e.g. "192.0.2.1:443" or
+// "[2001:db8::1]:80"). ServerAddr is the upstream socket peer, which is
+// the upstream proxy when one is configured, so this tag is where the
+// real destination is recorded (USK-1318).
+const TagOriginalDst = "original_dst"
+
+// TransparentOriginalDst returns the original destination of the
+// transparent connection on ctx in TagOriginalDst form, or "" on every
+// non-transparent connection (explicit proxy, tcp_forward, resend / fuzz).
+func TransparentOriginalDst(ctx context.Context) string {
+	ts := TransparentScopeFromContext(ctx)
+	if ts == nil || !ts.Dst.IsValid() {
+		return ""
+	}
+	return ts.Dst.String()
+}
+
 // NamesBound reports whether every name value (host, host:port, [v6]:port)
 // resolves to the original destination.
 func (ts *TransparentScope) NamesBound(ctx context.Context, names []string) bool {
