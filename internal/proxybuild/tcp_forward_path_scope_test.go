@@ -84,3 +84,17 @@ func TestStartTCPForwards_PathScopedAllow(t *testing.T) {
 		t.Errorf("http forward under a path-scoped allow refused: %v", err)
 	}
 }
+
+// USK-1236: the grpc arm's RPCs are path-checked per request by
+// HTTPScopeStep, so a path-scoped allow admits the target provisionally on
+// it, as on the other L7 arms; raw stays strict.
+func TestTCPForwardScopeCheck_PathScopedAllow_GRPCArmProvisional(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules([]connector.TargetRule{{Hostname: "127.0.0.1", PathPrefix: "/pkg.Svc/"}}, nil)
+	if ok, reason := tcpForwardScopeCheck(scope, "127.0.0.1:4444", false, "grpc"); !ok {
+		t.Errorf("grpc arm under a path-scoped allow refused at the gate: %s", reason)
+	}
+	if ok, _ := tcpForwardScopeCheck(scope, "127.0.0.1:4444", false, "raw"); ok {
+		t.Error("raw arm under a path-scoped allow admitted; want strict")
+	}
+}
