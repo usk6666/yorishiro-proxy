@@ -2987,6 +2987,19 @@ func TestExtractAnomaliesFromFlows(t *testing.T) {
 			},
 		},
 		{
+			// USK-1321: WS permessage-deflate message truncated at the
+			// Layer's decompression cap.
+			name: "WS decompressed-too-large anomaly",
+			flows: []*flow.Flow{
+				{Direction: "receive", Metadata: map[string]string{
+					"ws_opcode":                         "1",
+					"ws_anomaly_decompressed_too_large": "decompressed payload exceeds 16777216 bytes",
+				}},
+			},
+			wantTypes:  []string{"WSDecompressedTooLarge"},
+			wantDetail: map[string]string{"WSDecompressedTooLarge": "decompressed payload exceeds 16777216 bytes"},
+		},
+		{
 			name: "unknown anomaly key surfaces verbatim",
 			flows: []*flow.Flow{
 				{Direction: "send", Metadata: map[string]string{

@@ -105,7 +105,7 @@ With `"params": {"mode": "raw", "raw_override_base64": "..."}`, `modify_and_forw
 - **held_at**, **matched_rules**, **flow_id**, **stream_id**.
 - One of:
   - **http**: `method`, `scheme`, `authority`, `path`, `raw_query`, `status`, `status_reason`, `headers`, `trailers` (ordered `{name, value}` lists), `body`, `body_encoding`.
-  - **ws**: `opcode` (lowercase name, e.g. `text`), `fin`, `masked`, `compressed`, `close_code`, `close_reason`, `payload`, `payload_encoding`.
+  - **ws**: `opcode` (lowercase name, e.g. `text`), `fin`, `masked`, `compressed`, `close_code`, `close_reason`, `payload`, `payload_encoding`. A compressed message that decompresses past 16 MiB shows only its first 16 MiB as `payload`; `release` forwards the original frame intact, while `modify_and_forward` on it ends the connection instead of sending a truncated message.
   - **grpc_start**: `service`, `method`, `encoding`, `content_type`, `metadata`.
   - **grpc_data**: `service`, `method`, `compressed`, `end_stream`, `wire_length`, `payload`, `payload_encoding`.
   - **grpc_end**: `status`, `message`, `trailers`.

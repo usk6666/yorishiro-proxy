@@ -754,7 +754,7 @@ func TestChannel_Next_DeflateFragmentBufferOverflow_RejectsContinuation(t *testi
 	msg := &envelope.WSMessage{
 		Opcode: envelope.WSContinuation,
 	}
-	se := ch.applyDeflate(frame, envelope.Receive, msg)
+	_, se := ch.applyDeflate(frame, envelope.Receive, msg)
 	if se == nil {
 		t.Fatal("applyDeflate accepted overflow continuation; want StreamError")
 	}

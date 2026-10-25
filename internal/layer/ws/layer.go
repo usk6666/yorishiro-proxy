@@ -31,6 +31,11 @@ type options struct {
 	// payloads (pre-mask). Default = maxFramePayloadSize (16 MiB).
 	maxFrameSize int64
 
+	// inflateCap bounds the decompressed size of one permessage-deflate
+	// message that is surfaced as WSMessage.Payload. Default =
+	// maxFramePayloadSize (16 MiB). Read through (*options).decompressCap.
+	inflateCap int64
+
 	// stateReleaser is the optional pluginv2 hook invoked when the Channel
 	// reaches its terminal state. Drives ReleaseTransaction for the WS
 	// upgrade-pair scope. nil = no-op (legacy parallel).
@@ -121,6 +126,16 @@ func WithMaxFrameSize(n int64) Option {
 	}
 }
 
+// withInflateCap overrides the decompression cap (tests only; the
+// receive-side max_frame_size follow-up decides the public knob).
+func withInflateCap(n int64) Option {
+	return func(o *options) {
+		if n > 0 {
+			o.inflateCap = n
+		}
+	}
+}
+
 // WithStateReleaser injects a pluginv2.StateReleaser the Layer invokes
 // when the Channel reaches its terminal state. The release fires
 // ReleaseTransaction(ConnID, StreamID) — the WS upgrade-pair is the
@@ -136,6 +151,16 @@ func WithStateReleaser(r pluginv2.StateReleaser) Option {
 // the close still sees live transaction_state. nil = no-op.
 func WithLifecycleEngine(e *pluginv2.Engine) Option {
 	return func(o *options) { o.lifecycleEngine = e }
+}
+
+// decompressCap returns the decompression cap every permessage-deflate
+// inflate of this Layer runs with (USK-1321). It is the single read point
+// so the receive-side max_frame_size follow-up can swap the source.
+func (o *options) decompressCap() int64 {
+	if o == nil || o.inflateCap <= 0 {
+		return maxFramePayloadSize
+	}
+	return o.inflateCap
 }
 
 // WithInitialSequence seeds the Channel's Sequence counter to start so
@@ -250,6 +275,7 @@ type Layer struct {
 func New(reader io.Reader, writer io.Writer, closer io.Closer, streamID string, role Role, opts ...Option) *Layer {
 	o := options{
 		maxFrameSize: maxFramePayloadSize,
+		inflateCap:   maxFramePayloadSize,
 	}
 	for _, opt := range opts {
 		opt(&o)

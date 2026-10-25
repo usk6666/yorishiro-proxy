@@ -639,6 +639,8 @@ var flowMetadataAnomalyKeyToType = map[string]string{
 	"sse_anomaly_missing_data": string(envelope.AnomalySSEMissingData),
 	"sse_anomaly_truncated":    string(envelope.AnomalySSETruncated),
 	"sse_anomaly_duplicate_id": string(envelope.AnomalySSEDuplicateID),
+	// WebSocket anomalies (USK-1321).
+	"ws_anomaly_decompressed_too_large": string(envelope.AnomalyWSDecompressedTooLarge),
 }
 
 // anomalyMetadataPrefixes lists the per-flow Metadata key prefixes that
@@ -646,7 +648,7 @@ var flowMetadataAnomalyKeyToType = map[string]string{
 // adopt the `<proto>_anomaly_<type>` projection only need to append a
 // prefix here — the existing fallback path surfaces the entry verbatim
 // even if flowMetadataAnomalyKeyToType has not been updated.
-var anomalyMetadataPrefixes = []string{"http_anomaly_", "grpc_anomaly_", "sse_anomaly_"}
+var anomalyMetadataPrefixes = []string{"http_anomaly_", "grpc_anomaly_", "sse_anomaly_", "ws_anomaly_"}
 
 // extractAnomalies converts smuggling:* tags into a structured anomaly list.
 // Returns nil if no anomalies are present, avoiding unnecessary JSON array allocation.
@@ -689,7 +691,8 @@ func extractAnomalies(tags map[string]string) []queryAnomaly {
 
 // extractAnomaliesFromFlows rolls up per-flow Metadata keys with the
 // known anomaly prefixes (`http_anomaly_*` / `grpc_anomaly_*` /
-// `sse_anomaly_*`) into structured queryAnomaly entries (USK-849).
+// `sse_anomaly_*` / `ws_anomaly_*`) into structured queryAnomaly entries
+// (USK-849, USK-1321).
 //
 // Each matching key is mapped to its canonical envelope.AnomalyType
 // string via flowMetadataAnomalyKeyToType. Unknown keys (added by a
