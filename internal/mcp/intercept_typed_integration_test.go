@@ -172,6 +172,65 @@ func TestInterceptHoldQueue_HTTP_ModifyAndForward(t *testing.T) {
 	}
 }
 
+// TestInterceptHoldQueue_HTTP_BodyPatches_JSONPathByteExact pins that a
+// json_path body patch applied via modify_and_forward rewrites only the
+// target value; the rest of the held body stays byte-identical. Fixture:
+// the Issue body verified live on v0.21.0.
+func TestInterceptHoldQueue_HTTP_BodyPatches_JSONPathByteExact(t *testing.T) {
+	queue, cs := setupHoldQueueSession(t)
+
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Method: "POST",
+			Path:   "/api",
+			Headers: []envelope.KeyValue{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Content-Type", Value: "application/json"},
+			},
+			Body: []byte(`{"zeta":1,"alpha":{"y":2,"b":3},"url":"a/b<c>&d","big":12345678901234567890}`),
+		},
+	}
+	actionCh := holdInBackground(t, queue, env)
+	entry := waitForHeldEntry(t, queue, 2*time.Second)
+
+	res := callInterceptRaw(t, cs, map[string]any{
+		"action": "modify_and_forward",
+		"params": map[string]any{"intercept_id": entry.ID},
+		"http": map[string]any{
+			"body_patches": []map[string]any{
+				{"json_path": "$.zeta", "value": 2},
+			},
+		},
+	})
+	if res.IsError {
+		t.Fatalf("CallTool intercept: %v", res.Content)
+	}
+
+	select {
+	case action := <-actionCh:
+		if action == nil {
+			t.Fatal("Hold returned nil action")
+		}
+		if action.Type != common.ActionModifyAndForward {
+			t.Fatalf("Action type = %v, want ModifyAndForward", action.Type)
+		}
+		hm, ok := action.Modified.Message.(*envelope.HTTPMessage)
+		if !ok {
+			t.Fatalf("Modified.Message type = %T, want *HTTPMessage", action.Modified.Message)
+		}
+		want := `{"zeta":2,"alpha":{"y":2,"b":3},"url":"a/b<c>&d","big":12345678901234567890}`
+		if string(hm.Body) != want {
+			t.Errorf("Modified Body =\n  %s\nwant\n  %s", hm.Body, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Hold to return")
+	}
+}
+
 // TestInterceptHoldQueue_HTTP_HeaderOrderPreserved verifies that the
 // supplied headers slice is stored verbatim — order, casing, and
 // duplicates intact (RFC-001 wire-fidelity invariant).

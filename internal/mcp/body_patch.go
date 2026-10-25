@@ -25,6 +25,9 @@ type BodyPatch struct {
 	// before applying. For json_path patches, encoding is applied to string values only.
 	// For regex patches, encoding is applied to the replace string.
 	Encoding []string `json:"encoding,omitempty"`
+	// ValueJSON is raw JSON text spliced verbatim as the replacement value
+	// when using JSONPath patching (mutually exclusive with Value).
+	ValueJSON string `json:"value_json,omitempty"`
 }
 
 // validateBodyPatch checks that a BodyPatch has exactly one patch mode specified.

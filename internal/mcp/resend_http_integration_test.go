@@ -337,6 +337,76 @@ func TestResendHTTP_BodyPatches_AppliedToWire(t *testing.T) {
 	}
 }
 
+// TestResendHTTP_BodyPatches_JSONPathByteExact pins that a json_path patch
+// sent through the real resend_http tool reaches upstream with every byte
+// other than the target value untouched (no key sort, no HTML escaping, no
+// float64 truncation of unrelated big integers). Fixture: the Issue body
+// verified live on httpbin.org/anything.
+func TestResendHTTP_BodyPatches_JSONPathByteExact(t *testing.T) {
+	cs, _, _, _ := setupResendHTTPSession(t)
+	echo, getCaptured := startResendHTTPEcho(t)
+	authority := echo.URL[len("http://"):]
+
+	res := callResendHTTP(t, cs, map[string]any{
+		"method":    "POST",
+		"scheme":    "http",
+		"authority": authority,
+		"path":      "/echo",
+		"headers": []map[string]any{
+			{"name": "Host", "value": authority},
+			{"name": "content-type", "value": "application/json"},
+		},
+		"body": `{"zeta":1,"alpha":{"y":2,"b":3},"url":"a/b<c>&d","big":12345678901234567890}`,
+		"body_patches": []map[string]any{
+			{"json_path": "$.zeta", "value": 2},
+		},
+		"timeout_ms": 5000,
+	})
+	if res.IsError {
+		t.Fatalf("tool returned error: %s", extractTextContent(res))
+	}
+
+	_, capturedBody, _ := getCaptured()
+	want := `{"zeta":2,"alpha":{"y":2,"b":3},"url":"a/b<c>&d","big":12345678901234567890}`
+	if string(capturedBody) != want {
+		t.Errorf("upstream body =\n  %s\nwant\n  %s", capturedBody, want)
+	}
+}
+
+// TestResendHTTP_BodyPatches_ValueJSONBigIntExact pins that value_json
+// survives the go-sdk argument round trip (strings are not re-typed) and is
+// spliced verbatim, so a big integer reaches upstream exactly.
+func TestResendHTTP_BodyPatches_ValueJSONBigIntExact(t *testing.T) {
+	cs, _, _, _ := setupResendHTTPSession(t)
+	echo, getCaptured := startResendHTTPEcho(t)
+	authority := echo.URL[len("http://"):]
+
+	res := callResendHTTP(t, cs, map[string]any{
+		"method":    "POST",
+		"scheme":    "http",
+		"authority": authority,
+		"path":      "/echo",
+		"headers": []map[string]any{
+			{"name": "Host", "value": authority},
+			{"name": "content-type", "value": "application/json"},
+		},
+		"body": `{"big":1,"x":0}`,
+		"body_patches": []map[string]any{
+			{"json_path": "$.big", "value_json": "12345678901234567890"},
+		},
+		"timeout_ms": 5000,
+	})
+	if res.IsError {
+		t.Fatalf("tool returned error: %s", extractTextContent(res))
+	}
+
+	_, capturedBody, _ := getCaptured()
+	want := `{"big":12345678901234567890,"x":0}`
+	if string(capturedBody) != want {
+		t.Errorf("upstream body =\n  %s\nwant\n  %s", capturedBody, want)
+	}
+}
+
 // TestResendHTTP_FlowID_PrepopulatedSendInherited covers the flow_id path:
 // inherits method/scheme/authority/path/headers/body from the recorded send
 // flow when the user omits them. Confirms the Stream protocol guard accepts
