@@ -146,13 +146,16 @@ export function pickFuzzTool(
  * HTTP/2 streams are recorded as `protocol: "http"`; the wire version lives
  * in `http_version` ("h2" / "h2c"), which `query resource=flow` returns.
  * gRPC / gRPC-Web also ride on HTTP/2 but are their own protocol families
- * and are not reported here.
+ * and are not reported here. Legacy rows whose `protocol` is itself an
+ * HTTP/2 spelling ("HTTP/2", "h2") count even without `http_version`.
  */
 export function isHttp2(
   flow: Pick<FlowDetailResult, "protocol" | "http_version"> | null | undefined,
 ): boolean {
   if (!flow) return false;
   if (pickFlowDetailKind(flow.protocol) !== "http") return false;
+  const proto = (flow.protocol ?? "").toLowerCase();
+  if (proto === "http/2" || proto === "h2") return true;
   return flow.http_version === "h2" || flow.http_version === "h2c";
 }
 
