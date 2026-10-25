@@ -2357,19 +2357,10 @@ func buildOnCompleteFunc(store flow.Writer, blocked *blockedStreamSet) func(cont
 // "only non-zero fields are applied" sentinel for StreamUpdate.Duration
 // so a miss leaves the Stream's existing Duration untouched. Single
 // purpose so the call site in OnComplete stays readable (USK-885).
+// Delegates to flow.StreamElapsed, which the MCP resend / fuzz Stream
+// finalizer shares so both paths measure Duration identically.
 func computeStreamDuration(ctx context.Context, reader flow.StreamReader, streamID string) time.Duration {
-	if reader == nil {
-		return 0
-	}
-	st, err := reader.GetStream(ctx, streamID)
-	if err != nil || st == nil || st.Timestamp.IsZero() {
-		return 0
-	}
-	d := time.Since(st.Timestamp)
-	if d <= 0 {
-		return 0
-	}
-	return d
+	return flow.StreamElapsed(ctx, reader, streamID)
 }
 
 // errorTagMaxLen caps the size of the err.Error() string persisted under

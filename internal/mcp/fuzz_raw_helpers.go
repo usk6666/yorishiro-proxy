@@ -883,6 +883,12 @@ func (s *Server) runFuzzRawSingleVariantWithResponse(ctx context.Context, plan *
 	defer cancel()
 
 	respBytes, chunks, truncated, err := s.runFuzzRawSingleExchange(rtCtx, plan, row.StreamID, variantBytes, p)
+	// USK-1347 (parity with fuzz_http / fuzz_ws): fuzz_raw bypasses
+	// session.RunSession, so the per-variant Stream created by RecordStep
+	// must be finalised here (State + Duration) or it stays
+	// State="active" forever. Use the parent ctx (not rtCtx) so the
+	// terminal UPDATE lands even when the per-variant timeout expired.
+	finalizeResendStream(ctx, s.flowStore.store, row.StreamID, err)
 	if err != nil {
 		return row, nil, 0, false, err
 	}

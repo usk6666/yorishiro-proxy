@@ -19,5 +19,16 @@ import (
 // Shared by the live data path's OnComplete hook (proxybuild) and the
 // MCP resend / fuzz Stream finalizer so both record Duration the same way.
 func StreamElapsed(ctx context.Context, r StreamReader, streamID string) time.Duration {
-	return 0
+	if r == nil {
+		return 0
+	}
+	st, err := r.GetStream(ctx, streamID)
+	if err != nil || st == nil || st.Timestamp.IsZero() {
+		return 0
+	}
+	d := time.Since(st.Timestamp)
+	if d <= 0 {
+		return 0
+	}
+	return d
 }

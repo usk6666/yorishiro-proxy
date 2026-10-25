@@ -1101,6 +1101,12 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	defer cancel()
 
 	endEnv, recvData, _, err := s.runResendGRPC(rtCtx, variantPlan, p)
+	// USK-1347 (parity with fuzz_http / fuzz_ws): fuzz_grpc bypasses
+	// session.RunSession, so the per-variant Stream created by RecordStep
+	// must be finalised here (State + Duration) or it stays
+	// State="active" forever. Use the parent ctx (not rtCtx) so the
+	// terminal UPDATE lands even when the per-variant timeout expired.
+	finalizeResendStream(ctx, s.flowStore.store, variantPlan.streamID, err)
 	if err != nil {
 		return row, 0, nil, err
 	}
