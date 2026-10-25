@@ -53,10 +53,16 @@ package mcp
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
+
+// resendFinalizeTimeout bounds the terminal Stream write that
+// finalizeResendStream performs. A var (not a const) so tests can
+// shorten it.
+var resendFinalizeTimeout = 5 * time.Second
 
 // finalizeResendStream marks the Stream identified by streamID as
 // terminal in the flow store. Safe to call with a nil store (no-op),
