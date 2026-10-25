@@ -110,9 +110,16 @@ type resendGRPCEchoServer struct {
 	lastMD      metadata.MD
 	lastFull    string
 	streamCount int
+	// delay, when non-zero, is slept by every handler before it replies
+	// (after capture) so tests can observe a measurable round-trip time.
+	// Set before the server starts; read-only afterwards.
+	delay time.Duration
 }
 
 func (s *resendGRPCEchoServer) capture(ctx context.Context, full string, req []byte) {
+	if s.delay > 0 {
+		defer time.Sleep(s.delay)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastReq = append([]byte(nil), req...)
