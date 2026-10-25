@@ -1640,15 +1640,6 @@ func parseGRPCPath(path string) (string, string) {
 	return rest[:idx], rest[idx+1:]
 }
 
-// buildGRPCPath is the inverse of parseGRPCPath. Empty service+method
-// yields "/" so the wire form remains technically valid.
-func buildGRPCPath(service, method string) string {
-	if service == "" && method == "" {
-		return "/"
-	}
-	return "/" + service + "/" + method
-}
-
 // parseGRPCStatus parses a uint32 status code; defaults to 0 (OK) on
 // parse failure (gRPC compatibility — peers MAY send malformed values).
 func parseGRPCStatus(v string) uint32 {
@@ -1995,13 +1986,12 @@ func authorityForStart(m *envelope.GRPCStartMessage) string {
 // guard: sendStart is the sole call site and rejects a typed-nil message
 // before reaching here, so a guard would be dead defence (USK-1051
 // review F-2).
+//
+// The rule itself lives in envelope.GRPCStartWirePath, shared with the
+// gRPC-Web Layer and the TargetScope request check (USK-1236), so the
+// path the policy judges is the path written here.
 func pathForStart(m *envelope.GRPCStartMessage) string {
-	if m.Path != "" {
-		if svc, method := parseGRPCPath(m.Path); svc == "" && method == "" {
-			return m.Path
-		}
-	}
-	return buildGRPCPath(m.Service, m.Method)
+	return envelope.GRPCStartWirePath(m)
 }
 
 // statusFor returns the :status for a Receive-side Start envelope, else 0.

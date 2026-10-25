@@ -71,9 +71,9 @@ func NewHostScopeStep(scope *connector.TargetScope) *HostScopeStep {
 // path need no extra state): an HTTP envelope continues to HTTPScopeStep,
 // which checks the request path; a WebSocket envelope continues because
 // its frames ride an upgrade request HTTPScopeStep already path-checked;
-// every other protocol — raw bytes, gRPC and gRPC-Web, whose requests
-// HTTPScopeStep does not path-check (USK-1236) — is blocked, failing
-// closed.
+// a gRPC / gRPC-Web envelope continues because HTTPScopeStep checks its
+// RPC's Start (USK-1236); raw bytes, which never carry a path, are
+// blocked, failing closed.
 func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Result {
 	if env.Direction != envelope.Send {
 		return Result{}
@@ -110,9 +110,10 @@ func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Res
 		// whose original destination no allow rule admits, the dial
 		// target is a deny-only leg and the request's names must admit
 		// it — which HTTPScopeStep checks (allow + DNS binding) on HTTP
-		// requests and, through the upgrade request, on WebSocket
-		// frames. Every other protocol fails closed, as for pathPending,
-		// unless the connection's ClientHello SNI admitted it (below).
+		// requests, on gRPC / gRPC-Web RPC Starts (USK-1376) and, through
+		// the upgrade request, on WebSocket frames. Raw bytes fail
+		// closed, as for pathPending, unless the connection's ClientHello
+		// SNI admitted it (below).
 		if ok, _ := s.scope.CheckDenyOnly(scheme, host, port, ""); ok {
 			allowed, pathPending = true, true
 			if !requestPathChecked(env.Protocol) && s.sniAdmits(ctx, ts, scheme, env.Context.TargetHost, port) {
@@ -135,9 +136,11 @@ func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Res
 // name leg the connection gate checked — an allow rule matches it and no
 // deny matches it, on the destination's port — and still resolve to the
 // original destination. It is consulted only for envelopes no request
-// path check covers (raw bytes, gRPC, gRPC-Web) on a connection whose
-// destination is not denied; HTTP and WebSocket envelopes keep the
-// per-request Host / :authority checks of HTTPScopeStep. Explicit-proxy
+// check covers (raw bytes) on a connection whose destination is not
+// denied; HTTP, WebSocket, gRPC and gRPC-Web envelopes keep the
+// per-request Host / :authority checks of HTTPScopeStep (gRPC since
+// USK-1376 — the SNI does not vouch for the :authority an RPC names).
+// Explicit-proxy
 // and tcp_forward connections carry no TransparentScope, so this never
 // applies to them.
 func (s *HostScopeStep) sniAdmits(ctx context.Context, ts *connector.TransparentScope, scheme, dialTarget string, port int) bool {
@@ -179,13 +182,14 @@ func (p *Pipeline) AdmitsRawRelay(ctx context.Context, envCtx envelope.EnvelopeC
 }
 
 // requestPathChecked reports whether every Send envelope of protocol p is
-// covered by an HTTPScopeStep request-path check (USK-1130): HTTP requests
-// directly, WebSocket frames through the upgrade request. Raw bytes carry
-// no path, and gRPC / gRPC-Web requests are not path-checked by
-// HTTPScopeStep (USK-1236), so a path-scoped allow must not admit them.
+// covered by an HTTPScopeStep request check (USK-1130): HTTP requests
+// directly, WebSocket frames through the upgrade request, and gRPC /
+// gRPC-Web messages through their RPC's Start, whose authority, Host
+// values and path HTTPScopeStep judges (USK-1376, USK-1236). Raw bytes
+// carry no path, so a path-scoped allow must not admit them.
 func requestPathChecked(p envelope.Protocol) bool {
 	switch p {
-	case envelope.ProtocolHTTP, envelope.ProtocolWebSocket:
+	case envelope.ProtocolHTTP, envelope.ProtocolWebSocket, envelope.ProtocolGRPC, envelope.ProtocolGRPCWeb:
 		return true
 	default:
 		return false
@@ -194,17 +198,27 @@ func requestPathChecked(p envelope.Protocol) bool {
 
 // targetScopeBlock is the Result of a target scope deny for env.
 //
+// Both scope Steps, and the recheck seams that reuse them, block through
+// it.
+//
 // USK-829: when the envelope is an HTTP message, synthesize a 403
 // terminator so the client sees a clean close instead of hanging on its
-// read timeout. Non-HTTP envelopes keep the legacy silent Drop —
-// protocol-correct terminators for raw/ws/gRPC are deferred (D2-D5).
+// read timeout. A Send native gRPC Start / Data gets the grpc-status 7
+// PERMISSION_DENIED terminator the SafetyFilter and intercept drops
+// already use (grpcPolicyDropResult, USK-1376), which ends the RPC; a
+// gRPC-Web envelope keeps Drop until it has a protocol-correct terminator
+// of its own. Raw and WebSocket envelopes keep the silent Drop —
+// protocol-correct terminators for them are deferred (D2-D5).
 func targetScopeBlock(env *envelope.Envelope) Result {
-	if _, ok := env.Message.(*envelope.HTTPMessage); ok {
+	switch env.Message.(type) {
+	case *envelope.HTTPMessage:
 		return Result{
 			Action:    Respond,
 			Response:  buildPolicyDropResponse(env, BlockedByTargetScope, nil),
 			BlockedBy: BlockedByTargetScope,
 		}
+	case *envelope.GRPCStartMessage, *envelope.GRPCDataMessage:
+		return grpcPolicyDropResult(env, BlockedByTargetScope, nil)
 	}
 	return Result{Action: Drop, BlockedBy: BlockedByTargetScope}
 }

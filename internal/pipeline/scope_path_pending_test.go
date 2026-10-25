@@ -10,9 +10,10 @@ import (
 
 // USK-1130: HostScopeStep and HTTPScopeStep under a path-scoped allow
 // ({hostname: X, path_prefix: "/api/"}). The connection-level step cannot
-// see a path; it lets HTTP / WebSocket envelopes through to HTTPScopeStep,
-// which is authoritative for the path, and blocks every protocol on which
-// no request path is checked (raw, gRPC, gRPC-Web — fail closed).
+// see a path; it lets HTTP / WebSocket / gRPC / gRPC-Web envelopes through
+// to HTTPScopeStep, which is authoritative for the path (gRPC since
+// USK-1236), and blocks raw, on which no request path is ever checked
+// (fail closed).
 
 func pathScopedAllowScope(rules ...connector.TargetRule) *connector.TargetScope {
 	s := connector.NewTargetScope()
@@ -48,14 +49,14 @@ func TestHostScopeStep_PathPending_ByProtocol(t *testing.T) {
 			Direction: envelope.Send, Protocol: envelope.ProtocolRaw, Context: tlsCtx,
 			Message: &envelope.RawMessage{Bytes: []byte{0x00, 0x01}},
 		}, true},
-		{"grpc is blocked (HTTPScopeStep does not path-check gRPC, USK-1236)", &envelope.Envelope{
+		{"grpc continues (HTTPScopeStep path-checks the RPC Start, USK-1236)", &envelope.Envelope{
 			Direction: envelope.Send, Protocol: envelope.ProtocolGRPC, Context: tlsCtx,
 			Message: &envelope.GRPCStartMessage{Service: "pkg.Svc", Method: "Do"},
-		}, true},
-		{"grpc-web is blocked", &envelope.Envelope{
+		}, false},
+		{"grpc-web continues", &envelope.Envelope{
 			Direction: envelope.Send, Protocol: envelope.ProtocolGRPCWeb, Context: tlsCtx,
 			Message: &envelope.GRPCStartMessage{Service: "pkg.Svc", Method: "Do"},
-		}, true},
+		}, false},
 	}
 	step := NewHostScopeStep(scope)
 	for _, tc := range tests {

@@ -39,6 +39,7 @@ type scopeForwardFixture struct {
 	scope     *connector.TargetScope
 	liveConns *connector.LiveConns
 	logs      *testutil.CaptureLogger
+	store     *flowStoreCapture
 	fwdAddr   string
 }
 
@@ -91,7 +92,7 @@ func startScopeForward(t *testing.T, fc *config.ForwardConfig) *scopeForwardFixt
 	if fwdAddr == "" {
 		t.Fatal("forward listener not bound")
 	}
-	return &scopeForwardFixture{scope: scope, liveConns: liveConns, logs: logs, fwdAddr: fwdAddr}
+	return &scopeForwardFixture{scope: scope, liveConns: liveConns, logs: logs, store: store, fwdAddr: fwdAddr}
 }
 
 // deny installs a Policy deny on the target's host:port, optionally only

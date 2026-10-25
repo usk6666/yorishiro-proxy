@@ -29,7 +29,7 @@ Both Policy Layer and Agent Layer `target_scope` rules apply to **all** proxy tr
 |---|---|---|
 | Transparent MITM (HTTP CONNECT tunnel, plain HTTP forward proxy, SOCKS5 tunnel) | Applied | Applied |
 | TCP forward (`tcp_forwards`, every `protocol`) | Applied (at `proxy_start` and at every accept, before the target is contacted; see [`tcp_forwards` gate](#tcp_forwards-gate)) | Applied |
-| Transparent listener (`proxy_start` `transparent_mode: "redirect"`) | Applied (original destination, SNI and every request's `Host` / `:authority`, before the target is contacted — on TLS MITM connections too; a name may admit an IP that is not allow-listed only if it resolves to it, and an admitting SNI also admits the connection's non-HTTP traffic; on an IP-allowed destination name denies are best-effort for traffic not recognised as HTTP / TLS — see `docs(topic="proxy_start")`, "Target scope on a transparent listener") | Applied |
+| Transparent listener (`proxy_start` `transparent_mode: "redirect"`) | Applied (original destination, SNI and every request's `Host` / `:authority`, before the target is contacted — on TLS MITM connections too; a name may admit an IP that is not allow-listed only if it resolves to it, and an admitting SNI also admits the connection's raw (non-HTTP, non-gRPC) traffic; on an IP-allowed destination name denies are best-effort for traffic not recognised as HTTP / TLS — see `docs(topic="proxy_start")`, "Target scope on a transparent listener") | Applied |
 | MCP tool-initiated requests (`resend_http`, `resend_ws`, `resend_grpc`, `resend_raw`, `fuzz_http`, `fuzz_ws`, `fuzz_grpc`, `fuzz_raw`, `macro`) | Applied | Applied |
 | Intercepted traffic released from a hold (`intercept` `release` / `modify_and_forward`, timeout auto-release) | Applied | Applied |
 
@@ -44,7 +44,7 @@ A `target_scope` deny surfaces differently depending on how the request entered 
 | Transparent HTTPS via CONNECT tunnel | Proxy refuses the tunnel with `HTTP/1.1 403 Forbidden` and body `yorishiro-proxy: target blocked by scope`, then closes the connection. No tunnel is opened and the backend is never contacted. |
 | Transparent plain-HTTP forward proxy | Proxy returns `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`. |
 | MCP tool-initiated request (`resend_*`, `fuzz_*`, `macro`) | MCP error response with the violation reason. |
-| Intercept release (`release`, `modify_and_forward`, timeout auto-release) | The `intercept` call itself succeeds. Scope is checked again at release time, with the rules in force then, against the request being forwarded — for `modify_and_forward`, the modified one. A deny added while the request was held (policy reload or this tool) or a rewrite of `authority` / `path` into a denied target blocks it: an HTTP request gets `403 Forbidden` with body `{"error":"blocked by target_scope","blocked_by":"target_scope"}`, a WebSocket / gRPC message is dropped, and the block is recorded as a flow with `blocked_by: target_scope`. |
+| Intercept release (`release`, `modify_and_forward`, timeout auto-release) | The `intercept` call itself succeeds. Scope is checked again at release time, with the rules in force then, against the request being forwarded — for `modify_and_forward`, the modified one. A deny added while the request was held (policy reload or this tool) or a rewrite of `authority` / `path` into a denied target blocks it: an HTTP request gets `403 Forbidden` with body `{"error":"blocked by target_scope","blocked_by":"target_scope"}`, a native gRPC call fails with `grpc-status: 7`, a WebSocket / gRPC-Web message is dropped, and the block is recorded as a flow with `blocked_by: target_scope`. |
 
 ### Reloading the Policy Layer (operator only)
 
@@ -190,15 +190,17 @@ steps:
 
 - **Allow** `{hostname: X, path_prefix: "/api/"}`: the connection to X is admitted
   when the proxy will check the path of every request on it — HTTP/1.x, HTTP/2
-  (including h2c) and WebSocket (the upgrade request is path-checked). Each request
+  (including h2c), WebSocket (the upgrade request is path-checked) and gRPC /
+  gRPC-Web (each call's path, e.g. `/pkg.Service/Method`). Each request
   is then checked with its path: `/api/x` reaches X, `/other` is answered
-  403 `blocked_by: target_scope`. Traffic on which no path is ever seen is refused:
+  403 `blocked_by: target_scope` (a native gRPC call fails with `grpc-status: 7`).
+  Traffic on which no path is ever seen is refused:
   a TLS passthrough target (`tls_passthrough`), a `raw_passthrough_hosts` target,
-  `tcp_forwards` with `protocol: raw` or `grpc` (`proxy_start` refuses the entry),
+  `tcp_forwards` with `protocol: raw` (`proxy_start` refuses the entry), and
   non-HTTP bytes inside a tunnel (the connection is closed and a raw Stream is
   recorded with `blocked_by: target_scope`; the upstream connection may already
   have been opened, but receives no client byte and none of its bytes reach the
-  client), and gRPC / gRPC-Web requests. A raw tunnel that was opened while a
+  client). A raw tunnel that was opened while a
   host-only allow admitted X is closed when the scope is narrowed to the
   path-scoped allow (policy reload or this tool), exactly as a new one would be
   refused; HTTP connections to X stay open and each later request is checked
@@ -207,6 +209,11 @@ steps:
 - **Deny** `{hostname: X, path_prefix: "/admin"}`: never refuses or closes a
   connection; it is enforced per request. It therefore does not cover TLS
   passthrough or raw traffic to X — deny the host itself for that.
+  It matches the literal wire path (and its percent-decoded form) only —
+  for HTTP and gRPC / gRPC-Web alike — so aliases a server may route to the
+  same resource (`//admin`, `/./admin`, `/x/../admin`, `%2F` spellings) are
+  not matched. A path deny is not a hard boundary; to confine traffic to
+  some paths, use a path-scoped **allow** instead.
 
 Every request is checked against both the host it names (`Host` / `:authority`)
 and the host the connection actually reaches, each with the request path, so
@@ -219,7 +226,8 @@ The names a request carries — its authority (`Host` as parsed, HTTP/2
 included; HTTP/2's regular `host` header too) and, for an HTTP/1.x
 absolute-form request-target (`GET http://name/path HTTP/1.1`), the URI's
 authority — are checked as well, on live
-traffic, after an intercept `modify_and_forward` or a Transform rule rewrites the
+traffic (gRPC and gRPC-Web calls included: their `:authority` / `Host` and every
+`host` metadata value), after an intercept `modify_and_forward` or a Transform rule rewrites the
 request, and in `resend_http` / `fuzz_http` (each variant, after positions are
 applied). They are checked with a narrower allow rule than the host the
 connection dials:
@@ -296,7 +304,10 @@ recorded request still shows the scheme exactly as the client declared it.
 |---|---|---|
 | HTTP/1.x, HTTP/2 request | `403` with `X-Blocked-By: target_scope` | Stream with `blocked_by: target_scope`, `state: error` |
 | Raw TCP (bytechunk — CONNECT / SOCKS5 tunnels carrying an unknown protocol, `raw_passthrough_hosts`, `tcp_forwards` with `protocol: raw` or an `auto` fallback to raw) | The connection is closed (EOF) when it settles on a raw relay, before any byte is relayed in either direction; none of the client's bytes reach the denied host and none of its bytes reach the client | One raw Stream with `blocked_by: target_scope`, `state: error` |
-| WebSocket, gRPC message | The message is dropped; the connection stays open | Stream with `blocked_by: target_scope` |
+| Native gRPC call | The call fails with `grpc-status: 7` (PERMISSION_DENIED) and `grpc-message: blocked by target_scope`; the RPC ends, the connection stays open | Stream with `blocked_by: target_scope`, `state: error` |
+| WebSocket message | The message is dropped; the connection stays open | Stream with `blocked_by: target_scope` |
+| gRPC-Web call denied by the host the connection dials | Every message of the call is dropped; the connection stays open and the client gets no gRPC-Web response | Stream with `blocked_by: target_scope` |
+| gRPC-Web call denied by its own request (path, `:authority` / `Host`, `host` metadata) | The call is aborted: its start is dropped, so no request byte reaches the upstream, and the HTTP/1.x connection is closed (HTTP/2: the stream is reset); the client gets no gRPC-Web status. A TCP (and TLS) connection to the dial target the connection was already admitted for may still be opened | Stream with `blocked_by: target_scope` |
 | `tcp_forwards` target denied when `proxy_start` runs | `proxy_start` fails with an error naming the scope, port and target; nothing is bound | Nothing |
 | `tcp_forwards` target denied when a client connects | Plaintext `protocol: http` / `websocket` / `sse`: `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`, then close. Every other protocol and every `tls: true` entry: the connection is closed with no byte (a TLS client's handshake fails). The target is never contacted | Nothing (Info log) |
 

@@ -50,8 +50,21 @@ import (
 // CONNECT / SOCKS5 MITM tunnel, or on a later request of a plain forward
 // keep-alive connection — would otherwise reach a name no check saw.
 //
-// Only Send-direction HTTPMessage envelopes are checked. Receive and
-// non-HTTP messages always pass through.
+// gRPC and gRPC-Web requests are checked the same way (USK-1376,
+// USK-1236). They reach the Pipeline as a Send GRPCStartMessage, never as
+// an HTTPMessage, so the Start is judged through the same request view:
+// its Authority (the :authority, or the first Host of an HTTP/1.x
+// gRPC-Web request), every "host" value in its Metadata, the connection's
+// absolute-form authority, and the path the Layers actually write
+// (envelope.GRPCStartWirePath — the derived Service / Method win over an
+// overridden parseable :path). The judgement — legs, Option B, the
+// transparent DNS binding, the scheme from the transport — is identical;
+// only the extraction differs. A native gRPC block answers grpc-status 7
+// PERMISSION_DENIED, a gRPC-Web block is a Drop (targetScopeBlock).
+//
+// Only Send-direction HTTPMessage and GRPCStartMessage envelopes are
+// checked. Receive envelopes, gRPC Data / End and every other message
+// always pass through.
 type HTTPScopeStep struct {
 	scope *connector.TargetScope
 }
@@ -62,8 +75,10 @@ func NewHTTPScopeStep(scope *connector.TargetScope) *HTTPScopeStep {
 	return &HTTPScopeStep{scope: scope}
 }
 
-// Process checks Send-direction HTTPMessage envelopes against the
-// TargetScope. Returns Drop if the target is blocked, Continue otherwise.
+// Process checks Send-direction HTTPMessage and GRPCStartMessage envelopes
+// against the TargetScope. A blocked request gets targetScopeBlock's
+// Result (a synthetic 403 for HTTP, grpc-status 7 for native gRPC, Drop
+// for gRPC-Web); everything else continues.
 func (s *HTTPScopeStep) Process(ctx context.Context, env *envelope.Envelope) Result {
 	if env.Direction != envelope.Send {
 		return Result{}
@@ -71,13 +86,40 @@ func (s *HTTPScopeStep) Process(ctx context.Context, env *envelope.Envelope) Res
 
 	switch msg := env.Message.(type) {
 	case *envelope.HTTPMessage:
-		return s.processHTTP(ctx, env, msg)
+		return s.processRequest(ctx, env, scopeRequest{
+			authority: msg.Authority,
+			path:      msg.Path,
+			headers:   msg.Headers,
+		})
+	case *envelope.GRPCStartMessage:
+		if msg == nil {
+			return Result{}
+		}
+		// USK-1376 / USK-1236: the wire path, not msg.Path alone — the
+		// Layers rebuild a parseable :path from Service / Method, so an
+		// overridden Service / Method is what the upstream receives.
+		return s.processRequest(ctx, env, scopeRequest{
+			authority: msg.Authority,
+			path:      envelope.GRPCStartWirePath(msg),
+			headers:   msg.Metadata,
+		})
 	default:
 		return Result{}
 	}
 }
 
-func (s *HTTPScopeStep) processHTTP(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) Result {
+// scopeRequest is the protocol-neutral, read-only view of a request that
+// HTTPScopeStep judges: the client-written authority, the request path
+// (without the query) and the header list whose "host" values are name
+// legs. Each protocol maps its own Message onto it; headers is the
+// Message's own slice, never copied or modified (MITM Principle 1).
+type scopeRequest struct {
+	authority string
+	path      string
+	headers   []envelope.KeyValue
+}
+
+func (s *HTTPScopeStep) processRequest(ctx context.Context, env *envelope.Envelope, req scopeRequest) Result {
 	if s.scope == nil || !s.scope.HasRules() {
 		return Result{}
 	}
@@ -89,10 +131,10 @@ func (s *HTTPScopeStep) processHTTP(ctx context.Context, env *envelope.Envelope,
 	// msg.Scheme itself is left untouched — it is recorded and forwarded
 	// as the wire declared it.
 	scheme := transportScopeScheme(env)
-	path := msg.Path
+	path := req.path
 
 	dialTarget := env.Context.TargetHost
-	allowed := s.checkNameLeg(scheme, msg.Authority, path, dialTarget)
+	allowed := s.checkNameLeg(scheme, req.authority, path, dialTarget)
 	var bindTo *connector.TransparentScope
 	if allowed && dialTarget != "" {
 		if ts := connector.TransparentScopeFromContext(ctx); ts != nil {
@@ -106,7 +148,7 @@ func (s *HTTPScopeStep) processHTTP(ctx context.Context, env *envelope.Envelope,
 		}
 	}
 	if allowed {
-		allowed = s.checkHostHeaders(scheme, msg.Headers, path, dialTarget)
+		allowed = s.checkHostHeaders(scheme, req.headers, path, dialTarget)
 	}
 	if allowed && env.Context.AbsoluteFormAuthority != "" {
 		// USK-1274: an HTTP/1.x absolute-form request-target goes out
@@ -117,17 +159,12 @@ func (s *HTTPScopeStep) processHTTP(ctx context.Context, env *envelope.Envelope,
 	if allowed && bindTo != nil {
 		// The DNS binding runs last, on names every allow / deny check
 		// above already admitted: a refused name is never resolved.
-		allowed = bindTo.NamesBound(ctx, transparentRequestNames(msg, env))
+		allowed = bindTo.NamesBound(ctx, transparentRequestNames(req, env))
 	}
 	if !allowed {
-		// USK-829: emit a 403 terminator on the wire. HTTPScopeStep is
-		// HTTPMessage-typed by construction so the synthetic Respond
-		// envelope is always appropriate here.
-		return Result{
-			Action:    Respond,
-			Response:  buildPolicyDropResponse(env, BlockedByTargetScope, nil),
-			BlockedBy: BlockedByTargetScope,
-		}
+		// USK-829: a 403 terminator for HTTP; grpc-status 7 for native
+		// gRPC and Drop for gRPC-Web (USK-1376).
+		return targetScopeBlock(env)
 	}
 	return Result{}
 }
@@ -165,12 +202,12 @@ func (s *HTTPScopeStep) checkTransparentDial(scheme, dialTarget, path string) (a
 
 // transparentRequestNames is every name a request carries: the
 // authority, each Host value and the absolute-form authority.
-func transparentRequestNames(msg *envelope.HTTPMessage, env *envelope.Envelope) []string {
+func transparentRequestNames(req scopeRequest, env *envelope.Envelope) []string {
 	var names []string
-	if msg.Authority != "" {
-		names = append(names, msg.Authority)
+	if req.authority != "" {
+		names = append(names, req.authority)
 	}
-	names = append(names, envelope.HostHeaderValues(msg.Headers)...)
+	names = append(names, envelope.HostHeaderValues(req.headers)...)
 	if env.Context.AbsoluteFormAuthority != "" {
 		names = append(names, env.Context.AbsoluteFormAuthority)
 	}

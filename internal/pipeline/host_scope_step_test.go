@@ -200,7 +200,8 @@ func TestHostScopeStep_NoRules_AllAllowed(t *testing.T) {
 // HostScopeStep block emits Respond + synthetic 403 instead of a silent
 // Drop, so the client sees a clean wire terminator. Non-HTTPMessage blocks
 // (covered by the legacy TestHostScopeStep_BlockedHost / _DeniedHost above)
-// keep the Drop shape — protocol-correct terminators for raw/ws/gRPC are
+// keep the Drop shape (native gRPC answers grpc-status 7 since USK-1376,
+// TestHostScopeStep_GRPCBlockShape) — terminators for raw/ws/gRPC-Web are
 // deferred (D2-D5).
 func TestHostScopeStep_BlockedHost_HTTPMessage_Respond(t *testing.T) {
 	scope := connector.NewTargetScope()

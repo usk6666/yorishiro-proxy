@@ -78,9 +78,10 @@ func tcpForwardScheme(upstreamTLS bool) string {
 //
 // protocol is the entry's declared arm ("" = auto). A path-scoped allow
 // admits the target provisionally on the arms whose requests the Pipeline
-// path-checks — http, http2, websocket, sse and auto (an h2 gRPC stream or
-// an auto raw fallback is then blocked per envelope by HostScopeStep) —
-// and not on raw or grpc, which never yield a checked path (USK-1130).
+// path-checks — http, http2, websocket, sse, grpc (each RPC's Start is
+// judged by HTTPScopeStep, USK-1236) and auto (an auto raw fallback is
+// then blocked per envelope by HostScopeStep) — and not on raw, which
+// never yields a checked path (USK-1130).
 func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamTLS bool, protocol string) (allowed bool, reason string) {
 	if scope == nil || !scope.HasRules() {
 		return true, ""
@@ -97,16 +98,12 @@ func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamT
 	return allowed, reason
 }
 
-// tcpForwardOpaqueProtocol reports whether a forward arm never yields an
-// HTTP request path that HTTPScopeStep checks: raw is a byte relay, and
-// gRPC requests bypass the HTTP path check (USK-1236).
+// tcpForwardOpaqueProtocol reports whether a forward arm never yields a
+// request path that HTTPScopeStep checks: raw is a byte relay. The grpc
+// arm is not opaque — HTTPScopeStep judges every RPC's :authority and
+// path (USK-1236).
 func tcpForwardOpaqueProtocol(protocol string) bool {
-	switch protocol {
-	case "raw", "grpc":
-		return true
-	default:
-		return false
-	}
+	return protocol == "raw"
 }
 
 // tcpForwardTargetHostPort splits a forward target into host and a port

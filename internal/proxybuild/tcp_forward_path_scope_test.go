@@ -10,11 +10,11 @@ import (
 )
 
 // USK-1130: a path-scoped allow at the tcp_forwards gate. Arms whose
-// Pipeline path-checks every request (http, http2, websocket, sse, auto —
-// whose raw fallback and h2 gRPC streams HostScopeStep blocks) admit the
-// target provisionally; raw and grpc never yield a checked path and stay
-// strict. Start-time, accept-time and live-connection checks share the
-// predicate.
+// Pipeline path-checks every request (http, http2, websocket, sse, grpc —
+// each RPC's Start since USK-1236 — and auto, whose raw fallback
+// HostScopeStep blocks) admit the target provisionally; raw never yields
+// a checked path and stays strict. Start-time, accept-time and
+// live-connection checks share the predicate.
 func TestTCPForwardScopeCheck_PathScopedAllow(t *testing.T) {
 	const target = "127.0.0.1:4444"
 	scope := connector.NewTargetScope()
@@ -31,7 +31,7 @@ func TestTCPForwardScopeCheck_PathScopedAllow(t *testing.T) {
 		{"websocket", true},
 		{"sse", true},
 		{"raw", false},
-		{"grpc", false},
+		{"grpc", true},
 	}
 	for _, tc := range cases {
 		t.Run("protocol="+tc.protocol, func(t *testing.T) {
@@ -82,5 +82,19 @@ func TestStartTCPForwards_PathScopedAllow(t *testing.T) {
 		freePortKey(t): {Target: "127.0.0.1:4444", Protocol: "http"},
 	}}); err != nil {
 		t.Errorf("http forward under a path-scoped allow refused: %v", err)
+	}
+}
+
+// USK-1236: the grpc arm's RPCs are path-checked per request by
+// HTTPScopeStep, so a path-scoped allow admits the target provisionally on
+// it, as on the other L7 arms; raw stays strict.
+func TestTCPForwardScopeCheck_PathScopedAllow_GRPCArmProvisional(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules([]connector.TargetRule{{Hostname: "127.0.0.1", PathPrefix: "/pkg.Svc/"}}, nil)
+	if ok, reason := tcpForwardScopeCheck(scope, "127.0.0.1:4444", false, "grpc"); !ok {
+		t.Errorf("grpc arm under a path-scoped allow refused at the gate: %s", reason)
+	}
+	if ok, _ := tcpForwardScopeCheck(scope, "127.0.0.1:4444", false, "raw"); ok {
+		t.Error("raw arm under a path-scoped allow admitted; want strict")
 	}
 }
