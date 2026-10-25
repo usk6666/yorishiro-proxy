@@ -66,3 +66,67 @@ describe("legacy protocol literals", () => {
     expect(src).toMatch(/no migration/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// "SSE" / "Raw"
+//
+// The canonical values are "sse" / "raw". "SSE" and "Raw" are also ordinary
+// UI labels ("Raw" names many body-view tabs and toggles), so a line regex
+// cannot tell a label from a value. These are classified on the TypeScript
+// AST instead: a literal is flagged only where it acts as a value —
+// compared, defaulted, switched on, passed, stored, or typed.
+// ---------------------------------------------------------------------------
+
+/**
+ * Return "line: text" for every "SSE" / "Raw" string literal in `src` that
+ * is used as a value rather than as a label. Not implemented yet.
+ */
+function findProtocolValueLiterals(_src: string, _fileName: string): string[] {
+  return [];
+}
+
+describe("legacy SSE / Raw protocol literals", () => {
+  const flagged: [string, string][] = [
+    ["strict equality", `if (p === "Raw") {}`],
+    ["nullish default", `const x = flow?.protocol ?? "SSE";`],
+    ["case clause", `switch (p) { case "Raw": break; }`],
+    ["property value", `f({ protocol: "SSE" });`],
+    ["array member", `["SSE", "raw"].includes(p);`],
+    ["strict inequality, single quotes", `const b = p !== 'Raw';`],
+    ["template call argument", "x.has(`SSE`);"],
+    ["logical-or default", `const p = q || "Raw";`],
+    ["variable initializer", `const p = "Raw";`],
+    ["literal type", `type P = "SSE" | "sse";`],
+    ["comparison through parens and a cast", `if (p === ("SSE" as string)) {}`],
+    ["ternary branch stored as a value", `const p = c ? "sse" : "SSE";`],
+    ["JSX value attribute", `const o = <option value="Raw" />;`],
+    ["JSX protocol attribute expression", `const b = <Badge protocol={"SSE"} />;`],
+  ];
+
+  it.each(flagged)("flags a value use: %s", (_name, snippet) => {
+    expect(findProtocolValueLiterals(snippet, "snippet.tsx")).toHaveLength(1);
+  });
+
+  const passed: [string, string][] = [
+    ["label property", `const tabs = [{ id: "raw", label: "Raw" }];`],
+    ["JSX text", `const e = <b>SSE</b>;`],
+    ["ternary inside JSX", `const e = <span>{c ? "Highlighted" : "Raw"}</span>;`],
+    ["return from a label function", `function kindLabel() { return "Raw"; }`],
+    ["title attribute", `const z = <Tab title="Raw" />;`],
+  ];
+
+  it.each(passed)("does not flag a label: %s", (_name, snippet) => {
+    expect(findProtocolValueLiterals(snippet, "snippet.tsx")).toEqual([]);
+  });
+
+  it("are not used as values outside the documented tolerant helpers", () => {
+    const hits: string[] = [];
+    for (const [path, src] of Object.entries(sources)) {
+      if (isTestFile(path) || ALLOWED_FILES.has(path)) continue;
+      for (const hit of findProtocolValueLiterals(src, path)) {
+        hits.push(`${path}:${hit}`);
+      }
+    }
+    expect(hits).toEqual([]);
+  });
+});
