@@ -73,7 +73,7 @@ Narrow it down with filters:
 {"resource": "flows", "filter": {"host": "api.example.com", "method": "POST"}}
 ```
 
-`filter.protocol` takes a canonical family — `http`, `ws`, `grpc`, `grpc-web`, `sse`, `raw`, `tls-handshake` — and expands across every wire spelling of that family. Use `filter.scheme: "https"` to select TLS flows regardless of HTTP version.
+`filter.protocol` takes a canonical family — `http`, `ws`, `grpc`, `grpc-web`, `sse`, `raw`, `tls-handshake` — and matches `Stream.Protocol` exactly; rows recorded under a legacy spelling (e.g. `HTTP/2`, `SOCKS5+HTTPS`, from older databases or JSONL imports) are not matched. Use `filter.scheme: "https"` to select TLS flows regardless of HTTP version.
 
 Inspect one flow in full:
 
