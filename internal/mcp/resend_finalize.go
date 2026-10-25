@@ -72,7 +72,8 @@ import (
 // detail per CLAUDE.md log-level guidance); store write failures are
 // slog.Warn since the data is already on disk via RecordStep — only the
 // terminal state attribute is missing — and the proxy can continue.
-func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID string, runErr error) {
+func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID, tag string, runErr error) {
+	_ = tag // TODO(USK-1362): scaffold — not yet applied
 	if store == nil || streamID == "" {
 		return
 	}

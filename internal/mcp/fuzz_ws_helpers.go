@@ -1070,7 +1070,7 @@ func (s *Server) runFuzzWSSingleVariant(ctx context.Context, plan *fuzzWSPlan, p
 	// Use the parent ctx (not rtCtx) so the terminal UPDATE lands even when
 	// the per-variant request timeout expired — matches the
 	// applyResendWSTag precedent below.
-	finalizeResendStream(ctx, s.flowStore.store, variantPlan.streamID, err)
+	finalizeResendStream(ctx, s.flowStore.store, variantPlan.streamID, tag, err)
 	if err != nil {
 		return row, false, err
 	}

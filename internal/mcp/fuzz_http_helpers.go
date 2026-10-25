@@ -1269,7 +1269,7 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	// Use the parent ctx (not rtCtx) so the terminal UPDATE lands even
 	// when the per-variant request timeout expired — matches the
 	// applyResendHTTPTag precedent below.
-	finalizeResendStream(ctx, s.flowStore.store, variantEnv.StreamID, err)
+	finalizeResendStream(ctx, s.flowStore.store, variantEnv.StreamID, tag, err)
 	if err != nil {
 		return row, 0, err
 	}

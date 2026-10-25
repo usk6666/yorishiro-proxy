@@ -1106,7 +1106,7 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	// must be finalised here (State + Duration) or it stays
 	// State="active" forever. Use the parent ctx (not rtCtx) so the
 	// terminal UPDATE lands even when the per-variant timeout expired.
-	finalizeResendStream(ctx, s.flowStore.store, variantPlan.streamID, err)
+	finalizeResendStream(ctx, s.flowStore.store, variantPlan.streamID, tag, err)
 	if err != nil {
 		return row, 0, nil, err
 	}

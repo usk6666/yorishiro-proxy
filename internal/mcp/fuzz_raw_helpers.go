@@ -888,7 +888,7 @@ func (s *Server) runFuzzRawSingleVariantWithResponse(ctx context.Context, plan *
 	// must be finalised here (State + Duration) or it stays
 	// State="active" forever. Use the parent ctx (not rtCtx) so the
 	// terminal UPDATE lands even when the per-variant timeout expired.
-	finalizeResendStream(ctx, s.flowStore.store, row.StreamID, err)
+	finalizeResendStream(ctx, s.flowStore.store, row.StreamID, tag, err)
 	if err != nil {
 		return row, nil, 0, false, err
 	}

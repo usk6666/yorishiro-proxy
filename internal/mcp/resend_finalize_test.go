@@ -61,7 +61,7 @@ func TestFinalizeResendStream_Success(t *testing.T) {
 	store := newTestStore(t)
 	id := seedActiveStream(t, store)
 
-	finalizeResendStream(context.Background(), store, id, nil)
+	finalizeResendStream(context.Background(), store, id, "", nil)
 
 	got, err := store.GetStream(context.Background(), id)
 	if err != nil {
@@ -84,7 +84,7 @@ func TestFinalizeResendStream_GenericError(t *testing.T) {
 	store := newTestStore(t)
 	id := seedActiveStream(t, store)
 
-	finalizeResendStream(context.Background(), store, id, errors.New("dial: connection refused"))
+	finalizeResendStream(context.Background(), store, id, "", errors.New("dial: connection refused"))
 
 	got, err := store.GetStream(context.Background(), id)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestFinalizeResendStream_StreamError(t *testing.T) {
 	id := seedActiveStream(t, store)
 
 	se := &layer.StreamError{Code: layer.ErrorRefused}
-	finalizeResendStream(context.Background(), store, id, se)
+	finalizeResendStream(context.Background(), store, id, "", se)
 
 	got, err := store.GetStream(context.Background(), id)
 	if err != nil {
@@ -126,8 +126,8 @@ func TestFinalizeResendStream_StreamError(t *testing.T) {
 // pass s.flowStore.store directly which can be nil for test stacks that
 // do not record. The helper must not panic.
 func TestFinalizeResendStream_NilStore(t *testing.T) {
-	finalizeResendStream(context.Background(), nil, "any", nil)
-	finalizeResendStream(context.Background(), nil, "any", errors.New("boom"))
+	finalizeResendStream(context.Background(), nil, "any", "", nil)
+	finalizeResendStream(context.Background(), nil, "any", "", errors.New("boom"))
 }
 
 // TestFinalizeResendStream_EmptyStreamID is a no-op safety check for
@@ -136,8 +136,8 @@ func TestFinalizeResendStream_NilStore(t *testing.T) {
 // invoke the store at all.
 func TestFinalizeResendStream_EmptyStreamID(t *testing.T) {
 	store := newTestStore(t)
-	finalizeResendStream(context.Background(), store, "", nil)
-	finalizeResendStream(context.Background(), store, "", errors.New("boom"))
+	finalizeResendStream(context.Background(), store, "", "", nil)
+	finalizeResendStream(context.Background(), store, "", "", errors.New("boom"))
 	// No assertion needed — the test passes if no panic and no error
 	// surfaced via t.Fatalf inside the store. A non-empty SaveStream
 	// would have created a row; we never created one, so the store
@@ -174,7 +174,7 @@ func TestFinalizeResendStream_StampsDurationFromStreamTimestamp(t *testing.T) {
 	store := newTestStore(t)
 	id := seedActiveStreamAt(t, store, time.Now().Add(-1500*time.Millisecond), 0)
 
-	finalizeResendStream(context.Background(), store, id, nil)
+	finalizeResendStream(context.Background(), store, id, "", nil)
 
 	got, err := store.GetStream(context.Background(), id)
 	if err != nil {
@@ -194,7 +194,7 @@ func TestFinalizeResendStream_ErrorStampsDuration(t *testing.T) {
 	store := newTestStore(t)
 	id := seedActiveStreamAt(t, store, time.Now().Add(-1500*time.Millisecond), 0)
 
-	finalizeResendStream(context.Background(), store, id, errors.New("boom"))
+	finalizeResendStream(context.Background(), store, id, "", errors.New("boom"))
 
 	got, err := store.GetStream(context.Background(), id)
 	if err != nil {
@@ -215,7 +215,7 @@ func TestFinalizeResendStream_ZeroTimestampLeavesDuration(t *testing.T) {
 	store := newTestStore(t)
 	id := seedActiveStreamAt(t, store, time.Time{}, 42*time.Millisecond)
 
-	finalizeResendStream(context.Background(), store, id, nil)
+	finalizeResendStream(context.Background(), store, id, "", nil)
 
 	got, err := store.GetStream(context.Background(), id)
 	if err != nil {
@@ -243,7 +243,7 @@ func TestFinalizeResendStream_ErrorRecordsErrorTag(t *testing.T) {
 			store := newTestStore(t)
 			id := seedActiveStream(t, store)
 
-			finalizeResendStream(context.Background(), store, id, tt.runErr)
+			finalizeResendStream(context.Background(), store, id, "", tt.runErr)
 
 			got, err := store.GetStream(context.Background(), id)
 			if err != nil {
@@ -265,7 +265,7 @@ func TestFinalizeResendStream_SuccessNoErrorTag(t *testing.T) {
 	store := newTestStore(t)
 	id := seedActiveStream(t, store)
 
-	finalizeResendStream(context.Background(), store, id, nil)
+	finalizeResendStream(context.Background(), store, id, "", nil)
 
 	got, err := store.GetStream(context.Background(), id)
 	if err != nil {
@@ -292,7 +292,7 @@ func TestFinalizeResendStream_ErrorPreservesPriorTags(t *testing.T) {
 		t.Fatalf("SaveStream: %v", err)
 	}
 
-	finalizeResendStream(context.Background(), store, id, errors.New("boom"))
+	finalizeResendStream(context.Background(), store, id, "", errors.New("boom"))
 
 	got, err := store.GetStream(context.Background(), id)
 	if err != nil {
@@ -322,7 +322,7 @@ func TestFinalizeResendStream_ErrorTagCapped(t *testing.T) {
 			store := newTestStore(t)
 			id := seedActiveStream(t, store)
 
-			finalizeResendStream(context.Background(), store, id, errors.New(tt.msg))
+			finalizeResendStream(context.Background(), store, id, "", errors.New(tt.msg))
 
 			got, err := store.GetStream(context.Background(), id)
 			if err != nil {
@@ -340,6 +340,100 @@ func TestFinalizeResendStream_ErrorTagCapped(t *testing.T) {
 			}
 			if want := flow.TruncateErrorTag(tt.msg); tag != want {
 				t.Errorf("Tags[\"error\"] differs from flow.TruncateErrorTag(msg) (len %d vs %d)", len(tag), len(want))
+			}
+		})
+	}
+}
+
+// seedStreamWithTags inserts an active resend Stream carrying the given
+// record-time tags, mirroring TestFinalizeResendStream_ErrorPreservesPriorTags.
+func seedStreamWithTags(t *testing.T, store flow.Store, tags map[string]string) string {
+	t.Helper()
+	id := uuid.NewString()
+	st := &flow.Stream{
+		ID:       id,
+		Protocol: "http",
+		State:    "active",
+		Origin:   flow.OriginResend,
+		Tags:     tags,
+	}
+	if err := store.SaveStream(context.Background(), st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+	return id
+}
+
+// TestFinalizeResendStream_UserTag (USK-1362): the user-supplied tag is
+// written by finalize on both the success and the error path, merged via
+// AppendTags so record-time tags (and tags["error"]) survive alongside it.
+func TestFinalizeResendStream_UserTag(t *testing.T) {
+	tests := []struct {
+		name      string
+		runErr    error
+		wantState string
+		wantError string
+	}{
+		{name: "success", runErr: nil, wantState: "complete"},
+		{name: "error", runErr: errors.New("boom"), wantState: "error", wantError: "boom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			id := seedStreamWithTags(t, store, map[string]string{"records_truncated": "true"})
+
+			finalizeResendStream(context.Background(), store, id, "t1", tt.runErr)
+
+			got, err := store.GetStream(context.Background(), id)
+			if err != nil {
+				t.Fatalf("GetStream: %v", err)
+			}
+			if got.State != tt.wantState {
+				t.Errorf("State = %q, want %q", got.State, tt.wantState)
+			}
+			if got.Tags["tag"] != "t1" {
+				t.Errorf("Tags[\"tag\"] = %q, want %q (tags=%v)", got.Tags["tag"], "t1", got.Tags)
+			}
+			if got.Tags["records_truncated"] != "true" {
+				t.Errorf("Tags[\"records_truncated\"] = %q, want %q preserved (tags=%v)", got.Tags["records_truncated"], "true", got.Tags)
+			}
+			if tt.wantError != "" {
+				if got.Tags["error"] != tt.wantError {
+					t.Errorf("Tags[\"error\"] = %q, want %q (tags=%v)", got.Tags["error"], tt.wantError, got.Tags)
+				}
+			} else if v, ok := got.Tags["error"]; ok {
+				t.Errorf("Tags[\"error\"] = %q present on success; want absent", v)
+			}
+		})
+	}
+}
+
+// TestFinalizeResendStream_EmptyUserTagWritesNoTagKey (USK-1362): an empty
+// tag must not create a "tag" key on either path, and must leave existing
+// tags untouched.
+func TestFinalizeResendStream_EmptyUserTagWritesNoTagKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		runErr error
+	}{
+		{name: "success", runErr: nil},
+		{name: "error", runErr: errors.New("boom")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			id := seedStreamWithTags(t, store, map[string]string{"records_truncated": "true"})
+
+			finalizeResendStream(context.Background(), store, id, "", tt.runErr)
+
+			got, err := store.GetStream(context.Background(), id)
+			if err != nil {
+				t.Fatalf("GetStream: %v", err)
+			}
+			if v, ok := got.Tags["tag"]; ok {
+				t.Errorf("Tags[\"tag\"] = %q present with empty tag; want absent", v)
+			}
+			if got.Tags["records_truncated"] != "true" {
+				t.Errorf("Tags[\"records_truncated\"] = %q, want %q preserved (tags=%v)", got.Tags["records_truncated"], "true", got.Tags)
 			}
 		})
 	}
