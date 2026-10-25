@@ -19,7 +19,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 # `make clean` still works when the file is broken.
 GOLANGCI_LINT_VERSION := $(shell cat .golangci-lint-version 2>/dev/null)
 
-.PHONY: build build-ui ensure-ui dev-ui test test-fast test-pkg test-ui test-e2e test-e2e-smoke test-cover vet lint fmt clean bench bench-compare
+.PHONY: build build-ui ensure-ui dev-ui test test-fast test-pkg test-ui test-e2e test-e2e-smoke test-cover vet lint lint-workflows fmt clean bench bench-compare
 
 build: build-ui vet
 	go build -ldflags "$(LDFLAGS)" -o $(BINDIR)/$(BINARY) ./cmd/yorishiro-proxy
@@ -153,6 +153,51 @@ lint: ensure-ui
 	 fi
 	@echo "==> golangci-lint $(GOLANGCI_LINT_VERSION)"
 	golangci-lint run
+
+# lint-workflows = static checks on .github/workflows, kept OUT of `lint`
+# because it needs the network (tool downloads, GitHub API) and none of the Go /
+# UI toolchain. CI runs it as ci.yml's `lint-workflows` job.
+#
+# Every tool is pinned -- version and sha256 -- in .workflow-lint-tools and
+# fetched into bin/tools/<tool>-<version>/ by tools/lint-workflows/install.sh,
+# which re-verifies the cached download on every run. All five are installed
+# before anything runs, so a checksum mismatch stops the target first. The
+# checks themselves all run even when an earlier one fails (each failure is
+# reported in one pass), and the target exits non-zero if any of them failed.
+#
+#   needs guard  every ci.yml job is in status-check's `needs:` (yq)
+#   permissions  every job in every workflow declares its own `permissions:`
+#   guard        (yq). ghalint's job_permissions cannot: it only fires when a
+#                top-level grant exists, and our workflows set `permissions: {}`.
+#   pinact       full-SHA pins whose `# vX.Y.Z` comment names that commit, and
+#                no action younger than 7 days. --verify-comment calls the
+#                GitHub API: CI passes PINACT_GITHUB_TOKEN; locally pinact
+#                picks up a token from its usual sources (GITHUB_TOKEN, ghtkn).
+#   ghalint      permissions / timeout / persist-credentials / secret policies
+#                (.github/ghalint.yaml hands pinning to pinact)
+#   actionlint   expressions, contexts and `run:` scripts. actionlint silently
+#                skips shellcheck when it cannot find it -- both when it is not
+#                on PATH and when an explicit -shellcheck=<path> does not exist
+#                -- so the pinned binary is passed explicitly AND checked with
+#                `[ -x ]` first, failing loudly instead of losing the shell
+#                check. -pyflakes= disables the python check for the same
+#                determinism reason (no workflow has a python `run:` step).
+#   shellcheck   the helper scripts in tools/lint-workflows/.
+lint-workflows:
+	@set -e; i=tools/lint-workflows/install.sh; \
+	 yq=$$(sh $$i yq); pinact=$$(sh $$i pinact); ghalint=$$(sh $$i ghalint); \
+	 actionlint=$$(sh $$i actionlint); shellcheck=$$(sh $$i shellcheck); \
+	 [ -x "$$shellcheck" ] || { echo "lint-workflows: shellcheck is not executable: $$shellcheck" >&2; exit 1; }; \
+	 set +e; rc=0; \
+	 echo "==> status-check needs guard"; sh tools/lint-workflows/check-status-needs.sh "$$yq" .github/workflows/ci.yml || rc=1; \
+	 echo "==> job permissions guard"; sh tools/lint-workflows/check-job-permissions.sh "$$yq" .github/workflows/*.yml || rc=1; \
+	 echo "==> pinact run --check --verify-comment --min-age 7"; "$$pinact" run --check --verify-comment --min-age 7 || rc=1; \
+	 echo "==> ghalint run"; "$$ghalint" run || rc=1; \
+	 echo "==> actionlint (shellcheck $$("$$shellcheck" --version | sed -n 's/^version: //p'))"; \
+	 "$$actionlint" -shellcheck="$$shellcheck" -pyflakes= || rc=1; \
+	 echo "==> shellcheck tools/lint-workflows"; "$$shellcheck" tools/lint-workflows/*.sh || rc=1; \
+	 [ "$$rc" -eq 0 ] || echo "lint-workflows: one or more checks failed (see above)" >&2; \
+	 exit $$rc
 
 bench: ensure-ui
 	go test -bench=. -benchmem -run=^$$ ./...

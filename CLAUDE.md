@@ -164,6 +164,8 @@ make test-cover     # ensure-ui → test with coverage report
 make vet            # ensure-ui → go vet ./...
 make fmt            # Format all files with gofmt -w .
 make lint           # gofmt check + golangci-lint (govet/staticcheck/unused/ineffassign/gocyclo)
+make lint-workflows # .github/ checks: status-check needs + job permissions guards (yq), pinact, ghalint, actionlint+shellcheck
+                    #   (needs network; tools pinned + sha256-verified in .workflow-lint-tools)
 make bench          # ensure-ui → run benchmarks
 make clean          # Delete build artifacts
 ```
@@ -189,6 +191,28 @@ make clean          # Delete build artifacts
 > toolchain on composite-literal indentation. Keeping `gofmt -l .` costs nothing
 > (it ships with Go) and keeps `make fmt` a guarantee that `make lint` passes.
 
+> **Workflow linting**: `make lint-workflows` is separate from `make lint` (it needs the
+> network, not Go or the UI) and is run by `ci.yml`'s `lint-workflows` job. Every tool —
+> pinact, ghalint, actionlint, shellcheck, yq — is pinned by version and sha256 in
+> `.workflow-lint-tools` and downloaded by `tools/lint-workflows/install.sh` into
+> `bin/tools/<tool>-<version>/`, re-verified on every run, so local and CI run the same
+> binaries. Rule ownership: **pinact** owns action pinning (`--check --verify-comment
+> --min-age 7`: full SHA, the `# vX.Y.Z` comment must resolve to that SHA, no action
+> younger than 7 days); **ghalint** owns permissions / timeouts / `persist-credentials` /
+> secret and App-token scoping (its own SHA-pin policy is excluded in `.github/ghalint.yaml`),
+> except "every job declares its own `permissions:`" — ghalint skips that under a top-level
+> `permissions: {}`, so `tools/lint-workflows/check-job-permissions.sh` (yq) owns it;
+> **actionlint** owns expressions, contexts and `run:` scripts via the pinned shellcheck.
+> These are build-time tools run as separate executables, never shipped, so they are
+> outside the Dependency License Policy (shellcheck is GPL-3.0).
+
+> **Merge gate (`status-check`)**: the branch ruleset requires `ci.yml`'s `status-check`
+> job (plus CodeQL), not each job by name. It fails when any job in its `needs:` failed or
+> was cancelled and is otherwise skipped, which counts as passing — so a job skipped by its
+> own `if:` does not block. **Every new `ci.yml` job must be added to `status-check`'s
+> `needs:`**; `make lint-workflows` fails, naming the job, if one is missing. Keep the
+> name `status-check` unique across workflows that run on `pull_request`.
+
 > **e2e test tiers (USK-728)**: e2e tests are split into three tiers.
 > - **fast** (`make test`/`make test-fast`): untagged unit tests only.
 > - **smoke** (`make test-e2e-smoke`): merge-gate subset — only the tests declared in `//go:build e2e` files. Run by CI on every PR.
@@ -196,7 +220,7 @@ make clean          # Delete build artifacts
 >   `tools/smokeselect` (derived from `go list` + `go/parser`, nothing hard-coded) instead of re-running the fast tier;
 >   it fails loudly on a selection error or an empty selection (USK-1209). For the old "untagged + smoke" coverage, run `make test test-e2e-smoke`.
 >   Both PR test jobs in `ci.yml` call these `make` targets rather than hand-copied `go test` lines (USK-1058).
-> - **full** (`make test-e2e`): every e2e file — smoke ∪ exhaustive. Run nightly via `.github/workflows/nightly-e2e.yml`; also on dependency-update PRs (head branch `automated/security-updates`) as `ci.yml`'s `test-e2e-full` job (advisory until it is added to the branch ruleset's required checks), and on any push to `main` touching `go.mod` / `go.sum` (USK-1055).
+> - **full** (`make test-e2e`): every e2e file — smoke ∪ exhaustive. Run nightly via `.github/workflows/nightly-e2e.yml`; also on dependency-update PRs (head branch `automated/security-updates`) as `ci.yml`'s `test-e2e-full` job (gated through `status-check`, which a failure turns red; skipped on other PRs), and on any push to `main` touching `go.mod` / `go.sum` (USK-1055).
 >
 > The `e2e_smoke` build tag is an **exclusion filter**: smoke files keep plain `//go:build e2e`; exhaustive files use `//go:build e2e && !e2e_smoke` so they drop out of the smoke tier but remain in the full tier under `-tags e2e` alone. This guarantees `smoke ⊂ full`.
 >

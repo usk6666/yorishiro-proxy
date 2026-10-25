@@ -1,3 +1,6 @@
 # The Makefile and golangci-lint-action both parse this file as a bare version
 # tag; a CRLF checkout would append a stray \r and fail the shape check.
 .golangci-lint-version text eol=lf
+
+# Same reason: tools/lint-workflows/install.sh validates this pin file's shape.
+.workflow-lint-tools text eol=lf

@@ -65,7 +65,10 @@ func (s *TargetScope) checkNameLegLocked(scheme, name string, port int, path, di
 	if dialTarget == "" {
 		return s.checkTargetLocked(scheme, name, port, path)
 	}
-	dialHost, dialPort := splitDialTarget(scheme, dialTarget)
+	dialHost, dialPort, dialOK := splitDialTarget(scheme, dialTarget)
+	if !dialOK && s.hasRulesLocked() {
+		return false, ReasonDialTargetUninterpretable
+	}
 	if ok, reason := s.nameDenyLocked(scheme, name, port, dialPort, path); !ok {
 		return false, reason
 	}
@@ -138,17 +141,28 @@ func isIPLiteralRule(rule TargetRule) bool {
 	return isIP
 }
 
-// splitDialTarget splits a dial target into host and port; a port-less or
-// unparsable port takes the scheme default (0 when unknown). The dial
-// target only decides an exemption and adds a deny port here — its own
-// verdict comes from the caller's CheckTarget on the strictly parsed
-// target.
-func splitDialTarget(scheme, target string) (string, int) {
+// ReasonDialTargetUninterpretable is the block reason for a name leg whose
+// dial target has a port that is not a decimal number in 1..65535.
+const ReasonDialTargetUninterpretable = "blocked: dial target has an uninterpretable port (the port must be a decimal number in 1-65535)"
+
+// splitDialTarget splits a dial target into host and port; a port-less
+// target or an empty port takes the scheme default (0 when unknown). A
+// present port is read with parseStrictPort, and ok is false when it fails
+// (USK-1262): the dial port joins the deny match (USK-1306), so reading
+// "4294975376" or " 8080" leniently would drop it out of the match while
+// net.Dial connects to 8080. The dial target only decides an exemption and
+// adds a deny port here — its own verdict comes from the caller's
+// CheckTarget on the strictly parsed target.
+func splitDialTarget(scheme, target string) (host string, port int, ok bool) {
 	host, portStr, err := net.SplitHostPort(target)
 	if err != nil {
-		return target, defaultPort(scheme, "")
+		return target, schemeDefaultPort(scheme), true
 	}
-	return host, defaultPort(scheme, portStr)
+	if portStr == "" {
+		return host, schemeDefaultPort(scheme), true
+	}
+	port, ok = parseStrictPort(portStr)
+	return host, port, ok
 }
 
 // ReasonHostHeaderUninterpretable is the block reason for a Host header
@@ -235,7 +249,7 @@ func (s *TargetScope) CheckAuthorityDenyOnly(scheme, authority, path, dialTarget
 	host, port := splitAuthorityLenient(scheme, authority)
 	dialPort := 0
 	if dialTarget != "" {
-		_, dialPort = splitDialTarget(scheme, dialTarget)
+		_, dialPort, _ = splitDialTarget(scheme, dialTarget)
 	}
 	if ok, reason := s.extraReadingsDenyLocked(scheme, authority, path, dialPort); !ok {
 		return false, reason
@@ -269,7 +283,10 @@ func (s *TargetScope) checkNameValueLocked(scheme, value, host string, port int,
 	if s.hasRulesLocked() {
 		dialPort := 0
 		if dialTarget != "" {
-			_, dialPort = splitDialTarget(scheme, dialTarget)
+			var dialOK bool
+			if _, dialPort, dialOK = splitDialTarget(scheme, dialTarget); !dialOK {
+				return false, ReasonDialTargetUninterpretable
+			}
 		}
 		if ok, reason := s.extraReadingsDenyLocked(scheme, value, path, dialPort); !ok {
 			return false, reason
@@ -384,19 +401,19 @@ func splitHostHeaderValue(scheme, value string) (host string, port int, ok bool)
 			// "[name]" without a colon: never an IPv6 literal.
 			return "", 0, false
 		}
-		return value, defaultPort(scheme, ""), true
+		return value, schemeDefaultPort(scheme), true
 	}
 	h, portStr, err := net.SplitHostPort(value)
 	if err != nil {
 		// "[v6]" without a port, or a bare IPv6 address.
 		if len(value) > 2 && value[0] == '[' && value[len(value)-1] == ']' {
 			if isIPv6Literal(value[1 : len(value)-1]) {
-				return value, defaultPort(scheme, ""), true
+				return value, schemeDefaultPort(scheme), true
 			}
 			return "", 0, false
 		}
 		if isIPv6Literal(value) {
-			return value, defaultPort(scheme, ""), true
+			return value, schemeDefaultPort(scheme), true
 		}
 		return "", 0, false
 	}
@@ -404,7 +421,7 @@ func splitHostHeaderValue(scheme, value string) (host string, port int, ok bool)
 		return "", 0, false
 	}
 	if portStr == "" {
-		return h, defaultPort(scheme, ""), true
+		return h, schemeDefaultPort(scheme), true
 	}
 	_, p, err := SplitTargetHostPort(value)
 	if err != nil {
@@ -427,7 +444,7 @@ func splitAuthorityLenient(scheme, authority string) (string, int) {
 		port, _ = strconv.Atoi(portStr)
 	}
 	if port == 0 {
-		port = defaultPort(scheme, "")
+		port = schemeDefaultPort(scheme)
 	}
 	return host, port
 }

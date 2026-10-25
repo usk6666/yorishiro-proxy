@@ -110,6 +110,7 @@
       "Bash(make ensure-ui)",
       "Bash(make fmt)",
       "Bash(make lint)",
+      "Bash(make lint-workflows)",
       "Bash(make test)",
       "Bash(make test-cover)",
       "Bash(make test-e2e)",

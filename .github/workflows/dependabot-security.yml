@@ -31,8 +31,10 @@ on:
         required: false
         default: "168h"
 
-permissions:
-  contents: read
+# Nothing at the top level: the job below declares exactly what it needs, so a
+# job added later starts from zero instead of inheriting a grant (every job
+# declaring its own block is enforced by `make lint-workflows`).
+permissions: {}
 
 concurrency:
   group: dependabot-security
@@ -48,6 +50,10 @@ jobs:
     # high-privilege App token. Do NOT add "required reviewers" unless you want to
     # manually approve every weekly run (it would pause the job).
     environment: dependabot-security
+    # GITHUB_TOKEN only checks out the (public) repo. Every write goes through
+    # the App token minted below, never through this token.
+    permissions:
+      contents: read
     steps:
       # Mint the App token first; every network step below (alert fetch, the
       # createCommitOnBranch commit, PR create/edit) authenticates as the App via
@@ -59,12 +65,23 @@ jobs:
         with:
           client-id: ${{ secrets.DEPSEC_APP_CLIENT_ID }}
           private-key: ${{ secrets.DEPSEC_APP_PRIVATE_KEY }}
-          # Needs permissions: Dependabot alerts (read), Contents (write),
-          # Pull requests (write). Install the App on this repo only.
+          # Narrow the token to what the steps below use, rather than every
+          # permission the App installation holds (install the App on this repo
+          # only):
+          #   vulnerability-alerts: read  -- tools/depsec GETs .../dependabot/alerts
+          #   contents: write             -- git/refs PATCH/POST + createCommitOnBranch
+          #   pull-requests: write        -- gh pr list / create / edit
+          permission-contents: write
+          permission-pull-requests: write
+          permission-vulnerability-alerts: read
 
+      # Default token and no persisted credentials: no step runs `git push` or
+      # `git fetch` (git is used only for local status / rev-parse / diff), so
+      # the App token must never land in .git/config, where `go get`, pnpm
+      # lifecycle scripts and every later step could read it.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:

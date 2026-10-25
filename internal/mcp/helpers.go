@@ -210,7 +210,17 @@ func checkTargetScopeAddrPathHelper(ts *connector.TargetScope, scheme, addr, pat
 		host = addr
 		portStr = ""
 	}
-	port := targetDefaultPort(scheme, portStr)
+	port := targetDefaultPort(scheme, "")
+	if portStr != "" {
+		// USK-1262: a present port is read strictly. targetDefaultPort
+		// read "4294975376" as a value no ports rule names (net.Dial wraps
+		// it to 8080) and " 8080" / "http" as 0 (matches nothing), so a
+		// port-scoped deny missed the port the dial reaches.
+		if !isDecimalPort(portStr) {
+			return fmt.Errorf("request blocked by target scope: address %q has an uninterpretable port (the port must be a decimal number in 1-65535)", addr)
+		}
+		port, _ = strconv.Atoi(portStr)
+	}
 	allowed, reason := ts.CheckTarget(scheme, host, port, path)
 	if !allowed {
 		return fmt.Errorf("request blocked by target scope: host %q is %s", host, reason)
