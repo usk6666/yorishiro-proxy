@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -420,6 +421,59 @@ func TestTransparent_NameDenied(t *testing.T) {
 		}
 		if n := len(up.seenHeads()); n != 0 {
 			t.Errorf("upstream saw %d requests, want 0", n)
+		}
+		// The first request head is gated before the dial: the target
+		// is never contacted, not even by a TCP connect.
+		expectNoUpstreamContact(t, up.tcpTestServer)
+	})
+	t.Run("absolute-form deny on the first request, IP-allowed dst", func(t *testing.T) {
+		ctx := transparentCtx(t)
+		up := newRawHTTPUpstream(t)
+		scope := policyScope([]connector.TargetRule{{Hostname: "127.0.0.1"}}, []connector.TargetRule{{Hostname: "denied.example"}})
+		p := startTransparentProxy(t, ctx, up.addr(), withScope(scope))
+		resp, _, _ := transparentExchange(t, p.addr, "GET http://denied.example/ HTTP/1.1\r\nHost: ok.example\r\n\r\n")
+		if resp.StatusCode != 403 {
+			t.Errorf("status %d, want 403", resp.StatusCode)
+		}
+		expectNoUpstreamContact(t, up.tcpTestServer)
+		if st := blockedStream(t, p); st.Tags["route"] != "http" {
+			t.Errorf("audit Stream route %q, want http", st.Tags["route"])
+		}
+	})
+	t.Run("late TLS SNI deny", func(t *testing.T) {
+		// A server-first connection whose client sends a ClientHello only
+		// after the peek deadline: its SNI is a name leg too, so a denied
+		// SNI must not reach the (IP-allowed) upstream.
+		ctx := transparentCtx(t)
+		const banner = "* OK IMAP ready\r\n"
+		var received atomic.Int64
+		up := newTCPTestServer(t, "tcp4", "127.0.0.1:0", func(c net.Conn) {
+			_, _ = io.WriteString(c, banner)
+			n, _ := io.Copy(io.Discard, c)
+			received.Add(n)
+		})
+		scope := policyScope([]connector.TargetRule{{Hostname: "127.0.0.1"}}, []connector.TargetRule{{Hostname: "denied.example"}})
+		p := startTransparentProxy(t, ctx, up.addr(), withScope(scope))
+		c := p.dial(t)
+		br := bufio.NewReader(c)
+		if line, err := br.ReadString('\n'); err != nil || line != banner {
+			t.Fatalf("banner %q, %v", line, err)
+		}
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		if err := tlsHandshakeVia(c, "denied.example"); err == nil {
+			t.Error("handshake succeeded, want refusal")
+		}
+		_ = c.Close()
+
+		st, upd, fl := waitPassthroughDone(t, p.store, "late_tls")
+		if upd.BlockedBy != "target_scope" || upd.FailureReason != "target_scope" {
+			t.Errorf("late TLS Stream %s update BlockedBy %q FailureReason %q, want target_scope / target_scope", st.ID, upd.BlockedBy, upd.FailureReason)
+		}
+		if fl.Metadata["sni"] != "denied.example" {
+			t.Errorf("metadata sni %q, want denied.example", fl.Metadata["sni"])
+		}
+		if n := received.Load(); n != 0 {
+			t.Errorf("upstream received %d client bytes, want 0 (the ClientHello must not be relayed)", n)
 		}
 	})
 	t.Run("SNI deny", func(t *testing.T) {

@@ -172,3 +172,38 @@ func TestNameBindingCache_EntryCap(t *testing.T) {
 		t.Fatal("cache holds no entries")
 	}
 }
+
+// A name is only resolved when it is a syntactically valid DNS host name
+// (USK-1316): a Host value with trailing data ("1.2.3.4 a.example.com",
+// which a "*.example.com" allow matches) must fail closed without a
+// lookup, whatever a platform resolver would make of it.
+func TestNameBindingCache_InvalidHostNameNotLookedUp(t *testing.T) {
+	dst := netip.MustParseAddr("192.0.2.10")
+	r := &fakeNameResolver{answers: map[string][]netip.Addr{
+		"1.2.3.4 a.example.com": {dst},
+		"a.example.com\x00x":    {dst},
+		"a..example.com":        {dst},
+		"-a.example.com":        {dst},
+		"a.example.com/x":       {dst},
+		"a.example.com\t":       {dst},
+		".":                     {dst},
+		"a.example.com.":        {dst},
+		"under_score.example":   {dst},
+	}}
+	c := NewNameBindingCache(r, NameBindingConfig{})
+	for _, name := range []string{"1.2.3.4 a.example.com", "a.example.com\x00x", "a..example.com", "-a.example.com", "a.example.com/x", "a.example.com\t", "."} {
+		before := r.calls.Load()
+		ok, reason := c.Bound(context.Background(), name, dst)
+		if ok || reason != ReasonNameResolutionFailed {
+			t.Errorf("Bound(%q) = %v, %q; want false, %q", name, ok, reason, ReasonNameResolutionFailed)
+		}
+		if n := r.calls.Load(); n != before {
+			t.Errorf("Bound(%q) looked the name up (calls %d → %d)", name, before, n)
+		}
+	}
+	for _, name := range []string{"a.example.com.", "under_score.example"} {
+		if ok, reason := c.Bound(context.Background(), name, dst); !ok {
+			t.Errorf("Bound(%q) = false, %q; want true", name, reason)
+		}
+	}
+}
