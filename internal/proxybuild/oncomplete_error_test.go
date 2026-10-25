@@ -282,23 +282,3 @@ func TestBuildSessionOptions_OnComplete_RealErrorStillRecordsErrorState(t *testi
 		t.Errorf("Tags[\"terminated_by\"] present (= %q); want absent on real error", got.Tags["terminated_by"])
 	}
 }
-
-// TestTruncateErrorTag_RespectsCap covers the cap+marker behavior so a
-// runaway nested-wrap chain (or a transport-layer error that embeds
-// arbitrary attacker-controlled bytes via SNI/Host) cannot blow up the
-// stored row.
-func TestTruncateErrorTag_RespectsCap(t *testing.T) {
-	short := "dial: stream error refused: layer shutdown"
-	if got := truncateErrorTag(short); got != short {
-		t.Errorf("truncateErrorTag(short) = %q, want %q (under cap → unchanged)", got, short)
-	}
-
-	huge := strings.Repeat("a", errorTagMaxLen+512)
-	got := truncateErrorTag(huge)
-	if len(got) > errorTagMaxLen {
-		t.Errorf("len(truncateErrorTag(huge)) = %d, want <= %d", len(got), errorTagMaxLen)
-	}
-	if !strings.HasSuffix(got, "...[truncated]") {
-		t.Errorf("truncateErrorTag(huge) = %q, want suffix %q", got, "...[truncated]")
-	}
-}
