@@ -154,6 +154,10 @@ type CONNECTHandlerConfig struct {
 	// static InnerPeekTimeout / DefaultInnerPeekTimeout.
 	InnerPeekTimeoutProvider func() time.Duration
 
+	// InnerPeekTimeoutDisabled, when non-nil and true, arms no inner-byte
+	// peek deadline at all (request_timeout_ms: 0, USK-1185).
+	InnerPeekTimeoutDisabled func() bool
+
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
 }

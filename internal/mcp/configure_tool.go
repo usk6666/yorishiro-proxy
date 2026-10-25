@@ -105,7 +105,13 @@ type configureInput struct {
 
 	// RequestTimeoutMs dynamically changes the request-head timeout in milliseconds (USK-1162).
 	// Takes effect for the next incoming request.
-	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"Request-head timeout in milliseconds: HTTP/1.x request line + headers, CONNECT request, client TLS handshake (100-600000)"`
+	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"Request-head timeout in milliseconds: HTTP/1.x request line + headers, CONNECT request, client TLS handshake, plain-HTTP and CONNECT/SOCKS5 inner peeks (0 = disabled, or 100-600000)"`
+
+	// ClientIdleTimeoutMs dynamically changes how long an HTTP/1.x
+	// keep-alive connection waits for the first byte of the client's next
+	// request (USK-1185). 0 disables the wait bound. Takes effect for the
+	// next request.
+	ClientIdleTimeoutMs *int `json:"client_idle_timeout_ms,omitempty" jsonschema:"HTTP/1.x keep-alive wait for the next request's first byte in milliseconds (0 = disabled, or 100-600000; default 120000)"`
 
 	// Budget dynamically configures diagnostic session budget limits.
 	// Agent layer budget values must not exceed policy limits.
@@ -372,6 +378,10 @@ type configureResult struct {
 
 	// RequestTimeoutMs is the current request timeout in milliseconds (set when changed).
 	RequestTimeoutMs *int64 `json:"request_timeout_ms,omitempty"`
+
+	// ClientIdleTimeoutMs is the current client keep-alive idle timeout in
+	// milliseconds (set when changed; 0 = disabled).
+	ClientIdleTimeoutMs *int64 `json:"client_idle_timeout_ms,omitempty"`
 
 	// TLSFingerprint is the current TLS fingerprint profile (set when changed).
 	TLSFingerprint *string `json:"tls_fingerprint,omitempty"`

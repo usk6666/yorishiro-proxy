@@ -259,7 +259,10 @@ func TestConfigure_RequestTimeoutMs_Validation(t *testing.T) {
 		{name: "valid max", value: 600000, wantErr: false},
 		{name: "below min", value: 99, wantErr: true},
 		{name: "above max", value: 600001, wantErr: true},
-		{name: "zero", value: 0, wantErr: true},
+		// USK-1185: 0 disables the bound (was rejected before).
+		{name: "zero disables", value: 0, wantErr: false},
+		{name: "one", value: 1, wantErr: true},
+		{name: "negative", value: -1, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -544,11 +547,15 @@ func intPtr(n int) *int {
 
 // mockRequestTimeoutSetter implements the requestTimeoutSetter interface for testing.
 type mockRequestTimeoutSetter struct {
-	timeout time.Duration
+	timeout      time.Duration
+	disabled     bool
+	idle         time.Duration
+	idleDisabled bool
 }
 
 func (m *mockRequestTimeoutSetter) SetRequestTimeout(d time.Duration) {
 	m.timeout = d
+	m.disabled = false
 }
 
 func (m *mockRequestTimeoutSetter) RequestTimeout() time.Duration {
@@ -557,3 +564,29 @@ func (m *mockRequestTimeoutSetter) RequestTimeout() time.Duration {
 	}
 	return 60 * time.Second // default
 }
+
+func (m *mockRequestTimeoutSetter) DisableRequestTimeout() {
+	m.timeout = 0
+	m.disabled = true
+}
+
+func (m *mockRequestTimeoutSetter) RequestTimeoutDisabled() bool { return m.disabled }
+
+func (m *mockRequestTimeoutSetter) SetClientIdleTimeout(d time.Duration) {
+	m.idle = d
+	m.idleDisabled = false
+}
+
+func (m *mockRequestTimeoutSetter) ClientIdleTimeout() time.Duration {
+	if m.idle > 0 {
+		return m.idle
+	}
+	return 120 * time.Second // default
+}
+
+func (m *mockRequestTimeoutSetter) DisableClientIdleTimeout() {
+	m.idle = 0
+	m.idleDisabled = true
+}
+
+func (m *mockRequestTimeoutSetter) ClientIdleTimeoutDisabled() bool { return m.idleDisabled }

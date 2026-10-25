@@ -158,9 +158,14 @@ type proxyStartInput struct {
 	// Defaults to 30000 (30s) if omitted or zero.
 	PeekTimeoutMs *int `json:"peek_timeout_ms,omitempty" jsonschema:"protocol detection timeout in milliseconds (default: 30000)"`
 
-	// RequestTimeoutMs is the timeout in milliseconds for reading HTTP request headers.
-	// Defaults to 60000 (60s) if omitted or zero.
-	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"Request-head timeout in milliseconds: HTTP/1.x request line + headers, CONNECT request, client TLS handshake (default: 60000)"`
+	// RequestTimeoutMs bounds receiving a client's request head (USK-1162).
+	// 0 disables the bound (USK-1185); omitted keeps the current value.
+	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"Request-head timeout in milliseconds: HTTP/1.x request line + headers, CONNECT request, client TLS handshake, plain-HTTP and CONNECT/SOCKS5 inner peeks (0 = disabled, or 100-600000; default: 60000; omitted keeps the current value)"`
+
+	// ClientIdleTimeoutMs bounds the HTTP/1.x keep-alive wait for the first
+	// byte of the client's next request (USK-1185). 0 disables the bound;
+	// omitted keeps the current value.
+	ClientIdleTimeoutMs *int `json:"client_idle_timeout_ms,omitempty" jsonschema:"HTTP/1.x keep-alive wait for the next request's first byte in milliseconds (0 = disabled, or 100-600000; default: 120000; omitted keeps the current value)"`
 
 	// CaptureScope filters which flows are persisted to the flow store
 	// without altering wire transmission (USK-776). Use this to suppress

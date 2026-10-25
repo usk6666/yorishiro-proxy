@@ -139,6 +139,12 @@ func (l *Listener) SetRequestTimeout(d time.Duration) {
 	l.requestTimeoutNs.Store(int64(d))
 }
 
+// DisableRequestTimeout is a USK-1185 scaffold.
+func (l *Listener) DisableRequestTimeout() {}
+
+// RequestTimeoutDisabled is a USK-1185 scaffold.
+func (l *Listener) RequestTimeoutDisabled() bool { return false }
+
 // Name returns the listener's name as supplied at construction.
 func (l *Listener) Name() string {
 	return l.name

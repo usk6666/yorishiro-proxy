@@ -357,6 +357,10 @@ type innerDispatchConfig struct {
 	// DefaultInnerPeekTimeout.
 	PeekTimeoutProvider func() time.Duration
 
+	// PeekTimeoutDisabled, when non-nil and true, arms no inner-byte peek
+	// deadline at all (request_timeout_ms: 0, USK-1185).
+	PeekTimeoutDisabled func() bool
+
 	// BuildCfg supplies stack construction options (issuer, body spill, etc).
 	BuildCfg *BuildConfig
 

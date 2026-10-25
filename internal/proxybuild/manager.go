@@ -743,6 +743,24 @@ func (m *Manager) RequestTimeout() time.Duration {
 	return stored
 }
 
+// DisableRequestTimeout is a USK-1185 scaffold.
+func (m *Manager) DisableRequestTimeout() {}
+
+// RequestTimeoutDisabled is a USK-1185 scaffold.
+func (m *Manager) RequestTimeoutDisabled() bool { return false }
+
+// SetClientIdleTimeout is a USK-1185 scaffold.
+func (m *Manager) SetClientIdleTimeout(time.Duration) {}
+
+// ClientIdleTimeout is a USK-1185 scaffold.
+func (m *Manager) ClientIdleTimeout() time.Duration { return connector.DefaultClientIdleTimeout }
+
+// DisableClientIdleTimeout is a USK-1185 scaffold.
+func (m *Manager) DisableClientIdleTimeout() {}
+
+// ClientIdleTimeoutDisabled is a USK-1185 scaffold.
+func (m *Manager) ClientIdleTimeoutDisabled() bool { return false }
+
 // SetUpstreamProxy stores an upstream proxy URL and, when ManagerConfig
 // supplied a BuildConfig, applies it to the default listener's per-listener
 // slot so the next live data-path dial under that listener transits the

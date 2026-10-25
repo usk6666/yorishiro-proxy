@@ -609,7 +609,7 @@ func buildTargetOverrideHTTPStack(
 		http1.WithMaxRawCaptureSize(cfg.MaxRawCaptureSize),
 		http1.WithStateReleaser(cfg.PluginV2Engine),
 		// USK-1162: bound the client request head (request_timeout_ms).
-		http1.WithRequestHeaderTimeout(cfg.EffectiveRequestHeaderTimeout),
+		http1.WithRequestHeaderTimeout(cfg.ClientRequestHeadDeadline),
 	)
 	stack.PushClient(clientLayer)
 

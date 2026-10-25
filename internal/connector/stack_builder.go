@@ -933,6 +933,29 @@ func (c *BuildConfig) SetRequestHeaderTimeout(d time.Duration) {
 	c.requestHeaderTimeoutDynamic.Store(int64(d))
 }
 
+// DefaultClientIdleTimeout is the keep-alive wait for the first byte of a
+// client's next request (USK-1185).
+const DefaultClientIdleTimeout = 120 * time.Second
+
+// ClientRequestHeadDeadline is a USK-1185 scaffold.
+func (c *BuildConfig) ClientRequestHeadDeadline() (time.Duration, bool) {
+	return c.EffectiveRequestHeaderTimeout(), true
+}
+
+// DisableRequestHeaderTimeout is a USK-1185 scaffold.
+func (c *BuildConfig) DisableRequestHeaderTimeout() {}
+
+// ClientIdleDeadline is a USK-1185 scaffold.
+func (c *BuildConfig) ClientIdleDeadline() (time.Duration, bool) {
+	return DefaultClientIdleTimeout, true
+}
+
+// SetClientIdleTimeout is a USK-1185 scaffold.
+func (c *BuildConfig) SetClientIdleTimeout(time.Duration) {}
+
+// DisableClientIdleTimeout is a USK-1185 scaffold.
+func (c *BuildConfig) DisableClientIdleTimeout() {}
+
 // resolvePerHostTLS resolves per-host TLS overrides from the BuildConfig.
 //
 // Resolution order (USK-733):
@@ -1855,7 +1878,7 @@ func buildStackFromRoute(
 			http1.WithMaxRawCaptureSize(cfg.MaxRawCaptureSize),
 			http1.WithStateReleaser(cfg.PluginV2Engine),
 			// USK-1162: bound the client request head (request_timeout_ms).
-			http1.WithRequestHeaderTimeout(cfg.EffectiveRequestHeaderTimeout),
+			http1.WithRequestHeaderTimeout(cfg.ClientRequestHeadDeadline),
 		)
 		stack.PushClient(clientLayer)
 

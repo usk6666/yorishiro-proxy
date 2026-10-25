@@ -141,8 +141,8 @@ type options struct {
 
 	// requestHeaderTimeout / keepAliveIdleTimeout bound the client-side
 	// request head (USK-1162). See WithRequestHeaderTimeout.
-	requestHeaderTimeout func() time.Duration
-	keepAliveIdleTimeout func() time.Duration
+	requestHeaderTimeout func() (time.Duration, bool)
+	keepAliveIdleTimeout func() (time.Duration, bool)
 
 	// afterInitialYield is a USK-1184 test seam: when non-nil,
 	// runInitialSend (the Send-direction goroutine started by New) calls it
@@ -176,7 +176,7 @@ const DefaultKeepAliveIdleTimeout = 120 * time.Second
 // fn is consulted at the start of every request parse so a runtime change
 // applies to the next request. A nil fn or a non-positive return disables
 // both phases. The option is ignored on Receive-direction Layers.
-func WithRequestHeaderTimeout(fn func() time.Duration) Option {
+func WithRequestHeaderTimeout(fn func() (time.Duration, bool)) Option {
 	return func(o *options) { o.requestHeaderTimeout = fn }
 }
 
@@ -184,7 +184,7 @@ func WithRequestHeaderTimeout(fn func() time.Duration) Option {
 // idle phase of WithRequestHeaderTimeout. A nil fn or a non-positive return
 // keeps the default. It has no effect unless WithRequestHeaderTimeout is
 // also active. Intended for tests.
-func WithKeepAliveIdleTimeout(fn func() time.Duration) Option {
+func WithKeepAliveIdleTimeout(fn func() (time.Duration, bool)) Option {
 	return func(o *options) { o.keepAliveIdleTimeout = fn }
 }
 
@@ -572,14 +572,14 @@ func (l *Layer) awaitRequestHead() (armed time.Duration, err error) {
 	if l.direction != envelope.Send || l.opts.requestHeaderTimeout == nil {
 		return 0, nil
 	}
-	headerTimeout := l.opts.requestHeaderTimeout()
+	headerTimeout, _ := l.opts.requestHeaderTimeout()
 	if headerTimeout <= 0 {
 		return 0, nil
 	}
 	if l.reader.Buffered() == 0 {
 		idle := DefaultKeepAliveIdleTimeout
 		if l.opts.keepAliveIdleTimeout != nil {
-			if v := l.opts.keepAliveIdleTimeout(); v > 0 {
+			if v, _ := l.opts.keepAliveIdleTimeout(); v > 0 {
 				idle = v
 			}
 		}

@@ -15,8 +15,8 @@ import (
 // USK-1162: client-side request head deadline (net/http ReadHeaderTimeout
 // equivalent) on Send-direction Layers.
 
-func constDuration(d time.Duration) func() time.Duration {
-	return func() time.Duration { return d }
+func constDuration(d time.Duration) func() (time.Duration, bool) {
+	return func() (time.Duration, bool) { return d, true }
 }
 
 // trickle writes b one byte at a time with gap between bytes until it runs

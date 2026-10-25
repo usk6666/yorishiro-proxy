@@ -57,6 +57,10 @@ type HTTP1ForwardHandlerConfig struct {
 	// static RequestTimeout / package default. (USK-844)
 	RequestTimeoutProvider func() time.Duration
 
+	// RequestTimeoutDisabled, when non-nil and true, arms no target-peek
+	// deadline at all (request_timeout_ms: 0, USK-1185).
+	RequestTimeoutDisabled func() bool
+
 	// OnRequestHeadFailure is invoked when the target peek is cut off by
 	// its deadline after bytes arrived (USK-1189). head carries the bytes
 	// peeked and the 400 the handler returned. Nil disables.
