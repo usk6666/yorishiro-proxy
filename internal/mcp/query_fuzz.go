@@ -162,7 +162,6 @@ func buildFuzzResultListOptions(input queryInput) flow.FuzzResultListOptions {
 	}
 	if input.Filter != nil {
 		opts.StatusCode = input.Filter.StatusCode
-		opts.BodyContains = input.Filter.BodyContains
 	}
 	return opts
 }
@@ -241,16 +240,24 @@ func (s *Server) prepareOutliersFilter(ctx context.Context, fuzzID string, opts 
 	return summary, nil, nil
 }
 
-// handleQueryFuzzResults returns fuzz results for a specific job with filtering, sorting, and summary.
-func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (*gomcp.CallToolResult, any, error) {
+// validateFuzzResultsInput checks the preconditions of a fuzz_results query.
+func (s *Server) validateFuzzResultsInput(input queryInput) error {
 	if s.jobRunner.fuzzStore == nil {
-		return nil, nil, fmt.Errorf("fuzz store is not initialized")
+		return fmt.Errorf("fuzz store is not initialized")
 	}
 	if input.FuzzID == "" {
-		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_results resource")
+		return fmt.Errorf("fuzz_id is required for fuzz_results resource")
 	}
 	if input.Offset < 0 {
-		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
+		return fmt.Errorf("offset must be >= 0, got %d", input.Offset)
+	}
+	return nil
+}
+
+// handleQueryFuzzResults returns fuzz results for a specific job with filtering, sorting, and summary.
+func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (*gomcp.CallToolResult, any, error) {
+	if err := s.validateFuzzResultsInput(input); err != nil {
+		return nil, nil, err
 	}
 
 	opts := buildFuzzResultListOptions(input)
@@ -259,6 +266,16 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 	// for the DB query filter. Otherwise, defer summary computation until after
 	// ListFuzzResults succeeds to avoid wasted DB work on error.
 	outliersOnly := input.Filter != nil && input.Filter.OutliersOnly
+
+	// body_contains cannot be evaluated in SQL (recorded bodies are
+	// Content-Encoded wire bytes), so it takes the Go-side filter path.
+	if input.Filter != nil && input.Filter.BodyContains != "" {
+		out, err := s.handleQueryFuzzResultsByBody(ctx, input, opts, input.Filter.BodyContains, outliersOnly)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, out, nil
+	}
 
 	var summary *queryFuzzResultsSummary
 	if outliersOnly {
@@ -319,7 +336,12 @@ func (s *Server) buildFuzzResultsSummary(ctx context.Context, fuzzID string, opt
 	if err != nil {
 		return nil, fmt.Errorf("list all fuzz results for summary: %w", err)
 	}
+	return summarizeFuzzResults(allResults), nil
+}
 
+// summarizeFuzzResults computes aggregate statistics and outlier detection
+// over an already-loaded result set.
+func summarizeFuzzResults(allResults []*flow.FuzzResult) *queryFuzzResultsSummary {
 	stats := &fuzzStatistics{
 		StatusCodeDistribution: make(map[string]int),
 	}
@@ -333,7 +355,7 @@ func (s *Server) buildFuzzResultsSummary(ctx context.Context, fuzzID string, opt
 				ByBodyLength: []string{},
 				ByTiming:     []string{},
 			},
-		}, nil
+		}
 	}
 
 	// Collect values for distribution computation.
@@ -360,7 +382,7 @@ func (s *Server) buildFuzzResultsSummary(ctx context.Context, fuzzID string, opt
 		TotalResults: len(allResults),
 		Statistics:   stats,
 		Outliers:     outliers,
-	}, nil
+	}
 }
 
 // rawDistribution holds full-precision distribution statistics for internal use.

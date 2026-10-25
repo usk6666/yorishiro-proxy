@@ -528,7 +528,7 @@ func TestCountFuzzResults(t *testing.T) {
 	}
 }
 
-// --- SortBy and BodyContains tests ---
+// --- SortBy tests ---
 
 func TestListFuzzResults_SortBy(t *testing.T) {
 	t.Parallel()
@@ -600,84 +600,5 @@ func TestListFuzzResults_SortBy(t *testing.T) {
 	}
 	if got[0].IndexNum != 0 || got[1].IndexNum != 1 || got[2].IndexNum != 2 {
 		t.Errorf("expected default index_num sort, got indices: %d, %d, %d", got[0].IndexNum, got[1].IndexNum, got[2].IndexNum)
-	}
-}
-
-func TestListFuzzResults_BodyContains(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	fl := &Stream{Protocol: "HTTP/1.x", Timestamp: time.Now()}
-	if err := store.SaveStream(ctx, fl); err != nil {
-		t.Fatalf("SaveFlow: %v", err)
-	}
-
-	job := &FuzzJob{
-		StreamID:  fl.ID,
-		Config:    `{}`,
-		Status:    "completed",
-		CreatedAt: time.Now().UTC(),
-		Total:     3,
-	}
-	if err := store.SaveFuzzJob(ctx, job); err != nil {
-		t.Fatalf("SaveFuzzJob: %v", err)
-	}
-
-	// Create results with sessions that have response messages containing different bodies.
-	bodies := []string{`{"role":"admin","ok":true}`, `{"role":"user","ok":true}`, `{"error":"denied"}`}
-	for i, body := range bodies {
-		s := &Stream{Protocol: "HTTP/1.x", State: "complete", Timestamp: time.Now()}
-		if err := store.SaveStream(ctx, s); err != nil {
-			t.Fatalf("SaveFlow: %v", err)
-		}
-
-		// Append a receive message with the body.
-		msg := &Flow{
-			ID:        s.ID + "-recv",
-			StreamID:  s.ID,
-			Sequence:  0,
-			Direction: "receive",
-			Timestamp: time.Now(),
-			Body:      []byte(body),
-		}
-		if err := store.SaveFlow(ctx, msg); err != nil {
-			t.Fatalf("AppendMessage: %v", err)
-		}
-
-		r := &FuzzResult{
-			FuzzID: job.ID, IndexNum: i, StreamID: s.ID,
-			Payloads: `{}`, StatusCode: 200,
-		}
-		if err := store.SaveFuzzResult(ctx, r); err != nil {
-			t.Fatalf("SaveFuzzResult: %v", err)
-		}
-	}
-
-	// Filter by body_contains "admin".
-	got, err := store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{BodyContains: "admin"})
-	if err != nil {
-		t.Fatalf("ListFuzzResults: %v", err)
-	}
-	if len(got) != 1 {
-		t.Errorf("got %d results with body_contains=admin, want 1", len(got))
-	}
-
-	// Filter by body_contains "ok".
-	got, err = store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{BodyContains: "ok"})
-	if err != nil {
-		t.Fatalf("ListFuzzResults: %v", err)
-	}
-	if len(got) != 2 {
-		t.Errorf("got %d results with body_contains=ok, want 2", len(got))
-	}
-
-	// No match.
-	got, err = store.ListFuzzResults(ctx, job.ID, FuzzResultListOptions{BodyContains: "nonexistent"})
-	if err != nil {
-		t.Fatalf("ListFuzzResults: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("got %d results with body_contains=nonexistent, want 0", len(got))
 	}
 }

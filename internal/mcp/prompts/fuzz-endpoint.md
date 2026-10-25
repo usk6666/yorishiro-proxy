@@ -72,7 +72,7 @@ For WS / gRPC / Raw, the call shape is the same — only the tool name and `posi
 
 Useful narrowing filters:
 - `filter.status_code` — only specific status codes.
-- `filter.body_contains` — only responses containing a substring.
+- `filter.body_contains` — only responses containing a substring (matched against both the raw and the Content-Encoding-decoded body, so gzip / deflate / br / zstd responses are covered).
 - `filter.outliers_only: true` — only entries whose duration / size deviates from the median.
 
 Drill into a specific result's flow:

@@ -407,3 +407,41 @@ func TestQuery_FuzzResults_BodyContains_GetFlowsError(t *testing.T) {
 		t.Fatalf("expected tool error when GetFlows fails, got success: %v", result.Content)
 	}
 }
+
+// TestQuery_FuzzResults_BodyContains_PlainCounts carries over the store-level
+// coverage that lived in internal/flow before the body predicate moved to the
+// MCP read side: single match, multiple matches, and no match on identity bodies.
+func TestQuery_FuzzResults_BodyContains_PlainCounts(t *testing.T) {
+	store := newTestFuzzStore(t)
+	cs := setupFuzzQueryTestSession(t, store, store)
+	job := seedFuzzJob(t, store, "completed", "test")
+	for i, body := range []string{`{"role":"admin","ok":true}`, `{"role":"user","ok":true}`, `{"error":"denied"}`} {
+		seedFuzzResult(t, store, job.ID, i, 200, 50, body)
+	}
+
+	tests := []struct {
+		needle string
+		want   int
+	}{
+		{"admin", 1},
+		{"ok", 2},
+		{"nonexistent", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.needle, func(t *testing.T) {
+			result := callQueryRaw(t, cs, map[string]any{
+				"resource": "fuzz_results",
+				"fuzz_id":  job.ID,
+				"filter":   map[string]any{"body_contains": tt.needle},
+			})
+			if result.IsError {
+				t.Fatalf("expected success: %v", result.Content)
+			}
+			var out queryFuzzResultsResult
+			unmarshalQueryResultRaw(t, result, &out)
+			if out.Count != tt.want || out.Total != tt.want {
+				t.Errorf("count=%d total=%d, want %d", out.Count, out.Total, tt.want)
+			}
+		})
+	}
+}
