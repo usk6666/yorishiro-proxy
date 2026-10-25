@@ -103,7 +103,7 @@ func TestProxyStartDocs_TransparentModeDocumentsFDBudget(t *testing.T) {
 	if section == nil {
 		t.Fatal("help/proxy_start has no transparent mode section")
 	}
-	for _, want := range []string{"RLIMIT_NOFILE", "max_connections", "LimitNOFILE"} {
+	for _, want := range []string{"Connection cap and file descriptors", "RLIMIT_NOFILE", "(hard limit − 1024)", "LimitNOFILE"} {
 		if !strings.Contains(section[1], want) {
 			t.Errorf("help/proxy_start transparent mode section does not mention %q", want)
 		}
