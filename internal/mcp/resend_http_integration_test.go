@@ -254,6 +254,27 @@ func TestResendHTTP_FromScratch_RoundTrip(t *testing.T) {
 	if stream.Tags["tag"] != "scratch" {
 		t.Errorf("Stream.Tags[tag] = %q, want scratch", stream.Tags["tag"])
 	}
+
+	// USK-1357: the tag the real producer recorded is what query
+	// resource=flows filter.tag selects on — an untagged stream in the
+	// same store is not returned.
+	if err := store.SaveStream(ctx, &flow.Stream{
+		ID: "untagged-live", ConnID: "conn-untagged-live", Protocol: "http", Scheme: "http",
+		State: "complete", Timestamp: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveStream(untagged-live): %v", err)
+	}
+	tagged := queryJSON(t, cs, map[string]any{
+		"resource": "flows",
+		"filter":   map[string]any{"tag": "scratch"},
+	})
+	taggedList, _ := tagged["flows"].([]any)
+	if len(taggedList) != 1 || taggedList[0].(map[string]any)["id"] != out.StreamID {
+		t.Errorf("query flows filter.tag=scratch = %v, want only stream %s", taggedList, out.StreamID)
+	}
+	if total, _ := tagged["total"].(float64); total != 1 {
+		t.Errorf("query flows filter.tag=scratch total = %v, want 1", tagged["total"])
+	}
 	if stream.Protocol != "http" {
 		t.Errorf("Stream.Protocol = %q, want http", stream.Protocol)
 	}

@@ -311,6 +311,11 @@ type StreamListOptions struct {
 	// the requested destination in tags.target (audit / error streams), or
 	// the host portion of the URL in send flows.
 	Host string
+	// Tag filters streams by the user label stored in tags["tag"] — the
+	// value resend_* / fuzz_* record from their tag parameter. Exact,
+	// case-sensitive match; the value is not trimmed or folded. Empty
+	// disables the filter.
+	Tag string
 	// SortBy specifies the field to sort results by.
 	// Valid values: "timestamp", "duration_ms".
 	// Default (empty): "timestamp".

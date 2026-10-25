@@ -1998,6 +1998,60 @@ func TestSQLiteStore_HostFilter_InvalidTagsJSON(t *testing.T) {
 	}
 }
 
+// TestSQLiteStore_TagFilter pins that StreamListOptions.Tag selects
+// streams whose tags["tag"] equals the value exactly (the user label that
+// resend_* / fuzz_* record), in both ListStreams and CountStreams. Other
+// tag keys holding the same value, prefix matches, case and whitespace
+// variants, untagged rows and rows whose tags column is not valid JSON are
+// not selected, and the query does not error on the malformed row.
+func TestSQLiteStore_TagFilter(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	mk := func(tags map[string]string) *Stream {
+		st := &Stream{Protocol: "http", State: "complete", Timestamp: time.Now().UTC(), Tags: tags}
+		if err := store.SaveStream(ctx, st); err != nil {
+			t.Fatalf("SaveStream: %v", err)
+		}
+		return st
+	}
+	want := mk(map[string]string{"tag": "probe-1"})
+	mk(map[string]string{"target": "probe-1"})
+	mk(map[string]string{"tag": "probe-10"})
+	mk(map[string]string{"tag": "Probe-1"})
+	mk(map[string]string{"tag": " probe-1"})
+	mk(nil)
+	bad := mk(nil)
+	if err := store.enqueueWrite(ctx, func(ctx context.Context) error {
+		_, err := store.db.ExecContext(ctx,
+			`UPDATE streams SET tags = ? WHERE id = ?`, `{"tag": "probe-1"`, bad.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("seed invalid tags: %v", err)
+	}
+
+	opts := StreamListOptions{Tag: "probe-1"}
+	streams, err := store.ListStreams(ctx, opts)
+	if err != nil {
+		t.Fatalf("ListStreams(Tag=probe-1): %v", err)
+	}
+	if len(streams) != 1 || streams[0].ID != want.ID {
+		var ids []string
+		for _, st := range streams {
+			ids = append(ids, st.ID)
+		}
+		t.Errorf("ListStreams(Tag=probe-1) = %v, want only %s", ids, want.ID)
+	}
+	n, err := store.CountStreams(ctx, opts)
+	if err != nil {
+		t.Fatalf("CountStreams(Tag=probe-1): %v", err)
+	}
+	if n != 1 {
+		t.Errorf("CountStreams(Tag=probe-1) = %d, want 1", n)
+	}
+}
+
 func TestSQLiteStore_FlowTiming_SaveAndGet(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
