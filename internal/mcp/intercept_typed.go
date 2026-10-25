@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 )
@@ -393,7 +396,7 @@ func applyHTTPBodyOverrides(ctx context.Context, hm *envelope.HTTPMessage, param
 	if spilled {
 		b, err := hm.BodyBuffer.Bytes(ctx)
 		if err != nil {
-			return fmt.Errorf("body_patches: materialize spilled body: %w", err)
+			return spilledBodyMaterializeError(ctx, err)
 		}
 		src = b
 	}
@@ -407,6 +410,23 @@ func applyHTTPBodyOverrides(ctx context.Context, hm *envelope.HTTPMessage, param
 	hm.Body = patched
 	dropBodyBuffer(hm)
 	return nil
+}
+
+// spilledBodyMaterializeError builds the MCP-facing error for a failed
+// BodyBuffer.Bytes. Path-free causes (ctx cancellation / deadline, the
+// buffer's max-size cap) are wrapped as-is. Anything else — typically an
+// *os.PathError because the spill file vanished under a live reference —
+// carries the spill directory and file name, so it is logged here and the
+// MCP client receives a generic message instead (CWE-209).
+func spilledBodyMaterializeError(ctx context.Context, err error) error {
+	const prefix = "body_patches: materialize spilled body"
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, bodybuf.ErrMaxSizeExceeded) {
+		return fmt.Errorf("%s: %w", prefix, err)
+	}
+	slog.WarnContext(ctx, "intercept: spilled body could not be read for body_patches",
+		"error", err)
+	return fmt.Errorf("%s: spilled body unavailable", prefix)
 }
 
 // dropBodyBuffer releases the BodyBuffer reference an intercept modify

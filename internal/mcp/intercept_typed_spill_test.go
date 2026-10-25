@@ -247,6 +247,39 @@ func TestApplyHTTPModify_SpilledBody_ErrorReleasesCloneRefs(t *testing.T) {
 	}
 }
 
+// TestApplyHTTPModify_SpilledBody_VanishedFileErrorOmitsPath: when the spill
+// file disappears under a live reference (e.g. an external tmp cleaner),
+// the MCP-facing error keeps the materialize prefix but must not carry the
+// spill directory or file name (CWE-209).
+func TestApplyHTTPModify_SpilledBody_VanishedFileErrorOmitsPath(t *testing.T) {
+	dir := t.TempDir()
+	env := newSpilledHTTPEnv(t, dir, spilledJSONBody)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if err := os.Remove(dir + string(os.PathSeparator) + e.Name()); err != nil {
+			t.Fatalf("remove spill file: %v", err)
+		}
+	}
+
+	mod, err := applyHTTPModify(context.Background(), env, httpMsg(t, env),
+		&httpMessageModify{BodyPatches: []BodyPatch{{JSONPath: "$.target", Value: "new"}}})
+	if err == nil {
+		mod.ReleaseBuffers()
+		t.Fatal("applyHTTPModify succeeded on a vanished spill file, want error")
+	}
+	env.ReleaseBuffers()
+	msg := err.Error()
+	if !strings.Contains(msg, "body_patches: materialize spilled body") {
+		t.Errorf("error = %q, want the materialize prefix", msg)
+	}
+	if strings.Contains(msg, dir) || strings.Contains(msg, unitSpillPrefix) {
+		t.Errorf("error = %q leaks the spill path to the MCP client", msg)
+	}
+}
+
 // TestApplyHoldQueueRawOverride_SpilledBody_ReleasesCloneRefs: a raw
 // override replaces the HTTP message with raw bytes, so neither the cloned
 // BodyBuffer nor the stale RawBuffer may stay referenced.

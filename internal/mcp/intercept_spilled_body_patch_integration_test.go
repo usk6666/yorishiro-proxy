@@ -539,6 +539,9 @@ func TestInterceptSpilledBody_NoSpillFileAfterSession(t *testing.T) {
 		name         string
 		args         func(id string) map[string]any
 		wantUpstream bool
+		// wantOrigBody: the action leaves the body untouched, so the
+		// upstream must receive the held spilled body byte-for-byte.
+		wantOrigBody bool
 	}
 	actions := []action{
 		{
@@ -547,6 +550,7 @@ func TestInterceptSpilledBody_NoSpillFileAfterSession(t *testing.T) {
 				return map[string]any{"action": "release", "params": map[string]any{"intercept_id": id}}
 			},
 			wantUpstream: true,
+			wantOrigBody: true,
 		},
 		{
 			name: "modify_and_forward_header_only",
@@ -558,6 +562,7 @@ func TestInterceptSpilledBody_NoSpillFileAfterSession(t *testing.T) {
 				}
 			},
 			wantUpstream: true,
+			wantOrigBody: true,
 		},
 		{
 			name: "modify_and_forward_patch",
@@ -598,10 +603,15 @@ func TestInterceptSpilledBody_NoSpillFileAfterSession(t *testing.T) {
 
 				r := <-resCh
 				if a.wantUpstream {
+					var got capturedRequest
 					select {
-					case <-upstream:
+					case got = <-upstream:
 					case <-time.After(60 * time.Second):
 						t.Fatal("upstream never received the request")
+					}
+					if a.wantOrigBody && !bytes.Equal(got.body, orig) {
+						t.Errorf("upstream body (%d bytes) != held spilled body (%d bytes); head=%q tail=%q",
+							len(got.body), len(orig), spillHead(got.body), spillTail(got.body))
 					}
 					if r.err != nil || r.status != 200 {
 						t.Errorf("client result = (%d, %v), want (200, nil)", r.status, r.err)
