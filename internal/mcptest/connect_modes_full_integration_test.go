@@ -488,11 +488,9 @@ func hasMessagePreviewRaw(preview []any) bool {
 		if entry == nil {
 			continue
 		}
-		// Per-message preview surfaces raw_payload (base64) for ws/sse.
-		if s, _ := entry["raw_payload"].(string); s != "" {
-			return true
-		}
-		if s, _ := entry["raw"].(string); s != "" {
+		// Per-message preview surfaces raw_bytes (base64) for bodyless
+		// messages (USK-1344).
+		if s, _ := entry["raw_bytes"].(string); s != "" {
 			return true
 		}
 	}

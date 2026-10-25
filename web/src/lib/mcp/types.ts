@@ -498,6 +498,17 @@ export interface MessageEntry {
   body_original_size?: number;
   /** Pre-truncation decoded-form byte length when body_truncated_by_query=true. */
   body_decoded_original_size?: number;
+  /**
+   * Stored wire bytes (base64) of a message that has no L7 body — e.g. a
+   * bodyless HTTP request head, gRPC Start / End HEADERS, an empty WS control
+   * frame, or a wire_level overlay row (USK-1344). Absent for body-bearing
+   * messages and under include_bodies=false; capped by body_max_bytes.
+   */
+  raw_bytes?: string;
+  /** Always "base64" when raw_bytes is present. */
+  raw_bytes_encoding?: string;
+  /** Stored raw byte length (pre-mask, pre-cap) of a raw-eligible message. */
+  raw_bytes_size?: number;
   metadata?: Record<string, string>;
   timestamp: string;
 }

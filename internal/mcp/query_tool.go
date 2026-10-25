@@ -1987,9 +1987,21 @@ type queryMessageEntry struct {
 	BodyTruncatedByQuery bool `json:"body_truncated_by_query,omitempty"`
 	// BodyOriginalSize / BodyDecodedOriginalSize record the pre-truncation
 	// byte lengths when the query-time cap fired on each side independently.
-	BodyOriginalSize        int               `json:"body_original_size,omitempty"`
-	BodyDecodedOriginalSize int               `json:"body_decoded_original_size,omitempty"`
-	Metadata                map[string]string `json:"metadata,omitempty"`
+	BodyOriginalSize        int `json:"body_original_size,omitempty"`
+	BodyDecodedOriginalSize int `json:"body_decoded_original_size,omitempty"`
+	// RawBytes carries the stored wire bytes (Flow.RawBytes) as base64 for a
+	// message that has no L7 body (Flow.Body empty) but does have raw bytes —
+	// e.g. a bodyless HTTP request head, gRPC Start / End HEADERS, an empty
+	// WS control frame, or a wire_level overlay row. Body-bearing messages
+	// never carry it. Output-Filter masked; capped by body_max_bytes;
+	// suppressed by include_bodies=false.
+	RawBytes string `json:"raw_bytes,omitempty"`
+	// RawBytesEncoding is always "base64" when RawBytes is set.
+	RawBytesEncoding string `json:"raw_bytes_encoding,omitempty"`
+	// RawBytesSize is the stored raw byte length (pre-mask, pre-cap). Set for
+	// every raw-eligible message, including when include_bodies=false.
+	RawBytesSize int               `json:"raw_bytes_size,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 	// WireLevel mirrors flow.Flow.WireLevel — "semantic" for canonical
 	// L7 envelopes, or one of the overlay discriminators (h2-frame,
 	// h1-chunk, grpc-lpm-frame, grpcweb-base64) when the caller opted

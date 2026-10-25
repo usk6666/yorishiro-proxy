@@ -12,7 +12,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { MessageEntry } from "../../lib/mcp/types.js";
-import { MessageList } from "./MessageList.js";
+import { MessageDetail, MessageList } from "./MessageList.js";
 
 const grpcMessages: MessageEntry[] = [
   {
@@ -77,5 +77,34 @@ describe("MessageList gRPC columns", () => {
   it("omits gRPC columns for other protocols", () => {
     const html = render("sse");
     expect(html).not.toContain("<th>Service</th>");
+  });
+});
+
+// USK-1344: a bodyless message (here a gRPC Start) carries its wire bytes in
+// raw_bytes (base64) rather than in body. The raw_bytes value is an invented
+// HPACK-shaped byte string, not captured from a live connection.
+describe("MessageDetail raw bytes", () => {
+  function renderDetail(message: MessageEntry): string {
+    return renderToStaticMarkup(
+      createElement(MessageDetail, { message, onClose: () => {} }),
+    );
+  }
+
+  it("renders a Raw Bytes viewer when raw_bytes is present", () => {
+    const html = renderDetail({
+      ...grpcMessages[0],
+      raw_bytes: "g4dECy9wa2cuU3ZjL0Rv",
+      raw_bytes_encoding: "base64",
+      raw_bytes_size: 15,
+    });
+    expect(html).toContain("Raw Bytes");
+    expect(html).toContain("sd-raw-bytes-viewer");
+    expect(html).toContain("15 bytes");
+  });
+
+  it("renders no Raw Bytes section when raw_bytes is absent", () => {
+    const html = renderDetail(grpcMessages[1]);
+    expect(html).not.toContain("Raw Bytes");
+    expect(html).not.toContain("sd-raw-bytes-viewer");
   });
 });
