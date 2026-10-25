@@ -61,9 +61,18 @@ func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID
 		state = "error"
 		failureReason = session.ClassifyError(runErr)
 	}
+	// USK-1347: stamp Duration = time.Since(Stream.Timestamp) like the
+	// proxy-path OnComplete does. RecordStep stamps Timestamp when it
+	// creates the Stream from the send envelope, so this is the elapsed
+	// time from send to completion (or failure). Every caller passes a
+	// flow.Store, which embeds StreamReader; a store without it — or a
+	// lookup miss — yields 0, the "do not update" sentinel, so the
+	// existing Duration is preserved.
+	reader, _ := store.(flow.StreamReader)
 	update := flow.StreamUpdate{
 		State:         state,
 		FailureReason: failureReason,
+		Duration:      flow.StreamElapsed(ctx, reader, streamID),
 	}
 	if err := store.UpdateStream(ctx, streamID, update); err != nil {
 		slog.WarnContext(ctx, "resend: stream finalize update failed",

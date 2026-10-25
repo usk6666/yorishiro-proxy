@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -138,4 +139,85 @@ func TestFinalizeResendStream_EmptyStreamID(t *testing.T) {
 	// would have created a row; we never created one, so the store
 	// remains empty (the SQLite store has no other writes in this
 	// test).
+}
+
+// seedActiveStreamAt is seedActiveStream with an explicit Timestamp and
+// pre-existing Duration, so the finalize Duration stamp can be observed.
+// The Timestamp mirrors what RecordStep's createStream stamps
+// (time.Now() on the first envelope) — here backdated to simulate a
+// resend whose send→receive took that long.
+func seedActiveStreamAt(t *testing.T, store flow.Store, ts time.Time, duration time.Duration) string {
+	t.Helper()
+	id := uuid.NewString()
+	st := &flow.Stream{
+		ID:        id,
+		Protocol:  "http",
+		State:     "active",
+		Origin:    flow.OriginResend,
+		Timestamp: ts,
+		Duration:  duration,
+	}
+	if err := store.SaveStream(context.Background(), st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+	return id
+}
+
+// TestFinalizeResendStream_StampsDurationFromStreamTimestamp: a resend
+// Stream finalised ~1.5s after RecordStep created it must carry
+// Duration ≈ 1.5s (USK-1347: resend/fuzz Streams always showed 0).
+func TestFinalizeResendStream_StampsDurationFromStreamTimestamp(t *testing.T) {
+	store := newTestStore(t)
+	id := seedActiveStreamAt(t, store, time.Now().Add(-1500*time.Millisecond), 0)
+
+	finalizeResendStream(context.Background(), store, id, nil)
+
+	got, err := store.GetStream(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.State != "complete" {
+		t.Errorf("State = %q, want complete", got.State)
+	}
+	if got.Duration < 1500*time.Millisecond || got.Duration > 1500*time.Millisecond+5*time.Second {
+		t.Errorf("Duration = %v, want in [1.5s, 6.5s] (elapsed since Stream.Timestamp)", got.Duration)
+	}
+}
+
+// TestFinalizeResendStream_ErrorStampsDuration: the error path records
+// the real elapsed time too (USK-1347 AC3).
+func TestFinalizeResendStream_ErrorStampsDuration(t *testing.T) {
+	store := newTestStore(t)
+	id := seedActiveStreamAt(t, store, time.Now().Add(-1500*time.Millisecond), 0)
+
+	finalizeResendStream(context.Background(), store, id, errors.New("boom"))
+
+	got, err := store.GetStream(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.State != "error" {
+		t.Errorf("State = %q, want error", got.State)
+	}
+	if got.Duration < 1500*time.Millisecond || got.Duration > 1500*time.Millisecond+5*time.Second {
+		t.Errorf("Duration = %v, want in [1.5s, 6.5s] (elapsed since Stream.Timestamp)", got.Duration)
+	}
+}
+
+// TestFinalizeResendStream_ZeroTimestampLeavesDuration: without a
+// Timestamp there is nothing to measure from, so the existing Duration
+// must survive (zero = "do not update" sentinel of StreamUpdate).
+func TestFinalizeResendStream_ZeroTimestampLeavesDuration(t *testing.T) {
+	store := newTestStore(t)
+	id := seedActiveStreamAt(t, store, time.Time{}, 42*time.Millisecond)
+
+	finalizeResendStream(context.Background(), store, id, nil)
+
+	got, err := store.GetStream(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.Duration != 42*time.Millisecond {
+		t.Errorf("Duration = %v, want 42ms preserved", got.Duration)
+	}
 }
