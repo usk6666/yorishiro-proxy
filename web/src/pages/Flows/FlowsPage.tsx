@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { HttpVersionBadge } from "../../components/flow/HttpVersionBadge.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { useDialog } from "../../components/ui/dialogContext.js";
@@ -9,7 +8,6 @@ import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
 import { useToast } from "../../components/ui/toastContext.js";
 import { buildHarFromList, downloadHar } from "../../lib/export/har.js";
-import { protocolVariant } from "../../lib/mcp/dispatch.js";
 import { useManage, useQuery } from "../../lib/mcp/hooks.js";
 import {
   HTTP_VERSION_FILTER_VALUES,
@@ -17,6 +15,7 @@ import {
   SCHEME_FILTER_VALUES,
 } from "../../lib/mcp/protocols.js";
 import type { FlowEntry, ManageImportFlowsResult, QueryFilter } from "../../lib/mcp/types.js";
+import { FlowProtocolCell } from "./FlowProtocolCell.js";
 import "./FlowsPage.css";
 
 // ---------------------------------------------------------------------------
@@ -841,13 +840,7 @@ export function FlowsPage() {
                     </td>
                     <td className="flows-cell-id">{shortId(flow.id)}</td>
                     <td>
-                      <Badge variant={protocolVariant(flow.protocol)}>
-                        {flow.protocol}
-                      </Badge>
-                      <HttpVersionBadge flow={flow} />
-                      {flow.tags?.streaming_type === "sse" && (
-                        <Badge variant="warning">SSE</Badge>
-                      )}
+                      <FlowProtocolCell flow={flow} />
                     </td>
                     <td>
                       <Badge variant={stateVariant(flow.state)}>

@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { FlowEntry, FlowsResult } from "../../lib/mcp/types.js";
 import flowsText from "../../pages/Flows/__fixtures__/flows-all-protocols.response.json?raw";
+import { FlowProtocolCell } from "../../pages/Flows/FlowProtocolCell.js";
 import flowsPageSrc from "../../pages/Flows/FlowsPage.tsx?raw";
 import { HttpVersionBadge } from "./HttpVersionBadge.js";
 
@@ -60,8 +61,35 @@ describe("HttpVersionBadge on flows list rows", () => {
   });
 });
 
+describe("FlowProtocolCell (Flows list Protocol cell)", () => {
+  function cellBadges(flow: FlowEntry): string[] {
+    const html = renderToStaticMarkup(createElement(FlowProtocolCell, { flow }));
+    return [...html.matchAll(/<span class="badge[^"]*">([^<]*)<\/span>/g)].map(
+      (m) => m[1],
+    );
+  }
+
+  it("renders the version badge right after the protocol badge", () => {
+    expect(cellBadges(row("stream-http-h2"))).toEqual(["http", "h2"]);
+    expect(cellBadges(row("stream-http-h2c"))).toEqual(["http", "h2c"]);
+    expect(cellBadges(row("stream-http-h1"))).toEqual(["http", "http/1.1"]);
+    expect(cellBadges(row("stream-ws"))).toEqual(["ws", "http/1.1"]);
+  });
+
+  it("renders only the protocol badge for rows without a version", () => {
+    expect(cellBadges(row("stream-grpc"))).toEqual(["grpc"]);
+    expect(cellBadges(row("stream-raw"))).toEqual(["raw"]);
+  });
+});
+
 describe("FlowsPage", () => {
-  it("renders each row's HttpVersionBadge in the Protocol cell", () => {
-    expect(flowsPageSrc).toMatch(/<HttpVersionBadge flow=\{flow\} \/>/);
+  // Deliberate wiring smoke check: there is no DOM / testing-library setup
+  // in web/, and mounting FlowsPage needs the MCP client and router. The
+  // cell's rendering is covered by the FlowProtocolCell tests above; this
+  // only pins that the page's Protocol <td> uses that component.
+  it("uses FlowProtocolCell for each row's Protocol cell", () => {
+    expect(flowsPageSrc).toMatch(
+      /<td>\s*<FlowProtocolCell flow=\{flow\} \/>\s*<\/td>/,
+    );
   });
 });
