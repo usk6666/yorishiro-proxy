@@ -146,6 +146,10 @@ const (
 	TransparentFailureScope = "target_scope"
 	// TransparentFailureDial is the FailureReason of an upstream dial failure.
 	TransparentFailureDial = "transparent_dial_failed"
+	// TransparentBlockedByRateLimit is the BlockedBy / FailureReason of a
+	// rate-limit refusal (USK-1374). It mirrors pipeline.BlockedByRateLimit
+	// (connector cannot import pipeline).
+	TransparentBlockedByRateLimit = "rate_limit"
 	// transparentVia is the LiveConn.Via / audit "via" label.
 	transparentVia = "transparent"
 )
