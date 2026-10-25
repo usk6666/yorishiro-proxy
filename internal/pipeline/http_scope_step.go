@@ -93,9 +93,14 @@ func (s *HTTPScopeStep) processHTTP(ctx context.Context, env *envelope.Envelope,
 
 	dialTarget := env.Context.TargetHost
 	allowed := s.checkNameLeg(scheme, msg.Authority, path, dialTarget)
+	var bindTo *connector.TransparentScope
 	if allowed && dialTarget != "" {
 		if ts := connector.TransparentScopeFromContext(ctx); ts != nil {
-			allowed = s.checkTransparentDial(ctx, ts, scheme, dialTarget, path, msg, env)
+			var needBinding bool
+			allowed, needBinding = s.checkTransparentDial(scheme, dialTarget, path)
+			if needBinding {
+				bindTo = ts
+			}
 		} else {
 			allowed = s.checkHostPort(scheme, dialTarget, path)
 		}
@@ -108,6 +113,11 @@ func (s *HTTPScopeStep) processHTTP(ctx context.Context, env *envelope.Envelope,
 		// verbatim, and a server routes on its authority, not on Host
 		// (RFC 9112 §3.2.2).
 		allowed, _ = s.scope.CheckAbsoluteFormAuthority(scheme, env.Context.AbsoluteFormAuthority, path, dialTarget)
+	}
+	if allowed && bindTo != nil {
+		// The DNS binding runs last, on names every allow / deny check
+		// above already admitted: a refused name is never resolved.
+		allowed = bindTo.NamesBound(ctx, transparentRequestNames(msg, env))
 	}
 	if !allowed {
 		// USK-829: emit a 403 terminator on the wire. HTTPScopeStep is
@@ -134,20 +144,28 @@ func (s *HTTPScopeStep) checkHostPort(scheme, hostPort, path string) bool {
 // connection (USK-1316, decision U3 amended; ts on ctx). When an allow
 // rule admits the original destination (with the request path) it is
 // the ordinary check, and the names stay deny-only legs. Otherwise the
-// destination must not be denied, and every name the request carries —
-// the authority, each Host value, the absolute-form authority — must
-// resolve to it by DNS: the name legs (checked by the caller) then had
-// to match an allow rule, and the binding stops a client from writing an
-// allowed name to reach an arbitrary IP. Explicit-proxy, CONNECT and
-// tcp_forward connections carry no TransparentScope and never get here.
-func (s *HTTPScopeStep) checkTransparentDial(ctx context.Context, ts *connector.TransparentScope, scheme, dialTarget, path string, msg *envelope.HTTPMessage, env *envelope.Envelope) bool {
+// destination must not be denied, and needBinding is set: every name the
+// request carries — the authority, each Host value, the absolute-form
+// authority — must then resolve to it by DNS. The name legs (checked by
+// the caller) had to match an allow rule, and the binding stops a client
+// from writing an allowed name to reach an arbitrary IP. The caller runs
+// the binding only after every name check passed, so a refused name is
+// never looked up. Explicit-proxy, CONNECT and tcp_forward connections
+// carry no TransparentScope and never get here.
+func (s *HTTPScopeStep) checkTransparentDial(scheme, dialTarget, path string) (allowed, needBinding bool) {
 	if s.checkHostPort(scheme, dialTarget, path) {
-		return true
+		return true, false
 	}
 	host, port := splitScopeHostPort(scheme, dialTarget)
 	if ok, _ := s.scope.CheckDenyOnly(scheme, host, port, path); !ok {
-		return false
+		return false, false
 	}
+	return true, true
+}
+
+// transparentRequestNames is every name a request carries: the
+// authority, each Host value and the absolute-form authority.
+func transparentRequestNames(msg *envelope.HTTPMessage, env *envelope.Envelope) []string {
 	var names []string
 	if msg.Authority != "" {
 		names = append(names, msg.Authority)
@@ -156,7 +174,7 @@ func (s *HTTPScopeStep) checkTransparentDial(ctx context.Context, ts *connector.
 	if env.Context.AbsoluteFormAuthority != "" {
 		names = append(names, env.Context.AbsoluteFormAuthority)
 	}
-	return ts.NamesBound(ctx, names)
+	return names
 }
 
 // checkNameLeg checks the request authority as a name leg against the

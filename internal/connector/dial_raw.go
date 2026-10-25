@@ -140,5 +140,6 @@ func dialTCP(ctx context.Context, target string, upstreamProxy *url.URL, timeout
 	if err != nil {
 		return nil, fmt.Errorf("connector: dial %s: %w", target, err)
 	}
+	notifyDialSocket(ctx, conn)
 	return conn, nil
 }

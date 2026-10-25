@@ -26,8 +26,9 @@ import (
 // when relayTransparent returns. beforeClient, when non-nil, runs on the
 // client→upstream goroutine before it copies a byte (the late-TLS
 // ClientHello peek); the upstream→client direction is already running
-// then, so a server banner is never held back.
-func relayTransparent(ctx context.Context, client, upstream net.Conn, c2u, u2c *atomic.Int64, beforeClient func()) error {
+// then, so a server banner is never held back. A non-nil error from it
+// aborts the relay before a client byte is copied, and is returned.
+func relayTransparent(ctx context.Context, client, upstream net.Conn, c2u, u2c *atomic.Int64, beforeClient func() error) error {
 	var (
 		once     sync.Once
 		mu       sync.Mutex
@@ -58,7 +59,10 @@ func relayTransparent(ctx context.Context, client, upstream net.Conn, c2u, u2c *
 	go func() {
 		defer wg.Done()
 		if beforeClient != nil {
-			beforeClient()
+			if err := beforeClient(); err != nil {
+				abort(err)
+				return
+			}
 		}
 		if err := copyCounted(upstream, client, c2u); err != nil {
 			abort(err)

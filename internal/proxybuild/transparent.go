@@ -214,6 +214,23 @@ func (r *transparentRecorder) OnComplete(_ context.Context, obs connector.Transp
 		upd.AppendTags = map[string]string{"route": string(obs.Route)}
 		upd.TLSClientJA3, upd.TLSClientJA4 = obs.ClientJA3, obs.ClientJA4
 	}
+	if obs.BlockedBy != "" {
+		// Refused mid-relay (a late ClientHello's denied SNI): recorded
+		// like a pre-dial refusal (BlockedBy / FailureReason
+		// target_scope, the detail in the "reason" tag).
+		upd.State = "error"
+		upd.BlockedBy = obs.BlockedBy
+		upd.FailureReason = connector.TransparentFailureScope
+		if upd.AppendTags == nil {
+			upd.AppendTags = map[string]string{}
+		}
+		if obs.BlockReason != "" {
+			upd.AppendTags["reason"] = obs.BlockReason
+		}
+		if obs.SNI != "" {
+			upd.AppendTags["name"] = obs.SNI
+		}
+	}
 	if err := r.store.UpdateStream(saveCtx, state.streamID, upd); err != nil {
 		r.logger.Error("transparent recorder: stream finalise failed", "stream_id", state.streamID, "error", err)
 	}

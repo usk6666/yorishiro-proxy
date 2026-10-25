@@ -171,6 +171,24 @@ func TestFullListener_Transparent_RejectsUnusableOriginalDst(t *testing.T) {
 	}
 }
 
+// Connections without a usable original destination (direct clients,
+// health checks, scans) warn at most once per window; the rest log at
+// Debug and are counted in the next Warn.
+func TestFullListener_Transparent_UnusableOriginalDstWarnRateLimited(t *testing.T) {
+	fl, logs := startTransparentTestListener(t, "127.0.0.1:0", OriginalDstFunc(func(net.Conn) (netip.AddrPort, error) {
+		return netip.AddrPort{}, errors.New("ENOENT")
+	}), nil)
+	first := dialPort(t, fl)
+	expectClosedWithoutResponse(t, first)
+	waitLog(t, logs, "level=WARN", "remote_addr="+first.LocalAddr().String())
+	second := dialPort(t, fl)
+	expectClosedWithoutResponse(t, second)
+	waitLog(t, logs, "level=DEBUG", "no usable original destination", "remote_addr="+second.LocalAddr().String())
+	if n := strings.Count(logs.Output(), "level=WARN msg=\"transparent connection rejected: no usable original destination\""); n != 1 {
+		t.Errorf("%d Warn lines for two rejections within the window, want 1; log:\n%s", n, logs.Output())
+	}
+}
+
 func TestFullListener_Transparent_AdmittedDstOnContext(t *testing.T) {
 	want := netip.MustParseAddrPort("192.0.2.10:8443")
 	probe := newTransparentProbe()

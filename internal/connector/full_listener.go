@@ -139,6 +139,11 @@ type FullListener struct {
 	// reads fl.now on every call so a test clock is honoured.
 	rejectWarn *RejectWarnLimiter
 
+	// origDstWarn rate-limits the transparent "no usable original
+	// destination" Warn log the same way (direct clients, health checks
+	// and scans must not flood it).
+	origDstWarn *RejectWarnLimiter
+
 	mu       sync.Mutex
 	listener net.Listener
 	ready    chan struct{}
@@ -188,6 +193,7 @@ func NewFullListener(cfg FullListenerConfig) *FullListener {
 		ready:             make(chan struct{}),
 	}
 	fl.rejectWarn = NewRejectWarnLimiter(func() time.Time { return fl.now() })
+	fl.origDstWarn = NewRejectWarnLimiter(func() time.Time { return fl.now() })
 	fl.peekTimeoutNs.Store(int64(peekTimeout))
 	return fl
 }
@@ -358,9 +364,16 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 func (fl *FullListener) handleTransparentConn(ctx context.Context, conn net.Conn, pc *PeekConn, connLogger *slog.Logger, connStart time.Time) {
 	dst, err := resolveTransparentDst(fl.originalDst, conn)
 	if err != nil {
-		connLogger.Warn("transparent connection rejected: no usable original destination",
-			"local_addr", netAddrString(conn.LocalAddr()),
-			"reason", err.Error())
+		attrs := []any{"local_addr", netAddrString(conn.LocalAddr()), "reason", err.Error()}
+		connLogger.Debug("transparent connection rejected: no usable original destination", attrs...)
+		warn, suppressed := true, int64(0)
+		if fl.origDstWarn != nil {
+			warn, suppressed = fl.origDstWarn.observe()
+		}
+		if warn {
+			connLogger.Warn("transparent connection rejected: no usable original destination",
+				append(attrs, "suppressed", suppressed)...)
+		}
 		return
 	}
 	ctx = ContextWithOriginalDst(ctx, dst)

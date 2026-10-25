@@ -97,6 +97,9 @@ type transparentRequestHead struct {
 	absoluteAuthority string
 	// path is the request path without the query.
 	path string
+	// complete reports that the whole head (through CRLF CRLF) was read
+	// within the size and time bounds.
+	complete bool
 }
 
 // names returns every name value the head carries.
@@ -117,11 +120,12 @@ func readTransparentRequestHead(pc *PeekConn, timeout time.Duration) transparent
 	_ = pc.SetReadDeadline(time.Now().Add(timeout))
 	buf, _ := peekUntilHeadersEnd(pc, peekHeaderSize)
 	_ = pc.SetReadDeadline(time.Time{})
+	var head transparentRequestHead
 	if idx := bytes.Index(buf, []byte("\r\n\r\n")); idx >= 0 {
 		buf = buf[:idx]
+		head.complete = true
 	}
 	lines := bytes.Split(buf, []byte("\r\n"))
-	var head transparentRequestHead
 	if len(lines) == 0 {
 		return head
 	}

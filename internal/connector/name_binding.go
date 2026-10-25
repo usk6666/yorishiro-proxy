@@ -103,9 +103,13 @@ func NewNameBindingCache(r NameResolver, cfg NameBindingConfig) *NameBindingCach
 
 // Bound reports whether name resolves to addr (compared unmapped, zone
 // ignored). A name that is an IP literal (bracketed or not) is bound iff
-// it equals addr; no lookup happens. A failed, timed-out or empty lookup
-// is not bound (fail closed). reason is ReasonNameResolutionFailed or
-// ReasonNameNotBound when not bound, empty when bound.
+// it equals addr; no lookup happens. Any other name is looked up only
+// when it is a syntactically valid DNS host name (lookupHostName); one
+// that is not — a Host value with trailing data, say — is not bound and
+// never reaches the resolver. A failed, timed-out or empty lookup is not
+// bound (fail closed). reason is ReasonNameResolutionFailed or
+// ReasonNameNotBound when not bound, empty when bound. This only decides
+// the binding; the name on the wire is never touched.
 func (c *NameBindingCache) Bound(ctx context.Context, name string, addr netip.Addr) (bool, string) {
 	want := addr.Unmap().WithZone("")
 	host := strings.TrimSuffix(strings.TrimPrefix(name, "["), "]")
@@ -115,10 +119,10 @@ func (c *NameBindingCache) Bound(ctx context.Context, name string, addr netip.Ad
 		}
 		return false, ReasonNameNotBound
 	}
-	key := strings.ToLower(host)
-	if key == "" {
+	if !lookupHostName(host) {
 		return false, ReasonNameResolutionFailed
 	}
+	key := strings.ToLower(host)
 	addrs := c.lookup(ctx, key)
 	if len(addrs) == 0 {
 		return false, ReasonNameResolutionFailed
@@ -129,6 +133,33 @@ func (c *NameBindingCache) Bound(ctx context.Context, name string, addr netip.Ad
 		}
 	}
 	return false, ReasonNameNotBound
+}
+
+// lookupHostName reports whether s is a DNS host name the binding may
+// resolve: dot-separated labels of 1-63 letters, digits, '-' (not at
+// either end of a label) or '_' (which the Go resolver's isDomainName
+// also accepts), at most 253 bytes, with an optional trailing dot.
+// Anything else — spaces, control bytes, '/', empty labels — fails
+// closed before it reaches a resolver that might read past it.
+func lookupHostName(s string) bool {
+	s = strings.TrimSuffix(s, ".")
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			switch {
+			case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9', c == '-', c == '_':
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // lookup returns the cached or freshly resolved addresses of key (nil on

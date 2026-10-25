@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -54,6 +55,11 @@ type TransparentObservation struct {
 	Route       TransparentRoute
 	ALPN        []string
 	OriginalDst string
+	// BlockedBy / BlockReason are set when the scope refused the
+	// connection mid-relay (a late ClientHello's denied SNI): BlockedBy
+	// is "target_scope", BlockReason the refusal detail.
+	BlockedBy   string
+	BlockReason string
 }
 
 // TransparentBlock describes a transparent connection refused before any
@@ -150,9 +156,9 @@ type TransparentHandler struct {
 	binder *NameBindingCache
 
 	// ownDials holds the local address of every upstream socket this
-	// handler dialed directly and still has open (decision R4): a
-	// connection accepted from one of them is the proxy's own dial
-	// REDIRECTed back to it.
+	// handler dialed — to the original destination, or to the upstream
+	// proxy — and still has open (decision R4): a connection accepted
+	// from one of them is the proxy's own dial REDIRECTed back to it.
 	ownDials sync.Map // netip.AddrPort → struct{}
 }
 
@@ -296,17 +302,30 @@ func (h *TransparentHandler) scopeHTTPNames(dst netip.AddrPort, head transparent
 	if len(names) == 0 {
 		return refuseScope("original destination not in the allow list and no Host to admit it")
 	}
+	if ok, r := h.checkHTTPNames(dst, head); !ok {
+		return refuseScope(r)
+	}
+	return transparentVerdict{allowed: true, needBinding: true}
+}
+
+// checkHTTPNames runs every Host value and the absolute-form authority of
+// head through the name legs HTTPScopeStep applies to the request. When
+// the original destination is admitted on its own (an IP allow, or no
+// allow list) the legs are deny-only, so this is the pre-dial deny gate;
+// otherwise the names must also match an allow rule. No name is looked
+// up here.
+func (h *TransparentHandler) checkHTTPNames(dst netip.AddrPort, head transparentRequestHead) (bool, string) {
 	for _, v := range head.hostValues {
 		if ok, r := h.cfg.Scope.CheckHostHeader("http", v, head.path, dst.String()); !ok {
-			return refuseScope(r)
+			return false, r
 		}
 	}
 	if head.absoluteAuthority != "" {
 		if ok, r := h.cfg.Scope.CheckAbsoluteFormAuthority("http", head.absoluteAuthority, head.path, dst.String()); !ok {
-			return refuseScope(r)
+			return false, r
 		}
 	}
-	return transparentVerdict{allowed: true, needBinding: true}
+	return true, ""
 }
 
 // bindNames checks that every name resolves to dst (owner amendment to
@@ -365,8 +384,8 @@ func (h *TransparentHandler) handleOpaque(ctx context.Context, pc *PeekConn, dst
 }
 
 // handleHTTP runs the plain-HTTP route: gate (reading the first request
-// head first when a Host must admit the connection), one dial, then the
-// L7 HTTP/1 session pinned to the original destination.
+// head first whenever the scope has rules), one dial, then the L7 HTTP/1
+// session pinned to the original destination.
 func (h *TransparentHandler) handleHTTP(ctx context.Context, pc *PeekConn, dst netip.AddrPort, logger *slog.Logger) error {
 	full, denyOK, reason := h.dstCheck("http", dst, false)
 	v := transparentVerdict{allowed: true}
@@ -379,6 +398,18 @@ func (h *TransparentHandler) handleHTTP(ctx context.Context, pc *PeekConn, dst n
 		v = h.scopeHTTPNames(dst, head)
 		if v.allowed {
 			v = h.bindNames(ctx, dst, head.names())
+		}
+	case h.scopeHasRules():
+		// Admitted by the destination itself: the names are deny-only
+		// legs (no allow requirement, no DNS lookup), but a denied name
+		// on the first request must still not get the target contacted.
+		// A head that cannot be read whole within the bound is left to
+		// HTTPScopeStep, which checks every request after the dial.
+		head = readTransparentRequestHead(pc, transparentHeadTimeout)
+		if head.complete {
+			if ok, r := h.checkHTTPNames(dst, head); !ok {
+				v = refuseScope(r)
+			}
 		}
 	}
 	if !v.allowed {
@@ -461,18 +492,29 @@ func (h *TransparentHandler) passthrough(ctx context.Context, pc *PeekConn, dst 
 	// Late TLS (decision R13): on the server-first route, a first client
 	// byte of 0x16 — sent only after the peek deadline — is a ClientHello
 	// whose metadata is recorded. The upstream→client direction is already
-	// running, so the banner is never held back.
-	var beforeClient func()
+	// running, so the banner is never held back. Its SNI is a name leg
+	// like the TLS route's: a denied SNI aborts the relay before a
+	// ClientHello byte reaches the upstream.
+	var beforeClient func() error
 	late := obs
+	var lateBlock string
 	if obs.Route == TransparentRouteServerFirst {
-		beforeClient = func() {
+		beforeClient = func() error {
 			b, err := pc.Peek(1)
 			if err != nil || len(b) == 0 || b[0] != tlsContentTypeHandshake {
-				return
+				return nil
 			}
 			hello := peekClientHelloSNIAndALPN(pc)
 			late.Route = TransparentRouteLateTLS
 			late.SNI, late.ALPN, late.ClientJA3, late.ClientJA4 = hello.SNI, hello.ALPN, hello.ClientJA3, hello.ClientJA4
+			if ok, reason := h.lateSNIAllowed(dst, hello.SNI); !ok {
+				lateBlock = reason
+				logger.Info("transparent target blocked by scope",
+					"route", string(TransparentRouteLateTLS), "name", hello.SNI,
+					"failure", TransparentFailureScope, "reason", reason)
+				return errTransparentLateTLSBlocked
+			}
+			return nil
 		}
 	}
 
@@ -480,6 +522,9 @@ func (h *TransparentHandler) passthrough(ctx context.Context, pc *PeekConn, dst 
 	relayErr := relayTransparent(ctx, pc, up, &c2u, &u2c, beforeClient)
 	if late.Route == TransparentRouteLateTLS {
 		obs.Route, obs.SNI, obs.ALPN, obs.ClientJA3, obs.ClientJA4 = late.Route, late.SNI, late.ALPN, late.ClientJA3, late.ClientJA4
+	}
+	if lateBlock != "" {
+		obs.BlockedBy, obs.BlockReason = TransparentFailureScope, lateBlock
 	}
 	obs.BytesClientToUpstream = c2u.Load()
 	obs.BytesUpstreamToClient = u2c.Load()
@@ -498,6 +543,27 @@ func (h *TransparentHandler) passthrough(ctx context.Context, pc *PeekConn, dst 
 		"bytes_upstream_to_client", obs.BytesUpstreamToClient,
 		"error", relayErr)
 	return nil
+}
+
+// errTransparentLateTLSBlocked ends a server-first relay whose late
+// ClientHello carries a denied SNI.
+var errTransparentLateTLSBlocked = errors.New("connector: late TLS ClientHello SNI blocked by scope")
+
+// lateSNIAllowed checks a late ClientHello's SNI. The server-first route
+// was admitted by the original destination itself, so the SNI is a
+// deny-only leg (no allow requirement, no DNS lookup), checked under
+// "https" (TLS) and "http" (the route's dial leg).
+func (h *TransparentHandler) lateSNIAllowed(dst netip.AddrPort, sni string) (bool, string) {
+	if sni == "" || !h.scopeHasRules() {
+		return true, ""
+	}
+	authority := net.JoinHostPort(sni, strconv.Itoa(int(dst.Port())))
+	for _, scheme := range []string{"https", "http"} {
+		if ok, r := h.cfg.Scope.CheckAuthorityDenyOnly(scheme, authority, "", dst.String()); !ok {
+			return false, r
+		}
+	}
+	return true, ""
 }
 
 // register tracks the admitted connection in the live-connection
@@ -544,16 +610,41 @@ func (h *TransparentHandler) dial(ctx context.Context, pc *PeekConn, dst netip.A
 		}
 		opts.UpstreamProxy = u
 	}
+	// Every socket the dial opens — direct, or to the upstream proxy — is
+	// registered the moment its TCP connect completes: a looped CONNECT
+	// to the upstream proxy arrives while the dial still waits for the
+	// CONNECT answer.
+	var (
+		openedMu sync.Mutex
+		opened   []netip.AddrPort
+	)
+	dialCtx = contextWithDialSocketHook(dialCtx, func(c net.Conn) {
+		if local, ok := addrPortOf(c.LocalAddr()); ok {
+			h.ownDials.Store(local, struct{}{})
+			openedMu.Lock()
+			opened = append(opened, local)
+			openedMu.Unlock()
+		}
+	})
 	up, _, err := DialUpstreamRaw(dialCtx, target, opts)
+	upLocal, upOK := netip.AddrPort{}, false
+	if err == nil {
+		upLocal, upOK = addrPortOf(up.LocalAddr())
+		if upOK {
+			h.ownDials.Store(upLocal, struct{}{})
+		}
+	}
+	openedMu.Lock()
+	for _, local := range opened {
+		if !upOK || local != upLocal {
+			h.ownDials.Delete(local)
+		}
+	}
+	openedMu.Unlock()
 	if err != nil {
 		logger.Debug("transparent upstream dial failed", "error", err)
 		h.dialFailed(ctx, pc, dst, route, err)
 		return nil, false
-	}
-	if UpstreamProxyOf(up) == "" {
-		if local, ok := addrPortOf(up.LocalAddr()); ok {
-			h.ownDials.Store(local, struct{}{})
-		}
 	}
 	return up, true
 }
