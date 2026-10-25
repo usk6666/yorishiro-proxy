@@ -39,6 +39,7 @@
     },
     {
       "duration_ms": 0,
+      "http_version": "http/1.1",
       "id": "stream-http-h1",
       "message_count": 2,
       "method": "GET",
@@ -51,6 +52,7 @@
     },
     {
       "duration_ms": 0,
+      "http_version": "h2",
       "id": "stream-http-h2",
       "message_count": 2,
       "method": "GET",
@@ -63,6 +65,7 @@
     },
     {
       "duration_ms": 0,
+      "http_version": "h2c",
       "id": "stream-http-h2c",
       "message_count": 2,
       "method": "GET",
@@ -90,6 +93,7 @@
     },
     {
       "duration_ms": 0,
+      "http_version": "http/1.1",
       "id": "stream-sse",
       "message_count": 3,
       "method": "GET",
@@ -113,6 +117,7 @@
     },
     {
       "duration_ms": 0,
+      "http_version": "http/1.1",
       "id": "stream-ws",
       "message_count": 3,
       "method": "GET",

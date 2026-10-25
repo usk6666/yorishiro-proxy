@@ -15,7 +15,7 @@ Fuzz job ID. Required for `fuzz_results` resource.
 
 ### filter (object, optional)
 Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` resources.
-- **protocol** (string): Protocol filter for flows. Canonical values only (`"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`); legacy spellings (`"HTTP/1.x"`, `"HTTPS"`, `"HTTP/2"`, `"WebSocket"`, `"gRPC"`, `"gRPC-Web"`, `"TCP"`, `"SOCKS5+*"`) are rejected as of USK-705.
+- **protocol** (string): Protocol filter for flows. Canonical values only (`"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`); legacy spellings (`"HTTP/1.x"`, `"HTTPS"`, `"HTTP/2"`, `"WebSocket"`, `"gRPC"`, `"gRPC-Web"`, `"TCP"`, `"SOCKS5+*"`) are rejected as of USK-705. The value is matched exactly against `Stream.Protocol` (no family expansion), so rows recorded under a legacy spelling (from older databases or JSONL imports) are not returned.
 - **scheme** (string): `Stream.Scheme` filter — wire-observed handshake transport. Accepted values: `"https"`, `"http"`, `"tcp"`. Use `"https"` to find all TLS flows (HTTP/1.x, HTTP/2, gRPC, WS-over-TLS). To target WebSocket flows use `filter.protocol="ws"`; combine `protocol="ws"` with `scheme="https"` for WS-over-TLS only. Values `"ws"` / `"wss"` are rejected as of USK-864 (per USK-848, Stream.Scheme records the handshake transport, not the application protocol).
 - **http_version** (string): HTTP wire-version filter for flows (`"http/1.0"`, `"http/1.1"`, `"h2"`, `"h2c"`). Matches when at least one flow on the stream recorded that version. Use `""` (explicit empty string) to match pre-USK-788 rows that lack a recorded version. Mirrors the `manage` tool's filter axis (USK-792).
 - **method** (string): HTTP method filter for flows (e.g. `"GET"`, `"POST"`).
@@ -86,7 +86,9 @@ Each flow entry includes a `protocol_summary` field with protocol-specific infor
 - **`raw`**: `send_bytes`, `receive_bytes`
 - **`http`, `sse`, `tls-handshake`**: no protocol_summary entry
 
-Returns: `flows[]` (id, protocol, state, method, url, status_code, message_count, protocol_summary, timestamp, duration_ms), `count`, `total`.
+Returns: `flows[]` (id, protocol, http_version, state, method, url, status_code, message_count, protocol_summary, timestamp, duration_ms), `count`, `total`.
+
+`http_version` is the wire HTTP version of the head message (`http/1.0`, `http/1.1`, `h2`, `h2c`), identical to the `flow` resource's. WebSocket and SSE streams report the version of their HTTP head. It is absent for non-HTTP streams (gRPC, gRPC-Web, raw, tls-handshake) and for rows recorded before the field existed. Unlike `message_count`, it does not depend on `filter.wire_level`.
 
 ### flow
 Get full details of a single flow including request/response headers, bodies, and connection info.
@@ -120,7 +122,7 @@ Use the `messages` resource with `limit`/`offset` to page through all messages.
 
 Requires: `id` (flow ID).
 
-Returns: id, conn_id, protocol, state, listener_name, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request / original_response (only when a head message was modified), timestamps.
+Returns: id, conn_id, protocol, http_version (wire version of the head message; absent for non-HTTP streams), state, listener_name, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request / original_response (only when a head message was modified), timestamps.
 
 Connection info (`conn_info`) on live streams:
 - `client_addr`: the peer address of the client socket the listener accepted.
