@@ -478,10 +478,6 @@ func TestFinalizeResendStream_CancelledCallerCtxStillFinalizes(t *testing.T) {
 // write's result never arrives; finalize must give up at its timeout
 // rather than block forever.
 func TestFinalizeResendStream_ReturnsAfterStoreClose(t *testing.T) {
-	orig := resendFinalizeTimeout
-	resendFinalizeTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { resendFinalizeTimeout = orig })
-
 	// Not flowtest.NewStore: its cleanup Closes the store, and closing a
 	// SQLiteStore twice panics.
 	store, err := flow.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "s.db"), testutil.DiscardLogger())
@@ -496,7 +492,7 @@ func TestFinalizeResendStream_ReturnsAfterStoreClose(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		finalizeResendStream(context.Background(), store, id, "", errors.New("boom"))
+		finalizeResendStreamWithin(context.Background(), 200*time.Millisecond, store, id, "", errors.New("boom"))
 	}()
 	select {
 	case <-done:

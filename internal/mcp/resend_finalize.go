@@ -60,9 +60,9 @@ import (
 )
 
 // resendFinalizeTimeout bounds the terminal Stream write that
-// finalizeResendStream performs. A var (not a const) so tests can
-// shorten it.
-var resendFinalizeTimeout = 5 * time.Second
+// finalizeResendStream performs. Tests that need a shorter bound call
+// finalizeResendStreamWithin directly rather than mutating shared state.
+const resendFinalizeTimeout = 5 * time.Second
 
 // finalizeResendStream marks the Stream identified by streamID as
 // terminal in the flow store. Safe to call with a nil store (no-op),
@@ -93,6 +93,12 @@ var resendFinalizeTimeout = 5 * time.Second
 // slog.Warn since the data is already on disk via RecordStep — only the
 // terminal state attribute is missing — and the proxy can continue.
 func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID, tag string, runErr error) {
+	finalizeResendStreamWithin(ctx, resendFinalizeTimeout, store, streamID, tag, runErr)
+}
+
+// finalizeResendStreamWithin is finalizeResendStream with the terminal
+// write bounded by timeout instead of resendFinalizeTimeout.
+func finalizeResendStreamWithin(ctx context.Context, timeout time.Duration, store flow.StreamWriter, streamID, tag string, runErr error) {
 	if store == nil || streamID == "" {
 		return
 	}
@@ -113,11 +119,11 @@ func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID
 	// USK-1370: detach the terminal write from caller cancellation (the
 	// go-sdk cancels the handler ctx on notifications/cancelled), matching
 	// the live path's OnComplete under context.WithoutCancel, and bound it
-	// with resendFinalizeTimeout so it cannot block forever — e.g. after
+	// with timeout so it cannot block forever — e.g. after
 	// SQLiteStore.Close, whose enqueued write never gets a result. The
 	// same fctx covers the StreamElapsed read: a failed read yields
 	// Duration 0 ("do not update").
-	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resendFinalizeTimeout)
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 	reader, _ := store.(flow.StreamReader)
 	update := flow.StreamUpdate{
