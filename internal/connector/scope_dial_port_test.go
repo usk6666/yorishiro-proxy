@@ -161,6 +161,9 @@ func TestCheckTarget_OutOfRangePortBlockedWithRules(t *testing.T) {
 		if allowed, _, _ := s.CheckHost("http", "example.com", p); allowed {
 			t.Errorf("CheckHost(example.com, port %d) allowed, want blocked", p)
 		}
+		if allowed, _ := s.CheckDenyOnly("http", "example.com", p, "/"); allowed {
+			t.Errorf("CheckDenyOnly(example.com, port %d) allowed, want blocked", p)
+		}
 	}
 	if allowed, _ := NewTargetScope().CheckTarget("http", "example.com", 65536, "/"); !allowed {
 		t.Error("open mode CheckTarget(port 65536) blocked, want allowed")

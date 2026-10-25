@@ -249,7 +249,10 @@ func (s *TargetScope) CheckAuthorityDenyOnly(scheme, authority, path, dialTarget
 	host, port := splitAuthorityLenient(scheme, authority)
 	dialPort := 0
 	if dialTarget != "" {
-		_, dialPort, _ = splitDialTarget(scheme, dialTarget)
+		var dialOK bool
+		if _, dialPort, dialOK = splitDialTarget(scheme, dialTarget); !dialOK {
+			return false, ReasonDialTargetUninterpretable
+		}
 	}
 	if ok, reason := s.extraReadingsDenyLocked(scheme, authority, path, dialPort); !ok {
 		return false, reason
