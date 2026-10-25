@@ -529,3 +529,102 @@ func TestTransparent_TLS_NameAdmittedRawRelayed(t *testing.T) {
 	_ = tc.Close()
 	waitRawStream(t, p.store, payload, payload)
 }
+
+// withFirefoxFingerprint sets the production-default uTLS profile
+// (mcpserver resolves tls_fingerprint to "firefox"), whose own ClientHello
+// carries an ALPN extension of its own.
+func withFirefoxFingerprint(d *proxybuild.Deps) { d.BuildConfig.TLSFingerprint = "firefox" }
+
+// Review F-1: with a uTLS profile configured (the production default), a
+// no-ALPN client's upstream ClientHello still carries no ALPN — neither on
+// the HTTP/1 route nor on the raw route — and the upstream is dialed once.
+func TestTransparent_TLS_NoALPN_UTLSProfile_NoUpstreamALPN(t *testing.T) {
+	t.Run("http1", func(t *testing.T) {
+		ctx := transparentCtx(t)
+		up := newCapturingTLSUpstream(t, []string{"h2", "http/1.1"}, serveHTTPS)
+		p := startTransparentProxy(t, ctx, up.addr(), withFirefoxFingerprint)
+		tc := mitmTLS(t, p, "noalpn.example", nil)
+		resp, body := httpsGet(t, tc, bufio.NewReader(tc), "/f1", "noalpn.example", true)
+		if resp.StatusCode != 200 || body != "tls host=noalpn.example path=/f1 proto=HTTP/1.1" {
+			t.Fatalf("response %d %q", resp.StatusCode, body)
+		}
+		if hellos := up.seenHellos(); len(hellos) != 1 || len(hellos[0].protos) != 0 {
+			t.Errorf("upstream ClientHellos = %+v, want exactly one with no ALPN offer", hellos)
+		}
+	})
+	t.Run("raw", func(t *testing.T) {
+		ctx := transparentCtx(t)
+		up := newCapturingTLSUpstream(t, []string{"h2", "http/1.1"}, func(tc *tls.Conn) { _, _ = io.Copy(tc, tc) })
+		p := startTransparentProxy(t, ctx, up.addr(), withFirefoxFingerprint)
+		tc := mitmTLS(t, p, "echo.example", nil)
+		payload := "\x00ff-raw\r\n"
+		if _, err := io.WriteString(tc, payload); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		got := make([]byte, len(payload))
+		if _, err := io.ReadFull(tc, got); err != nil || string(got) != payload {
+			t.Fatalf("echo %q, %v; want %q", got, err, payload)
+		}
+		_ = tc.Close()
+		if hellos := up.seenHellos(); len(hellos) != 1 || len(hellos[0].protos) != 0 {
+			t.Errorf("upstream ClientHellos = %+v, want exactly one with no ALPN offer", hellos)
+		}
+	})
+}
+
+// Review F-2: an upstream-proxy rotation failure on the MITM route happens
+// before any TLS byte reaches the upstream, so it is recorded like the
+// plain route's dial failure (transparent_dial_failed), not as an upstream
+// TLS error.
+func TestTransparent_TLS_MITMRotationFailure_DialFailed(t *testing.T) {
+	for name, alpn := range map[string][]string{"alpn": {"http/1.1"}, "no alpn": nil} {
+		t.Run(name, func(t *testing.T) {
+			ctx := transparentCtx(t)
+			up := newCapturingTLSUpstream(t, []string{"http/1.1"}, serveHTTPS)
+			p := startTransparentProxy(t, ctx, up.addr(), func(d *proxybuild.Deps) {
+				d.BuildConfig.SetRotationForListener(transparentListenerName, connector.NewRotationResolver(connector.RotationConfig{
+					Template:     "ftp://broken-§__nonce§.example:21",
+					Policy:       connector.RotationPerRequest,
+					ListenerName: transparentListenerName,
+				}, 0, 0))
+			})
+			c := tls.Client(p.dial(t), &tls.Config{ServerName: "rot.example", NextProtos: alpn, RootCAs: p.roots()})
+			if err := c.Handshake(); err == nil {
+				t.Fatal("handshake succeeded although the upstream proxy rotation failed")
+			}
+			st, _ := waitStream(t, p.store, 0, func(st *flow.Stream) bool { return st.State == "error" })
+			if st.FailureReason != "transparent_dial_failed" || st.Tags["route"] != "tls" {
+				t.Errorf("Stream FailureReason = %q, route = %q; want transparent_dial_failed / tls", st.FailureReason, st.Tags["route"])
+			}
+			if n := len(up.seenHellos()); n != 0 {
+				t.Errorf("upstream saw %d ClientHellos, want 0 (fail closed)", n)
+			}
+		})
+	}
+}
+
+// Review S-1: a no-ALPN MITM connection that resolved to the raw relay is
+// re-evaluated strictly by Reconcile, so narrowing its destination to a
+// path-scoped allow cuts it (a raw relay never yields a request path).
+func TestTransparent_TLS_NoALPNRawRelay_NarrowedToPathOnlyCutByReconcile(t *testing.T) {
+	ctx := transparentCtx(t)
+	up := newCapturingTLSUpstream(t, nil, func(tc *tls.Conn) { _, _ = io.Copy(tc, tc) })
+	scope := policyScope([]connector.TargetRule{{Hostname: "127.0.0.1"}}, nil)
+	live := connector.NewLiveConns(nil)
+	p := startTransparentProxy(t, ctx, up.addr(), func(d *proxybuild.Deps) { d.Scope = scope; d.LiveConns = live })
+	// No SNI (IP-literal ServerName): only the destination leg admits the
+	// connection, so the narrowed path-scoped allow is the sole decider.
+	tc := mitmTLS(t, p, up.addr().Addr().String(), nil)
+	payload := "\x00s1-raw\r\n"
+	if _, err := io.WriteString(tc, payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(tc, got); err != nil || string(got) != payload {
+		t.Fatalf("echo %q, %v; want %q", got, err, payload)
+	}
+	scope.ReplacePolicyRules([]connector.TargetRule{{Hostname: "127.0.0.1", PathPrefix: "/api/"}}, nil, connector.PolicyOrigin{})
+	if n := live.Reconcile("test"); n != 1 {
+		t.Errorf("Reconcile after narrowing to a path-only allow revoked %d connections, want 1", n)
+	}
+}
