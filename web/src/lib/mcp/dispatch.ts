@@ -130,6 +130,33 @@ export function pickFuzzTool(
   return null;
 }
 
+/** Scaffolding stub; implemented by the fix. */
+export function isHttp2(
+  _flow: Pick<FlowDetailResult, "protocol" | "http_version"> | null | undefined,
+): boolean {
+  return false;
+}
+
+/** Scaffolding: the current FlowsPage switch, replaced by the fix. */
+export function protocolVariant(
+  protocol: string | null | undefined,
+): "default" | "success" | "warning" | "danger" | "info" {
+  switch (protocol) {
+    case "HTTPS":
+      return "success";
+    case "WebSocket":
+    case "HTTP/2":
+      return "info";
+    case "gRPC":
+    case "gRPC-Web":
+      return "warning";
+    case "TCP":
+      return "danger";
+    default:
+      return "default";
+  }
+}
+
 /**
  * Whether a flow uses one of the streaming flow_types that produces a per-message
  * timeline (WebSocket, gRPC server/client/bidi streaming, SSE).

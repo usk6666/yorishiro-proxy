@@ -1,0 +1,22 @@
+{
+  "http_version": [
+    "http/1.0",
+    "http/1.1",
+    "h2",
+    "h2c"
+  ],
+  "protocol": [
+    "http",
+    "ws",
+    "grpc",
+    "grpc-web",
+    "sse",
+    "raw",
+    "tls-handshake"
+  ],
+  "scheme": [
+    "https",
+    "http",
+    "tcp"
+  ]
+}

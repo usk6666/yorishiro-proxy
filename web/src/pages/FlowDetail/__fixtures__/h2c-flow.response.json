@@ -1,0 +1,35 @@
+{
+  "conn_id": "conn-stream-http-h2c",
+  "duration_ms": 0,
+  "http_version": "h2c",
+  "id": "stream-http-h2c",
+  "message_count": 2,
+  "method": "GET",
+  "protocol": "http",
+  "raw_request": "AAAuAQUAAAABgoZBipxLl8jproKuQ9NFh2B1mYMktKNTix110GINJj1MdEHqeoiU3lNthWArgw==",
+  "raw_response": "AAAOAQUAAAABiF+LHXXQYg0mPUx0Qeo=",
+  "request_body": "",
+  "request_body_encoding": "text",
+  "request_body_truncated": false,
+  "request_headers": {
+    "accept": [
+      "application/json"
+    ],
+    "user-agent": [
+      "fixture/1.0"
+    ]
+  },
+  "response_body": "",
+  "response_body_encoding": "text",
+  "response_body_truncated": false,
+  "response_headers": {
+    "content-type": [
+      "application/json"
+    ]
+  },
+  "response_status_code": 200,
+  "scheme": "http",
+  "state": "complete",
+  "timestamp": "2026-01-01T00:00:00Z",
+  "url": "http://h2.example.com/api/items"
+}

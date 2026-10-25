@@ -368,6 +368,8 @@ export type QueryResource =
 export interface QueryFilter {
   protocol?: string;
   scheme?: string;
+  /** Wire HTTP version filter: "http/1.0" | "http/1.1" | "h2" | "h2c". */
+  http_version?: string;
   method?: string;
   url_pattern?: string;
   status_code?: number;
@@ -541,6 +543,14 @@ export interface FlowDetailResult {
   conn_id: string;
   protocol: string;
   scheme?: string;
+  /**
+   * Wire-observed HTTP version of the request (or, failing that, response)
+   * flow: "http/1.0" | "http/1.1" | "h2" | "h2c". Empty / absent for
+   * non-HTTP streams and for rows recorded before the field existed.
+   * HTTP/2 streams report `protocol: "http"`; this is the only field that
+   * distinguishes them from HTTP/1.x.
+   */
+  http_version?: string;
   flow_type: string;
   state: string;
   /** Name of the listener that accepted the connection (proxy_start name). */

@@ -39,6 +39,7 @@ import { GrpcRequestEditor, type GrpcRequestEditorState } from "./GrpcRequestEdi
 import { GrpcResponseViewer } from "./GrpcResponseViewer.js";
 import { HeaderEditor } from "./HeaderEditor.js";
 import { RawPatchEditor } from "./RawPatchEditor.js";
+import { initialRawHttpText } from "./rawHttpText.js";
 import "./ResendPage.css";
 import { ResponseViewer } from "./ResponseViewer.js";
 import { TcpMessageList } from "./TcpMessageList.js";
@@ -309,86 +310,6 @@ function headersRecordToRows(
     }
   }
   return rows;
-}
-
-/**
- * Decode base64-encoded raw request bytes to a text string.
- * Returns null if decoding fails or the data is empty.
- */
-function decodeRawRequest(base64Data: string): string | null {
-  if (!base64Data) return null;
-  try {
-    return atob(base64Data);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Reconstruct an HTTP/1.1 raw message from parsed flow data.
- * Used for HTTP/2, gRPC, and gRPC-Web flows that don't store raw bytes.
- *
- * Format:
- *   {Method} {RequestURI} HTTP/1.1\r\n
- *   Host: {host}\r\n
- *   {Headers}\r\n
- *   \r\n
- *   {Body}
- */
-function reconstructHttp11(flow: FlowDetailResult): string {
-  const method = flow.method || "GET";
-  const urlStr = flow.url || "/";
-
-  // Extract request URI (path + query) and host from the URL.
-  let requestUri = "/";
-  let host = "";
-  try {
-    const parsed = new URL(urlStr);
-    requestUri = parsed.pathname + parsed.search;
-    host = parsed.host;
-  } catch {
-    // If URL parsing fails, use the raw URL as-is.
-    requestUri = urlStr;
-  }
-
-  const lines: string[] = [];
-  lines.push(`${method} ${requestUri} HTTP/1.1`);
-
-  // Track which headers have been added to avoid duplicating Host.
-  const addedHeaders = new Set<string>();
-
-  // Add Host header first if not already in request_headers.
-  const hasHostHeader = flow.request_headers
-    ? Object.keys(flow.request_headers).some((k) => k.toLowerCase() === "host")
-    : false;
-
-  if (!hasHostHeader && host) {
-    lines.push(`Host: ${host}`);
-  }
-
-  // Add all recorded headers.
-  if (flow.request_headers) {
-    for (const [key, values] of Object.entries(flow.request_headers)) {
-      for (const value of values) {
-        lines.push(`${key}: ${value}`);
-      }
-      addedHeaders.add(key.toLowerCase());
-    }
-  }
-
-  // Empty line to separate headers from body.
-  lines.push("");
-
-  // Join with \r\n (HTTP line endings).
-  let raw = lines.join("\r\n");
-
-  // Append body if present.
-  const bodyText = flow.request_body || "";
-  if (bodyText) {
-    raw += "\r\n" + bodyText;
-  }
-
-  return raw;
 }
 
 /**
@@ -834,15 +755,7 @@ export function ResendPage() {
       setHeaders(headerPairs);
 
       // Populate raw editor fields.
-      const isH2Flow = isHttp2Flow(flow);
-      if (!isH2Flow && flow.raw_request) {
-        // HTTP/1.x: decode the recorded raw bytes.
-        const decoded = decodeRawRequest(flow.raw_request);
-        setRawHttpText(decoded ?? reconstructHttp11(flow));
-      } else {
-        // HTTP/2 or no raw bytes: reconstruct HTTP/1.1 from parsed data.
-        setRawHttpText(reconstructHttp11(flow));
-      }
+      setRawHttpText(initialRawHttpText(flow));
 
       // Set target address for raw mode.
       setRawTargetAddr(extractTargetAddr(flow));
