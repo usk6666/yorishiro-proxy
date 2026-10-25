@@ -323,13 +323,19 @@ func TestFullListener_RejectionWarn_RateLimited(t *testing.T) {
 	t.Cleanup(h.Release)
 
 	const burst = 50
-	waitRejections := func(n int) {
+	limiter := h.Listener().rejectWarn
+	// waitFor polls until settled reports true. The predicate must be the
+	// state the following assertions read: the reject goroutine logs Debug
+	// before limiter.observe() and the optional Warn after it, so counting
+	// Debugs alone exits while observe()/Warn are still in flight.
+	waitFor := func(what string, settled func() bool) {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			warns, debugs := handler.rejectionLogs()
-			if len(debugs) >= n || len(warns) >= n {
-				return
+		for !settled() {
+			if time.Now().After(deadline) {
+				warns, debugs := handler.rejectionLogs()
+				t.Fatalf("timed out waiting for %s: warns=%d debugs=%d suppressed=%d",
+					what, len(warns), len(debugs), limiter.suppressed.Load())
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -341,7 +347,14 @@ func TestFullListener_RejectionWarn_RateLimited(t *testing.T) {
 		c := dialAndSend(t, h.Addr(), []byte{0x05})
 		_ = c.Close()
 	}
-	waitRejections(burst)
+	// Every burst rejection must have finished observe() (and the first
+	// one its Warn) before the clock moves; otherwise a late observe()
+	// sees the advanced clock and emits the post-window Warn itself.
+	waitFor("the burst to be fully observed", func() bool {
+		warns, debugs := handler.rejectionLogs()
+		return len(debugs) >= burst && len(warns) >= 1 &&
+			limiter.suppressed.Load() >= burst-1
+	})
 
 	warns, debugs := handler.rejectionLogs()
 	if len(warns) != 1 {
@@ -356,7 +369,10 @@ func TestFullListener_RejectionWarn_RateLimited(t *testing.T) {
 	clockNs.Add(int64(rejectWarnWindow + time.Second))
 	c := dialAndSend(t, h.Addr(), []byte{0x05})
 	_ = c.Close()
-	waitRejections(burst + 1)
+	waitFor("the post-window Warn", func() bool {
+		warns, debugs := handler.rejectionLogs()
+		return len(debugs) >= burst+1 && len(warns) >= 2
+	})
 
 	warns, _ = handler.rejectionLogs()
 	if len(warns) != 2 {
