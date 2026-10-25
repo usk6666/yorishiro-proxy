@@ -1236,6 +1236,11 @@ func resolveVariantPair(msgs []*flow.Flow) (effective, original *flow.Flow) {
 	return effective, original
 }
 
+// resolveHeadPair is not implemented yet (USK-1343 red-phase scaffolding).
+func resolveHeadPair(msgs []*flow.Flow, direction string) (effective, original *flow.Flow) {
+	return nil, nil
+}
+
 // decodedBodyView is the additive body-decoded form produced from a stored
 // Flow.Body. The wire-form encoded fields (Body / BodyEncoding) are computed
 // separately by encodeBody on the original (compressed) bytes and remain
