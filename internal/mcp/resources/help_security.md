@@ -592,6 +592,7 @@ Output Filter rules are **immutable at runtime** -- they are defined in the conf
 
 - Patterns match the bytes exactly as the tool returns them. Content-Encoded (e.g. gzip, br, zstd) bodies are not decoded before masking, so a compressed body is effectively not masked. The exception is `query`'s decoded-body view (`body_decoded` / `request_body_decoded` / `response_body_decoded`), which is decoded first and then masked.
 - Tools and fields not listed above return their data unmasked -- for example `manage` `export_flows` written to a file.
+- `query` `messages` / `message_preview` `raw_bytes` (the wire bytes of a bodyless message) is masked as recorded, before the `body_max_bytes` cap, by `body`-target rules only. HTTP/1.x request heads are plaintext and are matched; HPACK-encoded HEADERS (HTTP/2, gRPC Start / End), permessage-deflate WebSocket frames, compressed gRPC messages and client-to-server (XOR-masked) WebSocket frames are effectively not masked. `header`-target rules are not applied to raw bytes.
 - `resend_raw` truncates `response_bytes` at its response cap before masking, so a match that straddles the cap is cut off and may be returned partially unmasked.
 
 ### Output Rule Configuration

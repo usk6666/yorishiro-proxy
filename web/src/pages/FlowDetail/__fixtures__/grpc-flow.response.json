@@ -5,7 +5,7 @@
   "message_count": 3,
   "message_preview": [
     {
-      "body": "hpack-encoded-start",
+      "body": "",
       "body_encoding": "text",
       "direction": "send",
       "id": "stream-grpc-0",
@@ -16,6 +16,9 @@
         "grpc_service": "pkg.Svc",
         "protocol": "grpc"
       },
+      "raw_bytes": "aHBhY2stZW5jb2RlZC1zdGFydA==",
+      "raw_bytes_encoding": "base64",
+      "raw_bytes_size": 19,
       "sequence": 0,
       "timestamp": "2026-01-01T00:00:00Z",
       "url": "https://grpc.example.com/pkg.Svc/Do"
@@ -41,7 +44,7 @@
       "timestamp": "2026-01-01T00:00:00Z"
     },
     {
-      "body": "hpack-encoded-trailers",
+      "body": "",
       "body_encoding": "text",
       "direction": "receive",
       "id": "stream-grpc-2",
@@ -50,6 +53,9 @@
         "grpc_status": "0",
         "protocol": "grpc"
       },
+      "raw_bytes": "aHBhY2stZW5jb2RlZC10cmFpbGVycw==",
+      "raw_bytes_encoding": "base64",
+      "raw_bytes_size": 22,
       "sequence": 2,
       "timestamp": "2026-01-01T00:00:00Z"
     }

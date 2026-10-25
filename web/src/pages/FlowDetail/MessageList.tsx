@@ -12,6 +12,7 @@ import { Table } from "../../components/ui/Table.js";
 import { isGrpcProtocol } from "../../lib/mcp/dispatch.js";
 import type { MessageEntry } from "../../lib/mcp/types.js";
 import { BodyViewer } from "./BodyViewer.js";
+import { RawBytesViewer } from "./RawBytesViewer.js";
 import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------
@@ -154,6 +155,14 @@ export function MessageDetail({ message, onClose }: MessageDetailProps) {
           bodyDecodeAnomaly={message.body_decode_anomaly}
         />
       </div>
+
+      {/* Wire bytes of a bodyless message (USK-1344) */}
+      {message.raw_bytes && (
+        <div className="sd-message-detail-section">
+          <span className="sd-message-detail-section-title">Raw Bytes</span>
+          <RawBytesViewer rawBytes={message.raw_bytes} label="Raw Bytes" />
+        </div>
+      )}
     </div>
   );
 }

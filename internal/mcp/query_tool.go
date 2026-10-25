@@ -192,7 +192,7 @@ type queryInput struct {
 	// queryFlowResult) is set so callers can tell metadata-only responses apart
 	// from genuinely empty bodies. Headers, metadata, status, method, URL, and
 	// the record-time body_truncated flag are preserved.
-	IncludeBodies *bool `json:"include_bodies,omitempty" jsonschema:"include message bodies in flow/messages responses (default true). When false, body fields are suppressed; metadata, headers, and body_truncated remain. Mirrors manage.export_flows.include_bodies."`
+	IncludeBodies *bool `json:"include_bodies,omitempty" jsonschema:"include message bodies in flow/messages responses (default true). When false, body fields and per-message raw_bytes are suppressed; metadata, headers, and body_truncated remain. Mirrors manage.export_flows.include_bodies."`
 
 	// BodyMaxBytes caps each message body (and decoded body, independently)
 	// to at most this many bytes. 0 disables the cap (default). Truncation is
@@ -200,7 +200,7 @@ type queryInput struct {
 	// never base64-mid-quadruple-splits. When applied, body_truncated_by_query
 	// is set on the entry and body_original_size / body_decoded_original_size
 	// report the pre-truncation byte length on the side that was truncated.
-	BodyMaxBytes int `json:"body_max_bytes,omitempty" jsonschema:"truncate per-message body and body_decoded to at most this many bytes (0 = no cap, default). When applied, body_truncated_by_query is set and body_original_size / body_decoded_original_size report the pre-truncation lengths."`
+	BodyMaxBytes int `json:"body_max_bytes,omitempty" jsonschema:"truncate per-message body, body_decoded and raw_bytes to at most this many bytes (0 = no cap, default). When applied, body_truncated_by_query is set and body_original_size / body_decoded_original_size report the pre-truncation lengths."`
 }
 
 // queryFilter contains filter options for the flows and fuzz resources.
@@ -1955,7 +1955,7 @@ func flowHasOversizedBody(cat categorizedMessages, msgs []*flow.Flow) bool {
 		if m == nil {
 			continue
 		}
-		if len(m.Body) > oversizeAdvisoryThreshold || len(m.RawBytes) > oversizeAdvisoryThreshold {
+		if emitsOversizedPayload(m) {
 			return true
 		}
 	}
@@ -2027,25 +2027,30 @@ type queryMessagesResult struct {
 }
 
 // convertMessagesToEntries converts flow messages to queryMessageEntry slice.
-// It uses Body for text content and falls back to RawBytes for binary protocols.
+// `body` only ever carries the L7 Flow.Body (USK-1344): a message without an
+// L7 body but with stored wire bytes (a bodyless HTTP request head, gRPC
+// Start / End HEADERS, an empty WS control frame, a wire_level overlay row)
+// exposes them in `raw_bytes` (always base64) instead, with raw_bytes_size
+// carrying the stored length. Body-bearing messages never carry raw_bytes.
 // When decodeEnabled is true, HTTP Content-Encoding (gzip/br/deflate/zstd) is
 // decoded into the additive *_decoded fields; the wire-form body in `body`
 // is preserved unchanged.
 //
 // limit gates response-time body suppression / truncation: include_bodies=false
-// drops all body fields and sets body_truncated_by_query=true with the original
-// byte length; body_max_bytes=N caps the byte slice before base64 encoding so
-// the response never splits mid-quadruple. Decoded body is capped independently
-// (gzip / br plaintext can far exceed wire size).
+// drops all body fields and raw_bytes and sets body_truncated_by_query=true
+// with the original body length; body_max_bytes=N caps the byte slice (body
+// and raw_bytes alike) before base64 encoding so the response never splits
+// mid-quadruple. Decoded body is capped independently (gzip / br plaintext
+// can far exceed wire size).
+//
+// raw_bytes is Output-Filter masked here, on the full stored bytes BEFORE the
+// cap so a cap falling mid-match cannot leak a fragment; filterOutputMessages
+// does not mask it again. Flow.RawBytes itself is never modified.
 func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool, limit bodyLimitOptions) []queryMessageEntry {
 	entries := make([]queryMessageEntry, 0, len(msgs))
 	for _, msg := range msgs {
 		bodyData := msg.Body
-		usedRawBytes := false
-		if len(bodyData) == 0 && len(msg.RawBytes) > 0 {
-			bodyData = msg.RawBytes
-			usedRawBytes = true
-		}
+		rawEligible := hasRawOnlyPayload(msg)
 
 		var urlStr string
 		if msg.URL != nil {
@@ -2082,6 +2087,18 @@ func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool,
 			if len(bodyData) > 0 {
 				entry.BodyOriginalSize = len(bodyData)
 			}
+			if rawEligible {
+				entry.RawBytesSize = len(msg.RawBytes)
+			}
+		case rawEligible:
+			entry.Body, entry.BodyEncoding = encodeBody(nil)
+			entry.RawBytesSize = len(msg.RawBytes)
+			capped, fired := limitBodyBytes(s.filterOutputBody(msg.RawBytes), limit.bodyMaxBytes)
+			if fired {
+				entry.BodyTruncatedByQuery = true
+			}
+			entry.RawBytes = base64.StdEncoding.EncodeToString(capped)
+			entry.RawBytesEncoding = "base64"
 		default:
 			capped, fired := limitBodyBytes(bodyData, limit.bodyMaxBytes)
 			if fired {
@@ -2091,26 +2108,37 @@ func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool,
 			bodyStr, bodyEnc := encodeBody(capped)
 			entry.Body = bodyStr
 			entry.BodyEncoding = bodyEnc
-			// Only decode the L7-parsed Body. RawBytes are wire bytes and must
-			// not be reinterpreted (Content-Encoding decoding presumes the
-			// parser has already extracted the L7 payload). gRPC Data envelopes
-			// route through computeDecodedBodyForMessage to surface the proto
-			// wire bytes as schemaless JSON (USK-922).
-			if !usedRawBytes {
-				dec, decOriginal := s.computeDecodedBodyForMessage(msg.Body, msg.Headers, msg.Metadata, msg.Direction, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
-				entry.BodyDecoded = dec.Body
-				entry.BodyDecodedEncoding = dec.BodyEncoding
-				entry.BodyEncodingApplied = dec.Applied
-				entry.BodyDecodeAnomaly = dec.Anomaly
-				if decOriginal > 0 {
-					entry.BodyTruncatedByQuery = true
-					entry.BodyDecodedOriginalSize = decOriginal
-				}
+			// gRPC Data envelopes route through computeDecodedBodyForMessage
+			// to surface the proto wire bytes as schemaless JSON (USK-922).
+			dec, decOriginal := s.computeDecodedBodyForMessage(msg.Body, msg.Headers, msg.Metadata, msg.Direction, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
+			entry.BodyDecoded = dec.Body
+			entry.BodyDecodedEncoding = dec.BodyEncoding
+			entry.BodyEncodingApplied = dec.Applied
+			entry.BodyDecodeAnomaly = dec.Anomaly
+			if decOriginal > 0 {
+				entry.BodyTruncatedByQuery = true
+				entry.BodyDecodedOriginalSize = decOriginal
 			}
 		}
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+// hasRawOnlyPayload reports whether msg has no L7 body but does have stored
+// wire bytes — the condition under which the messages projection emits
+// raw_bytes (USK-1344).
+func hasRawOnlyPayload(msg *flow.Flow) bool {
+	return len(msg.Body) == 0 && len(msg.RawBytes) > 0
+}
+
+// emitsOversizedPayload reports whether the messages projection of m would
+// carry a body or raw_bytes above oversizeAdvisoryThreshold.
+func emitsOversizedPayload(m *flow.Flow) bool {
+	if len(m.Body) > oversizeAdvisoryThreshold {
+		return true
+	}
+	return hasRawOnlyPayload(m) && len(m.RawBytes) > oversizeAdvisoryThreshold
 }
 
 // buildMessageListOptions validates and builds message list options from query input.
@@ -2236,7 +2264,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 }
 
 // messagesHaveOversizedBody reports whether any message in the page carries a
-// stored Body (or RawBytes fallback for binary protocols) above
+// stored Body (or, for a bodyless message, the raw_bytes it emits) above
 // oversizeAdvisoryThreshold. Used to gate the Advisory hint on the messages
 // resource.
 func messagesHaveOversizedBody(msgs []*flow.Flow) bool {
@@ -2244,7 +2272,7 @@ func messagesHaveOversizedBody(msgs []*flow.Flow) bool {
 		if m == nil {
 			continue
 		}
-		if len(m.Body) > oversizeAdvisoryThreshold || len(m.RawBytes) > oversizeAdvisoryThreshold {
+		if emitsOversizedPayload(m) {
 			return true
 		}
 	}

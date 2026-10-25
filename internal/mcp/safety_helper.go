@@ -107,7 +107,8 @@ func (s *Server) filterOutputRawHeaders(headers parser.RawHeaders) parser.RawHea
 
 // filterOutputMessages applies SafetyFilter output masking to query message entries.
 // It masks the body and headers of each message in place. If no safety engine is
-// configured, this is a no-op.
+// configured, this is a no-op. raw_bytes is NOT touched here: convertMessagesToEntries
+// already masked it on the full stored bytes before the body_max_bytes cap (USK-1344).
 func (s *Server) filterOutputMessages(entries []queryMessageEntry) {
 	if s.pipeline.safetyEngine == nil {
 		return
