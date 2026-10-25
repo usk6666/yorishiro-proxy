@@ -350,6 +350,14 @@ func TestFullListener_RejectionWarn_RateLimited(t *testing.T) {
 	// Every burst rejection must have finished observe() (and the first
 	// one its Warn) before the clock moves; otherwise a late observe()
 	// sees the advanced clock and emits the post-window Warn itself.
+	//
+	// The suppressed >= burst-1 term assumes no other observe() lands
+	// between the first rejection's lastWarnNs.CompareAndSwap and its
+	// suppressed.Swap(0). If one does, its Add(1) is folded into the first
+	// Warn's count, the counter settles at burst-2, and this wait times out
+	// (the Fatalf prints the counts). That is a known attribution issue in
+	// RejectWarnLimiter.observe (product code), tracked separately; it is
+	// not fixed here by relaxing the wait or the warns[1] assertion.
 	waitFor("the burst to be fully observed", func() bool {
 		warns, debugs := handler.rejectionLogs()
 		return len(debugs) >= burst && len(warns) >= 1 &&
