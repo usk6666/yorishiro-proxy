@@ -57,6 +57,14 @@ describe("isHttp2", () => {
     expect(isHttp2({ protocol: "HTTP/1.x", http_version: "" })).toBe(false);
   });
 
+  it("accepts flows list entries: true for recorded h2 / h2c rows", () => {
+    const byId = new Map(flows.flows.map((f) => [f.id, f]));
+    expect(isHttp2(byId.get("stream-http-h2"))).toBe(true);
+    expect(isHttp2(byId.get("stream-http-h2c"))).toBe(true);
+    expect(isHttp2(byId.get("stream-http-h1"))).toBe(false);
+    expect(isHttp2(byId.get("stream-grpc"))).toBe(false);
+  });
+
   it("is false for non-HTTP protocols and missing input", () => {
     expect(isHttp2({ protocol: "grpc", http_version: "h2" })).toBe(false);
     expect(isHttp2({ protocol: "ws" })).toBe(false);

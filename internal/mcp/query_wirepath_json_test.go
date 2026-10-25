@@ -41,7 +41,7 @@ func TestQueryOutput_InvalidUTF8WirePathEscaped(t *testing.T) {
 		}
 	}
 
-	_, urlStr, _ := extractFlowSummary([]*flow.Flow{send})
+	_, urlStr, _, _ := extractFlowSummary([]*flow.Flow{send})
 	assertJSONSafe(t, "extractFlowSummary url", urlStr)
 
 	s := newServer(context.Background(), nil, nil, nil)

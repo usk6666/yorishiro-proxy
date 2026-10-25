@@ -86,7 +86,9 @@ Each flow entry includes a `protocol_summary` field with protocol-specific infor
 - **`raw`**: `send_bytes`, `receive_bytes`
 - **`http`, `sse`, `tls-handshake`**: no protocol_summary entry
 
-Returns: `flows[]` (id, protocol, state, method, url, status_code, message_count, protocol_summary, timestamp, duration_ms), `count`, `total`.
+Returns: `flows[]` (id, protocol, http_version, state, method, url, status_code, message_count, protocol_summary, timestamp, duration_ms), `count`, `total`.
+
+`http_version` is the wire HTTP version of the head message (`http/1.0`, `http/1.1`, `h2`, `h2c`), identical to the `flow` resource's. WebSocket and SSE streams report the version of their HTTP head. It is absent for non-HTTP streams (gRPC, gRPC-Web, raw, tls-handshake) and for rows recorded before the field existed. Unlike `message_count`, it does not depend on `filter.wire_level`.
 
 ### flow
 Get full details of a single flow including request/response headers, bodies, and connection info.
@@ -120,7 +122,7 @@ Use the `messages` resource with `limit`/`offset` to page through all messages.
 
 Requires: `id` (flow ID).
 
-Returns: id, conn_id, protocol, state, listener_name, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request / original_response (only when a head message was modified), timestamps.
+Returns: id, conn_id, protocol, http_version (wire version of the head message; absent for non-HTTP streams), state, listener_name, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request / original_response (only when a head message was modified), timestamps.
 
 Connection info (`conn_info`) on live streams:
 - `client_addr`: the peer address of the client socket the listener accepted.

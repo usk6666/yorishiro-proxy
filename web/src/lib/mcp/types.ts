@@ -432,6 +432,12 @@ export interface FlowEntry {
   id: string;
   protocol: string;
   scheme?: string;
+  /**
+   * Wire HTTP version of the head message ("http/1.1", "h2", "h2c", ...),
+   * identical to `query resource=flow`'s. Absent for non-HTTP streams and
+   * rows predating the field.
+   */
+  http_version?: string;
   flow_type: string;
   state: string;
   /** Name of the listener that accepted the connection (proxy_start name). */

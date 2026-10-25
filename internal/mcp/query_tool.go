@@ -798,7 +798,12 @@ type queryFlowsEntry struct {
 	ID       string `json:"id"`
 	Protocol string `json:"protocol"`
 	Scheme   string `json:"scheme,omitempty"`
-	State    string `json:"state"`
+	// HTTPVersion is the wire HTTP version of the head message, resolved
+	// exactly as resource=flow does (resolveHTTPVersion). WS / SSE streams
+	// report their HTTP head's version; non-HTTP streams and pre-USK-788
+	// rows omit it.
+	HTTPVersion string `json:"http_version,omitempty"`
+	State       string `json:"state"`
 	// FailureReason carries the canonical layer.ErrorCode label
 	// (refused / canceled / aborted / internal_error / protocol_error)
 	// or one of the recorder-specific labels (e.g. "upstream_tls_error",
@@ -877,12 +882,14 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 	return opts
 }
 
-// extractFlowSummary extracts the method, URL, and status code of the flows
-// list entry from the head message of each direction (USK-1343), so the list
-// and the flow detail agree: a WebSocket stream lists its Upgrade GET / 101
-// and a modified head lists its modified variant.
-func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode int) {
+// extractFlowSummary extracts the method, URL, status code, and HTTP
+// version of the flows list entry from the head message of each direction
+// (USK-1343), so the list and the flow detail agree: a WebSocket stream
+// lists its Upgrade GET / 101 and a modified head lists its modified
+// variant.
+func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode int, httpVersion string) {
 	cat := categorizeMessages(msgs)
+	httpVersion = resolveHTTPVersion(cat)
 	if cat.sendMsg != nil {
 		method = cat.sendMsg.Method
 		if cat.sendMsg.URL != nil {
@@ -892,7 +899,7 @@ func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode in
 	if cat.recvMsg != nil {
 		statusCode = cat.recvMsg.StatusCode
 	}
-	return method, urlStr, statusCode
+	return method, urlStr, statusCode, httpVersion
 }
 
 // headSourceFlows returns the rows the head projection (categorizeMessages /
@@ -970,13 +977,14 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 		if err != nil {
 			return nil, nil, fmt.Errorf("get semantic messages for flow %s: %w", fl.ID, err)
 		}
-		method, urlStr, statusCode := extractFlowSummary(headMsgs)
+		method, urlStr, statusCode, httpVersion := extractFlowSummary(headMsgs)
 		summary := buildProtocolSummary(fl.Protocol, msgs)
 
 		entries = append(entries, queryFlowsEntry{
 			ID:              fl.ID,
 			Protocol:        fl.Protocol,
 			Scheme:          fl.Scheme,
+			HTTPVersion:     httpVersion,
 			State:           fl.State,
 			FailureReason:   fl.FailureReason,
 			ListenerName:    fl.ListenerName,
