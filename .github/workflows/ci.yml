@@ -6,15 +6,22 @@ on:
   pull_request:
     branches: [main]
 
-permissions:
-  contents: read
+# Nothing at the top level: every job declares its own permissions, so a job
+# added later starts from zero instead of silently inheriting a grant. That
+# every job declares its own block is enforced by `make lint-workflows`
+# (tools/lint-workflows/check-job-permissions.sh).
+permissions: {}
 
 jobs:
   setup:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
@@ -42,8 +49,12 @@ jobs:
     # fires on a pathological run, so the failure says "timeout" instead of the
     # job being killed opaquely.
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -83,8 +94,12 @@ jobs:
     needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -105,8 +120,12 @@ jobs:
     needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -140,8 +159,12 @@ jobs:
     needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -173,7 +196,9 @@ jobs:
   # conditional instead "will report its status as 'Success'" and "will not
   # prevent a pull request from merging, even if it is a required check"
   # (GitHub Actions docs, "Using conditions to control job execution"). That is
-  # what makes this job safe to promote to a required check later.
+  # why this job can sit in status-check's `needs:` below: skipped on ordinary
+  # PRs, it leaves status-check green; on the depsec PR its failure turns
+  # status-check red.
   test-e2e-full:
     needs: setup
     if: github.event_name == 'pull_request' && github.head_ref == 'automated/security-updates'
@@ -183,8 +208,12 @@ jobs:
     # with a goroutine dump instead of an opaque job kill (same rationale as the
     # lint job above). Mirrors nightly-e2e.yml.
     timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -238,8 +267,12 @@ jobs:
   test-ui:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
@@ -260,8 +293,12 @@ jobs:
   depsec-tool:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -273,3 +310,68 @@ jobs:
           test -z "$(gofmt -l .)" || (echo "not gofmt-clean:" && gofmt -l . && exit 1)
           go vet ./...
           go test -race ./...
+
+  # Static checks on the workflow files themselves: pinact (every `uses:` is a
+  # full commit SHA whose `# vX.Y.Z` comment names that commit), ghalint
+  # (permissions, timeouts, persist-credentials, secret / App-token scoping) and
+  # actionlint with shellcheck (expressions, contexts, `run:` scripts), plus the
+  # status-check `needs:` completeness guard below. Through the Makefile for the
+  # USK-1058 reason: the recipe downloads each tool at the version pinned in
+  # .workflow-lint-tools and verifies its checksum, so this job and a local
+  # `make lint-workflows` run byte-identical binaries.
+  #
+  # No `needs:` -- it reads only .github/ and must not wait on (or be skipped
+  # by) the Go / UI build. `pinact --verify-comment` resolves each tag through
+  # the GitHub API, hence the token; read-only is enough.
+  lint-workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Lint workflows
+        env:
+          PINACT_GITHUB_TOKEN: ${{ github.token }}
+        run: make lint-workflows
+
+  # The ONE check the branch ruleset needs from this workflow (besides CodeQL,
+  # which is not in ci.yml). Required checks are listed by name, so before this
+  # job every new job had to be added to the ruleset by hand, and a job left out
+  # (as test-e2e-full was) could fail without blocking the merge.
+  #
+  # It runs only when something in `needs:` failed or was cancelled, and then
+  # fails. Otherwise it is skipped, and a skipped job counts as passing for a
+  # required check -- which is also why a job skipped by its own `if:` (e.g.
+  # test-e2e-full on an ordinary PR) does not turn this red. `always()` is what
+  # makes it run at all once a need has failed; without it GitHub would skip it.
+  #
+  # RULE: every other job in this file MUST be listed in `needs:`. `setup` is
+  # listed too: when it fails its dependents are skipped, not failed, so only
+  # its own result carries the failure. `make lint-workflows` enforces the rule
+  # (yq compares this list against the `jobs:` keys and names any job missing
+  # or extra), so forgetting it fails the PR that adds the job.
+  #
+  # Keep the job name `status-check` unique across every workflow that runs on
+  # pull_request: the ruleset matches checks by name, and a second job with the
+  # same name elsewhere would satisfy it on its own.
+  status-check:
+    runs-on: ubuntu-latest
+    if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    timeout-minutes: 5
+    permissions: {}
+    needs:
+      - setup
+      - lint
+      - build
+      - test
+      - test-e2e-smoke
+      - test-e2e-full
+      - test-ui
+      - depsec-tool
+      - lint-workflows
+    steps:
+      - run: exit 1
