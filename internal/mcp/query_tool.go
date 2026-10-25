@@ -2802,6 +2802,13 @@ func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolRes
 	}
 
 	items := s.pipeline.holdQueue.List()
+	// List hands out Clones holding their own buffer references; release
+	// every one of them, including those the limit cuts off below.
+	defer func(all []*common.HeldEntry) {
+		for _, it := range all {
+			it.Envelope.ReleaseBuffers()
+		}
+	}(items)
 
 	limit := input.Limit
 	if limit <= 0 || limit > maxListLimit {

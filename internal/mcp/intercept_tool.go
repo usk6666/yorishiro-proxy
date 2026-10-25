@@ -127,6 +127,9 @@ func (s *Server) handleInterceptTool(ctx context.Context, _ *gomcp.CallToolReque
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", input.Action, err)
 	}
+	// Get hands out a Clone holding its own buffer references; this
+	// handler is its only owner.
+	defer entry.Envelope.ReleaseBuffers()
 	return s.handleInterceptHoldQueue(ctx, input, entry)
 }
 
@@ -151,6 +154,12 @@ func (s *Server) handleInterceptHoldQueue(ctx context.Context, input interceptIn
 	}
 
 	if err := s.pipeline.holdQueue.Release(entry.ID, action); err != nil {
+		// The hold ended (timeout, session teardown) between Get and
+		// Release, so the modified envelope was never handed over and
+		// its buffer references are still ours.
+		if action.Modified != nil {
+			action.Modified.ReleaseBuffers()
+		}
 		return nil, nil, fmt.Errorf("%s: %w", input.Action, err)
 	}
 
