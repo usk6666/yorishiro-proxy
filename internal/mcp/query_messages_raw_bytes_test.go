@@ -546,3 +546,33 @@ func TestMessagesHaveOversizedBody_MatchesEmittedFields(t *testing.T) {
 		})
 	}
 }
+
+// TestFlowHasOversizedBody_RawRequestResponse: on the flow resource the
+// categorized send / receive messages are emitted as raw_request /
+// raw_response with their full, uncapped RawBytes — even when they also carry
+// a small body. Large raw bytes there must trigger the oversize advisory,
+// unlike a small-body message that only appears in message_preview (where
+// raw_bytes is not emitted; see TestMessagesHaveOversizedBody_MatchesEmittedFields).
+func TestFlowHasOversizedBody_RawRequestResponse(t *testing.T) {
+	t.Parallel()
+	big := []byte(strings.Repeat("x", oversizeAdvisoryThreshold+1))
+	smallBodyBigRaw := func() *flow.Flow { return &flow.Flow{Body: []byte("a"), RawBytes: big} }
+	small := func() *flow.Flow { return &flow.Flow{Body: []byte("a"), RawBytes: []byte("b")} }
+	tests := []struct {
+		name string
+		cat  categorizedMessages
+		want bool
+	}{
+		{"send small body with large raw", categorizedMessages{sendMsg: smallBodyBigRaw()}, true},
+		{"recv small body with large raw", categorizedMessages{recvMsg: smallBodyBigRaw()}, true},
+		{"send and recv small", categorizedMessages{sendMsg: small(), recvMsg: small()}, false},
+		{"no categorized messages", categorizedMessages{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := flowHasOversizedBody(tt.cat, nil); got != tt.want {
+				t.Errorf("flowHasOversizedBody = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
