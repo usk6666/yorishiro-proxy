@@ -451,9 +451,10 @@ func (c *wsChannel) buildEnvelope(frame *Frame, raw []byte, dir envelope.Directi
 	// continuation, append to the buffer and surface the verbatim
 	// compressed bytes as Payload.
 	ds := c.deflateForDirection(dir)
-	compressedDirEnabled := ds != nil
-	if compressedDirEnabled {
-		if se := c.applyDeflate(frame, dir, msg); se != nil {
+	var inflated *inflateResult
+	if ds != nil {
+		var se *layer.StreamError
+		if inflated, se = c.applyDeflate(frame, dir, msg); se != nil {
 			return nil, se
 		}
 	}
@@ -489,6 +490,9 @@ func (c *wsChannel) buildEnvelope(frame *Frame, raw []byte, dir envelope.Directi
 		Message:   msg,
 		Context:   envCtx,
 	}
+	if inflated != nil && inflated.truncated {
+		c.markDecompressedTooLarge(out, msg, inflated, ds.params)
+	}
 	return out, nil
 }
 
@@ -499,7 +503,11 @@ func (c *wsChannel) buildEnvelope(frame *Frame, raw []byte, dir envelope.Directi
 // maxCompressedPayloadSize to prevent unbounded memory growth from a peer
 // chaining many continuation frames (mirror of the USK-640 / USK-641
 // decompression-bomb defense, applied to the pre-decompress accumulator).
-func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *envelope.WSMessage) *layer.StreamError {
+//
+// The returned inflateResult is non-nil when a whole message was
+// decompressed on this frame (a single-frame message or the FIN of a
+// fragmented one); buildEnvelope consults it for the over-cap handling.
+func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *envelope.WSMessage) (*inflateResult, *layer.StreamError) {
 	ds := c.deflateForDirection(dir)
 	bufPtr, onPtr := c.fragStateForDirection(dir)
 
@@ -514,22 +522,22 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 			// Reset to start fresh (any prior buffer state is discarded
 			// by validateFragmentAppend's len-only-check on the new total).
 			if se := validateFragmentAppend(0, len(frame.Payload)); se != nil {
-				return se
+				return nil, se
 			}
 			*bufPtr = append((*bufPtr)[:0], frame.Payload...)
 			*onPtr = true
-			return nil
+			return nil, nil
 		}
 		// Single-frame compressed message: decompress the payload.
-		decoded, err := ds.decompress(frame.Payload, c.opts.decompressCap())
+		res, err := ds.inflate(frame.Payload, c.opts.decompressCap())
 		if err != nil {
-			return &layer.StreamError{
+			return nil, &layer.StreamError{
 				Code:   layer.ErrorProtocol,
 				Reason: "ws: deflate: " + err.Error(),
 			}
 		}
-		msg.Payload = decoded
-		return nil
+		msg.Payload = res.payload
+		return &res, nil
 	}
 
 	if frame.Opcode == OpcodeContinuation && *onPtr {
@@ -540,18 +548,18 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 			// is not contaminated by truncated state.
 			*bufPtr = (*bufPtr)[:0]
 			*onPtr = false
-			return se
+			return nil, se
 		}
 		if !frame.Fin {
 			// Append; surface verbatim.
 			*bufPtr = append(*bufPtr, frame.Payload...)
-			return nil
+			return nil, nil
 		}
 		// FIN continuation: reassemble + decompress, surface decoded.
 		*bufPtr = append(*bufPtr, frame.Payload...)
-		decoded, err := ds.decompress(*bufPtr, c.opts.decompressCap())
+		res, err := ds.inflate(*bufPtr, c.opts.decompressCap())
 		if err != nil {
-			return &layer.StreamError{
+			return nil, &layer.StreamError{
 				Code:   layer.ErrorProtocol,
 				Reason: "ws: deflate: " + err.Error(),
 			}
@@ -559,12 +567,12 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 		// Reset the buffer state.
 		*bufPtr = (*bufPtr)[:0]
 		*onPtr = false
-		msg.Payload = decoded
-		return nil
+		msg.Payload = res.payload
+		return &res, nil
 	}
 
 	// Uncompressed frame — leave msg.Compressed=false and Payload as-is.
-	return nil
+	return nil, nil
 }
 
 // validateFragmentAppend rejects a continuation-buffer append that would
@@ -652,6 +660,14 @@ func (c *wsChannel) populateCloseFields(msg *envelope.WSMessage, frame *Frame) {
 // clearing, no recompression, no Close rebuild, no frame-size cap. The
 // bytes may be malformed, partial, or several frames. See sendRawWins
 // for how the permessage-deflate send context is kept in step.
+//
+// Over-cap compressed messages (USK-1321): a message whose decompressed
+// size exceeded the receiving Layer's cap carries only a truncated
+// Payload, so re-compressing it would silently deliver a cut message. If
+// it reaches Send unmodified the received wire frame is written verbatim;
+// if it was modified, or the verbatim frame no longer fits the peer's
+// deflate window, Send fails with a StreamError and writes nothing. See
+// sendReceivedFrame.
 func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -666,6 +682,13 @@ func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 
 	if env.RawWins() {
 		return c.sendRawWins(ctx, env.Raw)
+	}
+
+	// A message the receiving Layer truncated at its decompression cap
+	// cannot be rebuilt from WSMessage: it is forwarded as the received
+	// frame or refused (USK-1321).
+	if snap, ok := receivedFrameOf(env, msg); ok {
+		return c.sendReceivedFrame(ctx, snap, msg)
 	}
 
 	wireDir := c.sendDirection()
@@ -693,21 +716,8 @@ func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 	}
 
 	// Apply per-direction compression if requested.
-	if msg.Compressed && c.opts.deflateEnabled {
-		ds := c.deflateForDirection(wireDir)
-		if ds != nil {
-			compressed, cerr := ds.compress(payload, c.opts.maxFrameSize)
-			if cerr != nil {
-				se := &layer.StreamError{
-					Code:   layer.ErrorAborted,
-					Reason: "ws: deflate compress: " + cerr.Error(),
-				}
-				c.markTerminated(se)
-				return se
-			}
-			payload = compressed
-			frame.RSV1 = true
-		}
+	if payload, err = c.compressForSend(msg, wireDir, frame, payload); err != nil {
+		return err
 	}
 
 	// Cap pre-mask payload size.
@@ -738,6 +748,31 @@ func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 		return se
 	}
 	return nil
+}
+
+// compressForSend compresses payload with the send direction's deflate
+// state when msg is flagged Compressed and the direction negotiated
+// permessage-deflate, setting frame.RSV1. Otherwise payload is returned
+// unchanged. A compress failure terminates the Channel.
+func (c *wsChannel) compressForSend(msg *envelope.WSMessage, wireDir envelope.Direction, frame *Frame, payload []byte) ([]byte, error) {
+	if !msg.Compressed || !c.opts.deflateEnabled {
+		return payload, nil
+	}
+	ds := c.deflateForDirection(wireDir)
+	if ds == nil {
+		return payload, nil
+	}
+	compressed, err := ds.compress(payload, c.opts.maxFrameSize)
+	if err != nil {
+		se := &layer.StreamError{
+			Code:   layer.ErrorAborted,
+			Reason: "ws: deflate compress: " + err.Error(),
+		}
+		c.markTerminated(se)
+		return nil, se
+	}
+	frame.RSV1 = true
+	return compressed, nil
 }
 
 // applySendMask installs a fresh per-frame mask key on frame iff the

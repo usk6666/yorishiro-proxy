@@ -93,33 +93,73 @@ func checkAllocationOverflow(payloadLen, trailerLen int) error {
 	return nil
 }
 
-// decompress decompresses a permessage-deflate payload.
+// inflateResult is the outcome of decompressing one permessage-deflate
+// message (USK-1321).
+type inflateResult struct {
+	// payload is the decompressed message, at most maxSize bytes.
+	payload []byte
+
+	// truncated reports that the decompressed message exceeded maxSize
+	// and payload holds only its first maxSize bytes.
+	truncated bool
+
+	// fullSize is the full decompressed size when it is known (always
+	// for a whole message; for a truncated one only under context
+	// takeover, where the rest is inflated to keep the window in step).
+	// -1 when unknown.
+	fullSize int64
+
+	// windowBefore / windowAfter are copies of the LZ77 window before and
+	// after this message. Populated only for a truncated message under
+	// context takeover; the Send side uses them to forward the received
+	// frame verbatim while keeping its compressor window in step.
+	windowBefore []byte
+	windowAfter  []byte
+}
+
+// decompress decompresses a permessage-deflate payload and returns at most
+// maxSize bytes of it. See inflate.
+func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error) {
+	res, err := ds.inflate(payload, maxSize)
+	if err != nil {
+		return nil, err
+	}
+	return res.payload, nil
+}
+
+// inflate decompresses a permessage-deflate payload.
 // Per RFC 7692 Section 7.2.2, the 4-byte trailer (0x00 0x00 0xFF 0xFF) must be
 // appended before decompression.
 //
-// maxSize limits the decompressed output size to prevent decompression bombs.
+// maxSize limits the decompressed output that is returned, to bound memory
+// against decompression bombs. A message that decompresses past maxSize is
+// reported as truncated with its first maxSize bytes. Under context
+// takeover the rest of the message is still inflated (output discarded
+// except the trailing 32 KiB) so the window matches the peer's compressor
+// for the messages that follow (RFC 7692 §7.2.2 / §8.1); memory stays
+// bounded at maxSize + maxDictSize.
 //
 // Concurrency: acquires ds.mu for the full duration of the call so the
 // internal dict update is atomic with respect to any concurrent compress
 // / decompress / close on the same *deflateState (USK-867 defense-in-depth).
-func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error) {
+func (ds *deflateState) inflate(payload []byte, maxSize int64) (inflateResult, error) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	if len(payload) == 0 {
-		return payload, nil
+		return inflateResult{payload: payload, fullSize: 0}, nil
 	}
 
 	// Enforce a hard upper bound on the compressed payload size to avoid
 	// pathological allocations and satisfy static analysis that this value
 	// cannot be arbitrarily large.
 	if int64(len(payload)) > maxCompressedPayloadSize {
-		return nil, fmt.Errorf("deflate decompress: compressed payload too large: %d > %d", len(payload), maxCompressedPayloadSize)
+		return inflateResult{}, fmt.Errorf("deflate decompress: compressed payload too large: %d > %d", len(payload), maxCompressedPayloadSize)
 	}
 
 	// Guard against integer overflow when computing the allocation size
 	// for make([]byte, len(payload)+len(flateTrailer)).
 	if err := checkAllocationOverflow(len(payload), len(flateTrailer)); err != nil {
-		return nil, err
+		return inflateResult{}, err
 	}
 
 	// Append the DEFLATE trailer per RFC 7692 Section 7.2.2.
@@ -134,13 +174,21 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 }
 
 // decompressFresh creates a new flate reader for each message. Used when
-// no_context_takeover is negotiated — each message is independently compressed.
-func (ds *deflateState) decompressFresh(src []byte, maxSize int64) ([]byte, error) {
+// no_context_takeover is negotiated — each message is independently
+// compressed, so an over-cap message is not inflated past maxSize+1 and
+// its full size stays unknown.
+func (ds *deflateState) decompressFresh(src []byte, maxSize int64) (inflateResult, error) {
 	reader := flate.NewReader(bytes.NewReader(src))
 	defer reader.Close()
 
-	decoded, _, err := ds.readDecompressed(reader, maxSize)
-	return decoded, err
+	decoded, truncated, err := ds.readDecompressed(reader, maxSize)
+	if err != nil {
+		return inflateResult{}, err
+	}
+	if truncated {
+		return inflateResult{payload: decoded[:maxSize], truncated: true, fullSize: -1}, nil
+	}
+	return inflateResult{payload: decoded, fullSize: int64(len(decoded))}, nil
 }
 
 // decompressWithContext creates a new flate reader per message, providing the
@@ -148,7 +196,13 @@ func (ds *deflateState) decompressFresh(src []byte, maxSize int64) ([]byte, erro
 // This preserves the LZ77 sliding window context across messages without
 // needing to keep a single reader alive (which is problematic because Go's
 // flate reader caches errors permanently).
-func (ds *deflateState) decompressWithContext(src []byte, maxSize int64) ([]byte, error) {
+//
+// A message that decompresses past maxSize is inflated to its end anyway:
+// the output beyond maxSize is discarded except for the trailing window, so
+// the dictionary always reflects the FULL plaintext the peer's compressor
+// saw (USK-1321). Resetting the dictionary instead would desynchronise
+// every later back-referencing message.
+func (ds *deflateState) decompressWithContext(src []byte, maxSize int64) (inflateResult, error) {
 	var reader io.ReadCloser
 	if len(ds.dict) > 0 {
 		reader = flate.NewReaderDict(bytes.NewReader(src), ds.dict)
@@ -159,33 +213,34 @@ func (ds *deflateState) decompressWithContext(src []byte, maxSize int64) ([]byte
 
 	decoded, truncated, err := ds.readDecompressed(reader, maxSize)
 	if err != nil {
-		return nil, err
+		return inflateResult{}, err
+	}
+	if !truncated {
+		ds.dict = appendWindow(ds.dict, decoded)
+		return inflateResult{payload: decoded, fullSize: int64(len(decoded))}, nil
 	}
 
-	// If maxSize truncation occurred, the dictionary would be inconsistent with
-	// the peer's compressor state (LZ77 window desync). Reset the dictionary to
-	// avoid silently producing incorrect decompression for subsequent messages.
-	if truncated {
-		ds.dict = nil
-		return decoded, nil
+	// decoded holds maxSize+1 bytes; inflate the remainder into the window.
+	window, rest, err := drainIntoWindow(reader, appendWindow(ds.dict, decoded))
+	if err != nil {
+		return inflateResult{}, err
 	}
-
-	// Update the dictionary with the decompressed output for subsequent messages.
-	ds.dict = append(ds.dict, decoded...)
-	if len(ds.dict) > maxDictSize {
-		start := len(ds.dict) - maxDictSize
-		newDict := make([]byte, maxDictSize)
-		copy(newDict, ds.dict[start:])
-		ds.dict = newDict
+	res := inflateResult{
+		payload:      decoded[:maxSize],
+		truncated:    true,
+		fullSize:     int64(len(decoded)) + rest,
+		windowBefore: cloneBytes(ds.dict),
+		windowAfter:  cloneBytes(window),
 	}
-
-	return decoded, nil
+	ds.dict = window
+	return res, nil
 }
 
-// readDecompressed reads decompressed data from a flate reader up to maxSize.
-// permessage-deflate streams lack a BFINAL block, so io.ErrUnexpectedEOF is
-// expected and treated as success when data was read.
-// The returned truncated flag indicates whether the output was limited by maxSize.
+// readDecompressed reads decompressed data from a flate reader up to
+// maxSize+1 bytes. permessage-deflate streams lack a BFINAL block, so
+// io.ErrUnexpectedEOF is expected and treated as success when data was read.
+// truncated reports that more than maxSize bytes were available; decoded
+// then holds maxSize+1 bytes and the reader is positioned after them.
 func (ds *deflateState) readDecompressed(reader io.Reader, maxSize int64) (decoded []byte, truncated bool, err error) {
 	decoded, err = io.ReadAll(io.LimitReader(reader, maxSize+1))
 	if err != nil {
@@ -197,12 +252,77 @@ func (ds *deflateState) readDecompressed(reader io.Reader, maxSize int64) (decod
 			return nil, false, fmt.Errorf("deflate decompress: %w", err)
 		}
 	}
-	if int64(len(decoded)) > maxSize {
-		decoded = decoded[:maxSize]
-		truncated = true
-	}
+	return decoded, int64(len(decoded)) > maxSize, nil
+}
 
-	return decoded, truncated, nil
+// drainIntoWindow inflates the rest of a message from reader, discarding
+// the output except for the trailing maxDictSize bytes, which it appends to
+// window. It returns the updated window and the number of bytes inflated.
+// Memory is bounded by one maxDictSize read buffer plus the window.
+func drainIntoWindow(reader io.Reader, window []byte) ([]byte, int64, error) {
+	buf := make([]byte, maxDictSize)
+	var n int64
+	for {
+		k, err := reader.Read(buf)
+		if k > 0 {
+			window = appendWindow(window, buf[:k])
+			n += int64(k)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return window, n, nil
+			}
+			return nil, n, fmt.Errorf("deflate decompress: %w", err)
+		}
+	}
+}
+
+// appendWindow returns the last maxDictSize bytes of window+data as a new
+// slice. Neither argument is modified, so a slice handed out earlier (an
+// inflateResult window snapshot) never changes underneath its holder.
+func appendWindow(window, data []byte) []byte {
+	if len(data) >= maxDictSize {
+		out := make([]byte, maxDictSize)
+		copy(out, data[len(data)-maxDictSize:])
+		return out
+	}
+	if keep := maxDictSize - len(data); len(window) > keep {
+		window = window[len(window)-keep:]
+	}
+	out := make([]byte, 0, len(window)+len(data))
+	out = append(out, window...)
+	return append(out, data...)
+}
+
+// windowMatches reports whether this state's LZ77 window equals want over
+// the bytes the negotiated window size lets a compressor reference
+// (2^windowBits, at most maxDictSize). Used before forwarding a received
+// compressed frame verbatim under context takeover: the frame's
+// back-references only resolve on the peer if the two windows agree.
+func (ds *deflateState) windowMatches(want []byte) bool {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	span := maxDictSize
+	if wb := ds.params.windowBits; wb >= 8 && wb < 15 {
+		span = 1 << wb
+	}
+	return bytes.Equal(windowSuffix(ds.dict, span), windowSuffix(want, span))
+}
+
+func windowSuffix(b []byte, span int) []byte {
+	if len(b) > span {
+		return b[len(b)-span:]
+	}
+	return b
+}
+
+// setWindow replaces this state's LZ77 window with a copy of window. Used
+// after a received compressed frame was forwarded verbatim, so the next
+// compress call references exactly what the peer's inflater now holds.
+func (ds *deflateState) setWindow(window []byte) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	ds.dict = cloneBytes(window)
 }
 
 // compress compresses a permessage-deflate payload for the Send direction.
@@ -281,13 +401,7 @@ func (ds *deflateState) compress(payload []byte, maxSize int64) ([]byte, error) 
 	// Update the per-direction dictionary with the original input bytes.
 	// The LZ77 window size is capped at maxDictSize.
 	if ds.params.contextTakeover {
-		ds.dict = append(ds.dict, payload...)
-		if len(ds.dict) > maxDictSize {
-			start := len(ds.dict) - maxDictSize
-			newDict := make([]byte, maxDictSize)
-			copy(newDict, ds.dict[start:])
-			ds.dict = newDict
-		}
+		ds.dict = appendWindow(ds.dict, payload)
 	}
 
 	return out, nil

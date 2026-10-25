@@ -64,7 +64,7 @@ func (c *wsChannel) resyncSendDeflate(ctx context.Context, raw []byte) {
 			frame, _, err = ReadFrameRaw(r)
 		}
 		if err == nil {
-			err = advanceSendDeflate(ds, frame, bufPtr, onPtr)
+			err = advanceSendDeflate(ds, frame, bufPtr, onPtr, c.opts.decompressCap())
 		}
 		if err != nil {
 			*bufPtr = (*bufPtr)[:0]
@@ -109,7 +109,7 @@ func checkRawFrameFits(b []byte) error {
 // frame) so ds's dictionary takes in the plaintext. Mirrors the
 // receive-side applyDeflate state machine. Control frames are not
 // compressed and do not interrupt a fragmented message.
-func advanceSendDeflate(ds *deflateState, frame *Frame, bufPtr *[]byte, onPtr *bool) error {
+func advanceSendDeflate(ds *deflateState, frame *Frame, bufPtr *[]byte, onPtr *bool, inflateCap int64) error {
 	if frame.IsControl() {
 		return nil
 	}
@@ -126,7 +126,7 @@ func advanceSendDeflate(ds *deflateState, frame *Frame, bufPtr *[]byte, onPtr *b
 			*onPtr = true
 			return nil
 		}
-		_, err := ds.decompress(frame.Payload, maxFramePayloadSize)
+		_, err := ds.decompress(frame.Payload, inflateCap)
 		return err
 	case *onPtr:
 		if se := validateFragmentAppend(len(*bufPtr), len(frame.Payload)); se != nil {
@@ -136,7 +136,7 @@ func advanceSendDeflate(ds *deflateState, frame *Frame, bufPtr *[]byte, onPtr *b
 		if !frame.Fin {
 			return nil
 		}
-		_, err := ds.decompress(*bufPtr, maxFramePayloadSize)
+		_, err := ds.decompress(*bufPtr, inflateCap)
 		*bufPtr = (*bufPtr)[:0]
 		*onPtr = false
 		return err

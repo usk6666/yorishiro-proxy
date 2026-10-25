@@ -74,7 +74,7 @@ register_hook("<protocol>", "<event>", <hook_name>)
 | Plugin protocol | Events | Key fields on `msg` |
 |-----------------|--------|---------------------|
 | `http` | `on_request`, `on_response` | `method`, `scheme`, `authority`, `path`, `raw_query`, `status`, `status_reason`, `headers`, `trailers`, `body`, `anomalies` (RO), `raw` |
-| `ws` | `on_upgrade`, `on_message`, `on_close` | `opcode`, `fin`, `masked`, `mask`, `payload`, `close_code`, `close_reason`, `compressed`, `raw` |
+| `ws` | `on_upgrade`, `on_message`, `on_close` | `opcode`, `fin`, `masked`, `mask`, `payload`, `close_code`, `close_reason`, `compressed`, `anomalies` (RO), `raw` |
 | `grpc` / `grpc-web` | `on_start`, `on_data`, `on_end` | start: `service`, `method`, `metadata`, `timeout`, `content_type`, `encoding`, `accept_encoding`; data: `service` (RO), `method` (RO), `compressed`, `wire_length`, `payload`, `end_stream`; end: `status`, `message`, `status_details`, `trailers` |
 | `sse` | `on_event` | `event`, `data`, `id`, `retry`, `anomalies` (RO), `raw` |
 | `raw` | `on_chunk` | `bytes`, `raw` |

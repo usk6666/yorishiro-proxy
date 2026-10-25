@@ -135,6 +135,18 @@ func (e *SafetyEngine) CheckInputAll(ctx context.Context, msg *envelope.WSMessag
 
 func (e *SafetyEngine) checkRule(_ context.Context, rule *common.CompiledRule, msg *envelope.WSMessage) *Violation {
 	for _, target := range rule.Targets {
+		if (target == TargetPayload || target == common.TargetBody) && payloadTruncated(msg) {
+			// USK-1321: the WS Layer truncated this compressed message at
+			// its decompression cap, so Payload is only a prefix of what
+			// reaches the upstream verbatim. A payload rule cannot clear
+			// bytes it cannot see: fail closed as if it matched.
+			return &Violation{
+				RuleID:   rule.ID,
+				RuleName: rule.Name,
+				Target:   string(TargetPayload),
+				Match:    truncatedPayloadMatch,
+			}
+		}
 		data, targetName := e.extractTarget(target, msg)
 		if data == "" && target != TargetPayload && target != common.TargetBody {
 			// Empty payload still legitimately runs through the regex
@@ -176,6 +188,21 @@ func (e *SafetyEngine) extractTarget(target common.Target, msg *envelope.WSMessa
 		// unknown targets are likewise skipped.
 		return "", ""
 	}
+}
+
+// truncatedPayloadMatch is the Violation.Match reported for a payload the
+// engine refused to clear because it was truncated (USK-1321).
+const truncatedPayloadMatch = "payload exceeds safety scan window (decompressed message truncated at the WebSocket decompression cap)"
+
+// payloadTruncated reports whether msg.Payload is only a prefix of the
+// message the WS Layer forwards (envelope.AnomalyWSDecompressedTooLarge).
+func payloadTruncated(msg *envelope.WSMessage) bool {
+	for _, a := range msg.Anomalies {
+		if a.Type == envelope.AnomalyWSDecompressedTooLarge {
+			return true
+		}
+	}
+	return false
 }
 
 // RuleCount returns the number of loaded rules.

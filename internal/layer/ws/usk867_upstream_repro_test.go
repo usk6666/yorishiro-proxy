@@ -212,7 +212,7 @@ func TestApplyDeflate_USK867_TwoSingleFrameMessages_NoStatePollution(t *testing.
 		}
 		msg := &envelope.WSMessage{Opcode: envelope.WSText, Fin: true}
 		// Receive direction so serverDS is used (RoleClient → upstream-facing).
-		se := ch.applyDeflate(frame, envelope.Receive, msg)
+		_, se := ch.applyDeflate(frame, envelope.Receive, msg)
 		if se != nil {
 			t.Fatalf("msg%d applyDeflate: %v", i+1, se)
 		}
@@ -267,7 +267,7 @@ func TestApplyDeflate_USK867_TwoSingleFrameMessages_SendDirection(t *testing.T) 
 			Payload: tc.payload,
 		}
 		msg := &envelope.WSMessage{Opcode: envelope.WSText, Fin: true}
-		se := ch.applyDeflate(frame, envelope.Send, msg)
+		_, se := ch.applyDeflate(frame, envelope.Send, msg)
 		if se != nil {
 			t.Fatalf("msg%d applyDeflate: %v", i+1, se)
 		}

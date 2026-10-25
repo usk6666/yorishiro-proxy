@@ -317,8 +317,15 @@ func buildWSDict(d *MessageDict, m *envelope.WSMessage) {
 	d.setKV("CloseReason", starlark.String(m.CloseReason))
 	d.setKV("Compressed", starlark.Bool(m.Compressed))
 
+	anomKey := d.setKV("Anomalies", anomaliesToStarlark(m.Anomalies))
+	d.markReadOnly(anomKey)
+
 	d.builder = func(d *MessageDict) (envelope.Message, error) {
-		out := &envelope.WSMessage{}
+		// Anomalies are read-only and carried across the rebuild
+		// (USK-1321): dropping WSDecompressedTooLarge would let a plugin
+		// that touched any field bypass the WS Layer's refusal to forward
+		// a modified truncated message.
+		out := &envelope.WSMessage{Anomalies: m.Anomalies}
 		var opcode int
 		if err := readScalar(d, "opcode", &opcode); err != nil {
 			return nil, err

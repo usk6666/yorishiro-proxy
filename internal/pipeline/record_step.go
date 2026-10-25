@@ -1494,6 +1494,33 @@ func projectWSMessage(m *envelope.WSMessage, fl *flow.Flow) {
 		fl.Metadata["ws_close_code"] = strconv.FormatUint(uint64(m.CloseCode), 10)
 		fl.Metadata["ws_close_reason"] = m.CloseReason
 	}
+	// Layer-detected anomalies project into stable ws_anomaly_* keys
+	// (USK-1321), mirroring projectSSE. A message truncated at the WS
+	// Layer's decompression cap also sets BodyTruncated: Body is the
+	// first cap bytes while RawBytes holds the complete wire frame.
+	for _, a := range m.Anomalies {
+		key := wsAnomalyMetadataKey(a.Type)
+		if key == "" {
+			continue
+		}
+		fl.Metadata[key] = a.Detail
+		if a.Type == envelope.AnomalyWSDecompressedTooLarge {
+			fl.BodyTruncated = true
+		}
+	}
+}
+
+// wsAnomalyMetadataKey returns the stable Metadata key under which a WS
+// anomaly's Detail is recorded. Returns empty for unknown / non-WS
+// anomaly types so projection silently drops them (sseAnomalyMetadataKey
+// precedent).
+func wsAnomalyMetadataKey(t envelope.AnomalyType) string {
+	switch t {
+	case envelope.AnomalyWSDecompressedTooLarge:
+		return "ws_anomaly_decompressed_too_large"
+	default:
+		return ""
+	}
 }
 
 // projectGRPCStart projects a GRPCStartMessage. grpc_event / grpc_service /
