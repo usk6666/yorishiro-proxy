@@ -28,10 +28,10 @@ Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` reso
 - **listener_name** (string): Listener filter for flows (exact match). Selects the streams accepted by the listener started with `proxy_start` `name` (`"default"` when no name was given); TCP-forward streams carry their parent listener's name. Streams from `resend_*` / fuzz and rows recorded before this field existed have an empty `listener_name` and never match.
 - **host** (string): Host filter for flows. Matches against the `server_addr`, the requested destination in `tags.target` (error / audit streams that never reached an upstream socket: `upstream_tls_error`, `client_tls_error`, proxy-closed request heads, `capacity` rejections), or the host portion of the request URL (e.g. `"example.com"`). Because `server_addr` is the upstream socket's peer, a stream reached through an upstream proxy matches the proxy's host here.
 - **direction** (string): Message direction filter for the `messages` resource (`"send"` or `"receive"`).
-- **body_contains** (string): Response body substring filter for fuzz_results.
-- **outliers_only** (boolean): Return only outlier fuzz results (detected by status_code, body_length, or timing deviation).
-- **status** (string): Job status filter for fuzz_jobs (`"running"`, `"paused"`, `"completed"`, `"cancelled"`, `"error"`).
-- **tag** (string): Job tag filter for fuzz_jobs (exact match).
+- **body_contains** (string): Response body substring filter. fuzz_results only; rejected on `flows`.
+- **outliers_only** (boolean): Return only outlier fuzz results (detected by status_code, body_length, or timing deviation). fuzz_results only; rejected on `flows`.
+- **status** (string): Job status filter (`"running"`, `"paused"`, `"completed"`, `"cancelled"`, `"error"`). fuzz_jobs only; rejected on `flows` (use `state` for the flow lifecycle state).
+- **tag** (string): Exact-match tag filter (case-sensitive, not trimmed). fuzz_jobs: the job tag. flows: `Stream.Tags["tag"]`, the label `resend_*` / `fuzz_*` record from their `tag` parameter. Attempts that failed before completion may be untagged.
 
 ### fields (array of strings, optional)
 Controls which fields are returned in the response for `fuzz_jobs` and `fuzz_results` resources.

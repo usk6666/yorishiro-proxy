@@ -261,13 +261,18 @@ type queryFilter struct {
 	// Host filters flows by host (matches server_addr, tags.target or URL host).
 	Host string `json:"host,omitempty" jsonschema:"host filter for flows (matches server_addr, tags.target or URL host, e.g. example.com)"`
 	// BodyContains filters fuzz_results by response body substring.
-	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter (fuzz_results)"`
+	// Rejected on resource=flows (validateFlowFilters).
+	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter; applies to fuzz_results only (rejected on flows)"`
 	// OutliersOnly filters fuzz_results to return only outlier results.
-	OutliersOnly bool `json:"outliers_only,omitempty" jsonschema:"return only outlier fuzz results (by status_code, body_length, or timing)"`
+	// Rejected on resource=flows (validateFlowFilters).
+	OutliersOnly bool `json:"outliers_only,omitempty" jsonschema:"return only outlier fuzz results (by status_code, body_length, or timing); applies to fuzz_results only (rejected on flows)"`
 	// Status filters fuzz_jobs by status (e.g. "running", "completed").
-	Status string `json:"status,omitempty" jsonschema:"fuzz job status filter (e.g. running, completed)"`
-	// Tag filters fuzz_jobs by tag (exact match).
-	Tag string `json:"tag,omitempty" jsonschema:"fuzz job tag filter (exact match)"`
+	// Rejected on resource=flows (validateFlowFilters).
+	Status string `json:"status,omitempty" jsonschema:"fuzz job status filter (e.g. running, completed); applies to fuzz_jobs only (rejected on flows)"`
+	// Tag is an exact-match tag filter. On fuzz_jobs it matches the job
+	// tag; on flows it matches Stream.Tags["tag"], the label resend_* /
+	// fuzz_* record from their tag parameter. Not trimmed or case-folded.
+	Tag string `json:"tag,omitempty" jsonschema:"exact-match tag filter. fuzz_jobs: job tag; flows: Stream.Tags[\"tag\"] set by resend_* / fuzz_* from their tag parameter"`
 }
 
 // availableResources lists all valid resource names for error messages.
@@ -415,6 +420,9 @@ func validateEnum(param, value string, valid []string) error {
 // validateFlowFilters validates enum filter parameters for the flows resource.
 func validateFlowFilters(input queryInput) error {
 	if input.Filter != nil {
+		if err := rejectFuzzOnlyFlowFilters(input.Filter); err != nil {
+			return err
+		}
 		if err := validateEnum("protocol", input.Filter.Protocol, validFilterProtocols); err != nil {
 			return err
 		}
@@ -449,6 +457,21 @@ func validateFlowFilters(input queryInput) error {
 	}
 	if err := validateEnum("sort_by", input.SortBy, validFlowSortByValues); err != nil {
 		return err
+	}
+	return nil
+}
+
+// rejectFuzzOnlyFlowFilters rejects filter fields that only the fuzz
+// resources read, so a caller of resource=flows cannot mistake an ignored
+// filter for "no match".
+func rejectFuzzOnlyFlowFilters(f *queryFilter) error {
+	switch {
+	case f.BodyContains != "":
+		return fmt.Errorf("filter.body_contains is not supported on resource=flows: it applies to fuzz_results only")
+	case f.OutliersOnly:
+		return fmt.Errorf("filter.outliers_only is not supported on resource=flows: it applies to fuzz_results only")
+	case f.Status != "":
+		return fmt.Errorf("filter.status is not supported on resource=flows: it applies to fuzz_jobs only (use filter.state for the flow lifecycle state)")
 	}
 	return nil
 }
@@ -878,6 +901,7 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 		opts.ConnID = input.Filter.ConnID
 		opts.ListenerName = input.Filter.ListenerName
 		opts.Host = input.Filter.Host
+		opts.Tag = input.Filter.Tag
 	}
 	return opts
 }
