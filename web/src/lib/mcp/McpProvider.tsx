@@ -1,14 +1,11 @@
 /**
- * React Context for the MCP client.
- *
- * Provides the McpClient instance to the component tree via McpProvider.
- * Components access the client through the useMcpContext hook.
+ * McpProvider -- owns the MCP client lifecycle and supplies it through
+ * McpContext (see ./context.ts). Components access the client through the
+ * useMcpContext hook.
  */
 
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -17,21 +14,8 @@ import {
 } from "react";
 import { clearStoredToken } from "../auth.js";
 import { McpClient, type McpClientConfig } from "./client.js";
+import { McpContext, type McpContextValue } from "./context.js";
 import type { ConnectionStatus } from "./types.js";
-
-/** Values exposed by the MCP context. */
-export interface McpContextValue {
-  /** The MCP client instance. Null before connection is established. */
-  client: McpClient | null;
-  /** Current connection status. */
-  status: ConnectionStatus;
-  /** Last connection error, if any. */
-  error: Error | null;
-  /** Manually reconnect to the MCP server. */
-  reconnect: () => Promise<void>;
-}
-
-const McpContext = createContext<McpContextValue | null>(null);
 
 /** Props for the McpProvider component. */
 export interface McpProviderProps {
@@ -121,19 +105,6 @@ export function McpProvider({ config, children }: McpProviderProps) {
   );
 
   return <McpContext.Provider value={value}>{children}</McpContext.Provider>;
-}
-
-/**
- * Hook to access the MCP context.
- * Must be used within a McpProvider.
- * @throws Error if used outside of McpProvider.
- */
-export function useMcpContext(): McpContextValue {
-  const context = useContext(McpContext);
-  if (!context) {
-    throw new Error("useMcpContext must be used within a McpProvider");
-  }
-  return context;
 }
 
 /**

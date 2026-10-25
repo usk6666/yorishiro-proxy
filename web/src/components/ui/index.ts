@@ -16,8 +16,10 @@ export type { TableProps } from "./Table.js";
 export { Tabs } from "./Tabs.js";
 export type { Tab, TabsProps } from "./Tabs.js";
 
-export { ToastProvider, useToast } from "./Toast.js";
-export type { ToastMessage } from "./Toast.js";
+export { ToastProvider } from "./Toast.js";
+export { useToast } from "./toastContext.js";
+export type { ToastMessage } from "./toastContext.js";
 
-export { DialogProvider, useDialog } from "./Dialog.js";
-export type { DialogOptions } from "./Dialog.js";
+export { DialogProvider } from "./Dialog.js";
+export { useDialog } from "./dialogContext.js";
+export type { DialogOptions } from "./dialogContext.js";

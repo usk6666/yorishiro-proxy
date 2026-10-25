@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
-import { useDialog } from "../../components/ui/Dialog.js";
+import { useDialog } from "../../components/ui/dialogContext.js";
 import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useToast } from "../../components/ui/toastContext.js";
 import { buildHarFromList, downloadHar } from "../../lib/export/har.js";
 import { useManage, useQuery } from "../../lib/mcp/hooks.js";
 import type { FlowEntry, ManageImportFlowsResult, QueryFilter } from "../../lib/mcp/types.js";
@@ -225,7 +225,7 @@ export function FlowsPage() {
     offset,
   });
 
-  const flows = data?.flows ?? [];
+  const flows = useMemo(() => data?.flows ?? [], [data?.flows]);
   const total = data?.total ?? 0;
 
   // Reset offset and selection on any filter change. Called synchronously

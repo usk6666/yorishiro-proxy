@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Badge, Button, Input, useDialog, useToast } from "../../components/ui/index.js";
 import { useProxyControl } from "../../lib/mcp/hooks.js";
 import type { ConfigResult, ForwardConfig, ForwardProtocol } from "../../lib/mcp/types.js";
@@ -33,7 +33,7 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
   const [upstreamTlsEnabled, setUpstreamTlsEnabled] = useState(false);
   const [showForm, setShowForm] = useState(false);
 
-  const forwards = config.tcp_forwards ?? {};
+  const forwards = useMemo(() => config.tcp_forwards ?? {}, [config.tcp_forwards]);
   const entries = Object.entries(forwards);
 
   const handleAdd = useCallback(async () => {

@@ -17,8 +17,8 @@ import fixtureText from "./__fixtures__/ws-messages.response.json?raw";
 import {
   WebSocketMessageDetail,
   WebSocketMessageList,
-  wsFrameInfo,
 } from "./WebSocketMessageList.js";
+import { wsFrameInfo } from "./wsFrame.js";
 
 const fixture = JSON.parse(fixtureText) as {
   messages: MessageEntry[];

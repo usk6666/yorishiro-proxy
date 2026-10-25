@@ -20,7 +20,7 @@ import {
   redactUpstreamProxyURL,
   validateUpstreamProxyPayload,
   type UpstreamProxyEditorValue,
-} from "./UpstreamProxyEditor.js";
+} from "./upstreamProxyPayload.js";
 
 // ---------------------------------------------------------------------------
 // isRotationUpstream — type guard

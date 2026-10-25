@@ -5,7 +5,7 @@ import { Button } from "../../components/ui/Button.js";
 import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Tabs } from "../../components/ui/Tabs.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useToast } from "../../components/ui/toastContext.js";
 import {
   firstGrpcDataMessage,
   firstGrpcDataPayload,

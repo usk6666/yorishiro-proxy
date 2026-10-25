@@ -120,6 +120,8 @@ make build
 make test
 ```
 
+If `web/` changed, also run `make test-ui` and `make lint-ui` (eslint, `--max-warnings 0`).
+
 - Auto-format with `gofmt -w .`
 - `make lint` runs a `gofmt -l .` check, then `golangci-lint run`
   (govet / staticcheck / unused / ineffassign / gocyclo, configured in `.golangci.yml`)

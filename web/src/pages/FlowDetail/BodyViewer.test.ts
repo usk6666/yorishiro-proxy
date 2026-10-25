@@ -3,7 +3,7 @@ import {
   anomalyLabel,
   isPreviewableImage,
   resolveBodySourceState,
-} from "./BodyViewer.js";
+} from "./bodyViewerHelpers.js";
 import type { DecodeAnomaly } from "../../lib/mcp/types.js";
 
 // ---------------------------------------------------------------------------

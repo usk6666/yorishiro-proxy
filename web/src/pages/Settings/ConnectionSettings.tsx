@@ -6,12 +6,12 @@ import type {
   StatusResult,
   UpstreamProxyRotationInput,
 } from "../../lib/mcp/types.js";
+import { UpstreamProxyEditor } from "./UpstreamProxyEditor.js";
 import {
-  UpstreamProxyEditor,
   type UpstreamProxyEditorValue,
   redactUpstreamProxyURL,
   validateUpstreamProxyPayload,
-} from "./UpstreamProxyEditor.js";
+} from "./upstreamProxyPayload.js";
 
 interface ConnectionSettingsProps {
   status: StatusResult;
