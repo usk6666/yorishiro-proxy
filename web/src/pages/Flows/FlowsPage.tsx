@@ -16,6 +16,7 @@ import {
 } from "../../lib/mcp/protocols.js";
 import type { FlowEntry, ManageImportFlowsResult, QueryFilter } from "../../lib/mcp/types.js";
 import { FlowProtocolCell } from "./FlowProtocolCell.js";
+import { buildFlowsFilter } from "./flowsFilter.js";
 import "./FlowsPage.css";
 
 // ---------------------------------------------------------------------------
@@ -125,7 +126,6 @@ export function FlowsPage() {
   const [statusCodeRange, setStatusCodeRange] = useState<string>("");
   const [urlPattern, setUrlPattern] = useState<string>("");
   const [selectedState, setSelectedState] = useState<string>("");
-  const [bodyContains, setBodyContains] = useState<string>("");
   const [tagFilter, setTagFilter] = useState<string>("");
   const [selectedScheme, setSelectedScheme] = useState<string>("");
   const [selectedBlockedBy, setSelectedBlockedBy] = useState<string>("");
@@ -133,7 +133,6 @@ export function FlowsPage() {
 
   // Debounce text inputs to avoid firing expensive queries on every keystroke
   const debouncedUrlPattern = useDebounce(urlPattern, 300);
-  const debouncedBodyContains = useDebounce(bodyContains, 300);
   const debouncedTagFilter = useDebounce(tagFilter, 300);
   const debouncedHostFilter = useDebounce(hostFilter, 300);
 
@@ -157,47 +156,22 @@ export function FlowsPage() {
   const [importResult, setImportResult] = useState<ManageImportFlowsResult | null>(null);
 
   // --- Build query filter ---
-  const filter = useMemo<QueryFilter | undefined>(() => {
-    const f: QueryFilter = {};
-    // Protocol filter: query tool accepts a single protocol string
-    if (selectedProtocol) {
-      f.protocol = selectedProtocol;
-    }
-    if (selectedHttpVersion) {
-      f.http_version = selectedHttpVersion;
-    }
-    if (selectedScheme) {
-      f.scheme = selectedScheme;
-    }
-    if (selectedMethod) {
-      f.method = selectedMethod;
-    }
-    if (debouncedUrlPattern.trim()) {
-      f.url_pattern = debouncedUrlPattern.trim();
-    }
-    if (statusCodeRange) {
-      const code = parseInt(statusCodeRange, 10);
-      if (!isNaN(code)) {
-        f.status_code = code;
-      }
-    }
-    if (selectedBlockedBy) {
-      f.blocked_by = selectedBlockedBy;
-    }
-    if (selectedState) {
-      f.state = selectedState;
-    }
-    if (debouncedHostFilter.trim()) {
-      f.host = debouncedHostFilter.trim();
-    }
-    if (debouncedBodyContains.trim()) {
-      f.body_contains = debouncedBodyContains.trim();
-    }
-    if (debouncedTagFilter.trim()) {
-      f.tag = debouncedTagFilter.trim();
-    }
-    return Object.keys(f).length > 0 ? f : undefined;
-  }, [selectedProtocol, selectedHttpVersion, selectedScheme, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedBlockedBy, selectedState, debouncedHostFilter, debouncedBodyContains, debouncedTagFilter]);
+  const filter = useMemo<QueryFilter | undefined>(
+    () =>
+      buildFlowsFilter({
+        protocol: selectedProtocol,
+        httpVersion: selectedHttpVersion,
+        scheme: selectedScheme,
+        method: selectedMethod,
+        urlPattern: debouncedUrlPattern,
+        statusCode: statusCodeRange,
+        blockedBy: selectedBlockedBy,
+        state: selectedState,
+        host: debouncedHostFilter,
+        tag: debouncedTagFilter,
+      }),
+    [selectedProtocol, selectedHttpVersion, selectedScheme, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedBlockedBy, selectedState, debouncedHostFilter, debouncedTagFilter],
+  );
 
   // --- Query flows ---
   const { data, loading, error, refetch } = useQuery("flows", {
@@ -297,15 +271,6 @@ export function FlowsPage() {
   const handleUrlChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setUrlPattern(e.target.value);
-      handleFilterChange();
-    },
-    [handleFilterChange],
-  );
-
-  // --- Body contains (debounced query, immediate offset reset) ---
-  const handleBodyContainsChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      setBodyContains(e.target.value);
       handleFilterChange();
     },
     [handleFilterChange],
@@ -710,18 +675,9 @@ export function FlowsPage() {
           </div>
 
           <div className="flows-filter-group flows-text-filter">
-            <span className="flows-filter-label">Body Contains</span>
-            <Input
-              placeholder="Search response body..."
-              value={bodyContains}
-              onChange={handleBodyContainsChange}
-            />
-          </div>
-
-          <div className="flows-filter-group flows-text-filter">
             <span className="flows-filter-label">Tag</span>
             <Input
-              placeholder="Filter by tag..."
+              placeholder="resend/fuzz tag (exact)"
               value={tagFilter}
               onChange={handleTagFilterChange}
             />

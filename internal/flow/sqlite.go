@@ -472,6 +472,11 @@ func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 // whole query.
 const streamTagsTargetExpr = "(CASE WHEN json_valid(s.tags) THEN json_extract(s.tags, '$.target') END)"
 
+// streamTagsTagExpr reads tags.tag, the user label resend_* / fuzz_*
+// record from their tag parameter. The json_valid guard has the same
+// purpose as in streamTagsTargetExpr.
+const streamTagsTagExpr = "(CASE WHEN json_valid(s.tags) THEN json_extract(s.tags, '$.tag') END)"
+
 // appendStreamHostPredicate adds the filter.host predicate. A stream
 // matches when the host appears in any of:
 //
@@ -550,6 +555,10 @@ func appendStreamSimplePredicates(conds []string, args []interface{}, opts Strea
 	if opts.Origin != "" {
 		conds = append(conds, "s.origin = ?")
 		args = append(args, string(opts.Origin))
+	}
+	if opts.Tag != "" {
+		conds = append(conds, streamTagsTagExpr+" = ?")
+		args = append(args, opts.Tag)
 	}
 	return conds, args
 }
