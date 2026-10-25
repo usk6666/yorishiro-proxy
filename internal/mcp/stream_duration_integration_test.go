@@ -260,8 +260,15 @@ func TestResendHTTP_TimeoutError_StreamDurationRecorded(t *testing.T) {
 		t.Fatalf("expected timeout to surface as IsError, got success")
 	}
 
+	// The lower bound is deliberately below the timeout. Duration is
+	// measured from Stream.Timestamp, which RecordStep stamps, whereas the
+	// per-request deadline (rtCtx in handleResendHTTP) starts earlier —
+	// before pipeline build, rate-limit wait and the pre-Record steps. So
+	// Duration = timeout + unwind - pre-Record overhead, which can land
+	// just under the timeout on a loaded runner. timeout-100ms still
+	// proves the regression: before USK-1347 the recorded value was 0.
 	resendStream := findOriginStream(t, store, flow.OriginResend)
-	st := assertStreamDuration(t, store, resendStream.ID, timeout, timeout+2*time.Second)
+	st := assertStreamDuration(t, store, resendStream.ID, timeout-100*time.Millisecond, timeout+2*time.Second)
 	if st.State != "error" {
 		t.Errorf("Stream.State = %q, want error", st.State)
 	}
