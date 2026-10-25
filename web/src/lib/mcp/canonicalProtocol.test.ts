@@ -43,6 +43,20 @@ describe("isHttp2", () => {
     expect(isHttp2(h1)).toBe(false);
   });
 
+  it("is true for legacy HTTP/2 protocol spellings without http_version", () => {
+    // Old DBs / JSONL imports may hold display spellings in Stream.Protocol.
+    expect(isHttp2({ protocol: "HTTP/2" })).toBe(true);
+    expect(isHttp2({ protocol: "HTTP/2", http_version: "" })).toBe(true);
+    expect(isHttp2({ protocol: "h2" })).toBe(true);
+    expect(isHttp2({ protocol: "H2", http_version: "" })).toBe(true);
+  });
+
+  it("is false for a canonical http row without an h2 http_version", () => {
+    expect(isHttp2({ protocol: "http", http_version: "" })).toBe(false);
+    expect(isHttp2({ protocol: "http" })).toBe(false);
+    expect(isHttp2({ protocol: "HTTP/1.x", http_version: "" })).toBe(false);
+  });
+
   it("is false for non-HTTP protocols and missing input", () => {
     expect(isHttp2({ protocol: "grpc", http_version: "h2" })).toBe(false);
     expect(isHttp2({ protocol: "ws" })).toBe(false);
