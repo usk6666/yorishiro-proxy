@@ -890,12 +890,13 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 	// flow. Non-variant flows persist as variant='' (V8 behavior).
 	//
 	// The variant value is intentionally duplicated into both the column
-	// (for the UNIQUE constraint) and the metadata JSON column (for read
-	// consumers — flowColumns SELECT does not project the variant column,
-	// so all readers go through Metadata["variant"]). The column is the
-	// source of truth for the constraint; metadata remains the single
-	// source of truth for read paths (see categorizeMessages /
-	// resolveHeadPair in internal/mcp/query_tool.go).
+	// and the metadata JSON column. flowColumns SELECT does not project the
+	// variant column, so Go readers go through Metadata["variant"] (see
+	// categorizeMessages / resolveHeadPair in internal/mcp/query_tool.go).
+	// The column backs the UNIQUE constraint and is also read in SQL by
+	// streamHeadHTTPVersionExpr, which picks the modified variant at the
+	// head sequence. Both copies are written from the same value here, so
+	// the two read paths cannot disagree.
 	variant := ""
 	if f.Metadata != nil {
 		variant = f.Metadata["variant"]
