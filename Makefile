@@ -19,7 +19,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 # `make clean` still works when the file is broken.
 GOLANGCI_LINT_VERSION := $(shell cat .golangci-lint-version 2>/dev/null)
 
-.PHONY: build build-ui ensure-ui dev-ui test test-fast test-pkg test-ui test-e2e test-e2e-smoke test-cover vet lint lint-workflows fmt clean bench bench-compare
+.PHONY: build build-ui ensure-ui dev-ui test test-fast test-pkg test-depsec test-ui test-e2e test-e2e-smoke test-cover vet lint lint-workflows fmt clean bench bench-compare
 
 build: build-ui vet
 	go build -ldflags "$(LDFLAGS)" -o $(BINDIR)/$(BINARY) ./cmd/yorishiro-proxy
@@ -57,6 +57,17 @@ test-pkg: ensure-ui
 	@if [ -z "$$PKG" ]; then echo "usage: make test-pkg PKG=./internal/<pkg>/... [RUN=<regexp>] [TAGS=<build tags>]" >&2; exit 2; fi
 	@for p in $$PKG; do case "$$p" in -*) echo "test-pkg: PKG must list packages, not flags: $$p" >&2; exit 2;; esac; done
 	GODEBUG=http2xconnect=1 go test -race -v -timeout 10m -tags "$$TAGS" -run "$$RUN" $$PKG
+
+# test-depsec gates tools/depsec, the separate stdlib-only Go module that drives
+# the weekly Dependabot security-update workflow (not shipped in the binary).
+# Run by ci.yml's `depsec-tool` job. Deliberately no `ensure-ui` prerequisite:
+# that job installs only Go, and depsec does not embed the Web UI. The gofmt
+# check is scoped to tools/depsec; the root `lint` target covers the rest.
+test-depsec:
+	@echo "==> gofmt check (tools/depsec)"
+	@cd tools/depsec && { test -z "$$(gofmt -l .)" || (echo "not gofmt-clean:" && gofmt -l . && exit 1); }
+	cd tools/depsec && go vet ./...
+	cd tools/depsec && go test -race ./...
 
 # test-e2e-smoke is the merge-gate tier: M46 harness scenarios (USK-722–USK-727)
 # plus a representative subset of connector / layer e2e tests covering each

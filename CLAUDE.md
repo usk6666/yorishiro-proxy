@@ -157,6 +157,7 @@ make test           # fast tier: ensure-ui → go test -race -v ./... (unit test
 make test-fast      # alias for `make test`; explicit naming for the fast tier (USK-728)
 make test-pkg PKG=./internal/<pkg>/... [RUN=<regexp>] [TAGS=e2e]
                     # one package/pattern only — the TDD red/green loop
+make test-depsec    # tools/depsec module only: gofmt check + go vet + go test -race (no UI needed)
 make test-e2e-smoke # smoke tier (merge gate): ensure-ui → tools/smokeselect → go test -race -v -tags 'e2e e2e_smoke'
                     #   -run <smoke tests only> <smoke packages>  (untagged tests are NOT re-run; USK-1209)
 make test-e2e       # full tier (nightly): ensure-ui → go test -race -v -tags e2e ./...

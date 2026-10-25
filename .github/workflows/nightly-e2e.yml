@@ -67,7 +67,7 @@ jobs:
       - name: Build UI
         run: make build-ui
 
-      # Go through the Makefile, not a hand-copied `go test` line. The full
+      # Go through the Makefile, not a hand-copied test command. The full
       # tier additionally needs GODEBUG=http2xconnect=1 (RFC 8441 extended
       # CONNECT in golang.org/x/net/http2, read at package init) and the
       # Makefile is where that requirement is recorded. This step used to

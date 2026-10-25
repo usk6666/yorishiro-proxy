@@ -136,7 +136,7 @@ jobs:
           name: ui-dist
           path: internal/mcp/webui/dist/
 
-      # Through the Makefile, not a hand-copied `go test` line (USK-1058): the
+      # Through the Makefile, not a hand-copied test command (USK-1058): the
       # Makefile is the single source of truth for what a tier means. `make test`
       # is the fast tier -- every untagged test, with `-timeout 4m` kept as the
       # per-package budget sentinel (USK-1048). `ensure-ui` no-ops because the
@@ -150,7 +150,7 @@ jobs:
   #
   # It runs ONLY the tests declared in plain `//go:build e2e` files (USK-1209).
   # `-tags 'e2e e2e_smoke'` also compiles every untagged test, so the old
-  # `go test ./...` line re-ran the entire fast tier that the `test` job above
+  # unfiltered `./...` test line re-ran the entire fast tier that the `test` job above
   # already runs -- ~4,600 top-level tests twice per PR. The Makefile recipe selects the
   # smoke packages and test names with tools/smokeselect and fails loudly if
   # that selection errors or comes back empty. Through the Makefile for the
@@ -203,7 +203,7 @@ jobs:
     needs: setup
     if: github.event_name == 'pull_request' && github.head_ref == 'automated/security-updates'
     runs-on: ubuntu-latest
-    # 45, not 15: `make test-e2e` passes `-timeout 30m` to `go test`, and this
+    # 45, not 15: `make test-e2e` passes `-timeout 30m` to the test run, and this
     # repo lets the inner timeout fire first so a hang reports "test timed out"
     # with a goroutine dump instead of an opaque job kill (same rationale as the
     # lint job above). Mirrors nightly-e2e.yml.
@@ -230,7 +230,7 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      # Through the Makefile, not a hand-copied `go test` line: the full tier
+      # Through the Makefile, not a hand-copied test command: the full tier
       # needs GODEBUG=http2xconnect=1 and the Makefile is where that is recorded
       # (USK-1058). `ensure-ui` no-ops because the artifact above populated
       # dist/ — same pattern as the `lint` job.
@@ -304,12 +304,12 @@ jobs:
         with:
           go-version: "1.25.x"
 
+      # Through the Makefile for the USK-1058 reason: `make test-depsec` runs
+      # the gofmt check, vet and race tests from tools/depsec. It has no
+      # `ensure-ui` prerequisite, so this job needs neither pnpm nor the
+      # ui-dist artifact.
       - name: Vet + test depsec
-        working-directory: tools/depsec
-        run: |
-          test -z "$(gofmt -l .)" || (echo "not gofmt-clean:" && gofmt -l . && exit 1)
-          go vet ./...
-          go test -race ./...
+        run: make test-depsec
 
   # Static checks on the workflow files themselves: pinact (every `uses:` is a
   # full commit SHA whose `# vX.Y.Z` comment names that commit), ghalint

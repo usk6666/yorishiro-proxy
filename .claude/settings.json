@@ -113,6 +113,7 @@
       "Bash(make lint-workflows)",
       "Bash(make test)",
       "Bash(make test-cover)",
+      "Bash(make test-depsec)",
       "Bash(make test-e2e)",
       "Bash(make test-e2e-smoke)",
       "Bash(make test-fast)",
