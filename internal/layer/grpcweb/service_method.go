@@ -34,15 +34,6 @@ func parseServiceMethod(path string) (service, method string, ok bool) {
 	return p[:idx], p[idx+1:], true
 }
 
-// buildGRPCWebPath is the inverse of parseServiceMethod. Empty
-// service+method yields "/" so the request-target remains valid.
-func buildGRPCWebPath(service, method string) string {
-	if service == "" && method == "" {
-		return "/"
-	}
-	return "/" + service + "/" + method
-}
-
 // pathForStart resolves the request path for a Send-side Start, with the
 // same precedence rule as internal/layer/grpc.pathForStart (USK-1053;
 // adopted here by USK-1069).
@@ -59,11 +50,9 @@ func buildGRPCWebPath(service, method string) string {
 // The query component is not part of the result: it rides on
 // GRPCStartMessage.RawQuery → HTTPMessage.RawQuery and the inner HTTP
 // Layer rejoins it.
+//
+// The rule itself lives in envelope.GRPCStartWirePath, shared with the
+// native gRPC Layer and the TargetScope request check (USK-1236).
 func pathForStart(m *envelope.GRPCStartMessage) string {
-	if m.Path != "" {
-		if _, _, ok := parseServiceMethod(m.Path); !ok {
-			return m.Path
-		}
-	}
-	return buildGRPCWebPath(m.Service, m.Method)
+	return envelope.GRPCStartWirePath(m)
 }
