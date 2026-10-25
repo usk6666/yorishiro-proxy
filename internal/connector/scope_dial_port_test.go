@@ -122,6 +122,12 @@ func TestNameLegs_NonStrictDialTargetPortFailsClosed(t *testing.T) {
 		if allowed, _ := s.CheckNameLeg("http", "127.0.0.1", 80, "/", dial); allowed {
 			t.Errorf("CheckNameLeg(127.0.0.1:80, dial %q) allowed, want blocked", dial)
 		}
+		if allowed, _ := s.CheckAuthorityDenyOnly("http", "127.0.0.1", "/", dial); allowed {
+			t.Errorf("CheckAuthorityDenyOnly(127.0.0.1, dial %q) allowed, want blocked", dial)
+		}
+	}
+	if allowed, reason := s.CheckAuthorityDenyOnly("http", "127.0.0.1", "/", "127.0.0.1:9090"); !allowed {
+		t.Errorf("CheckAuthorityDenyOnly(127.0.0.1, dial 127.0.0.1:9090) = blocked (%q), want allowed", reason)
 	}
 	// Strict dial targets keep their verdicts.
 	if allowed, _ := s.CheckHostHeader("http", "127.0.0.1", "/", "127.0.0.1:008080"); allowed {
