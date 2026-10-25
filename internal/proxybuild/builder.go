@@ -985,7 +985,7 @@ func runHTTP1ExchangeLoop(
 	// per-exchange dial closure can detect a stale keep-alive conn
 	// (server idle FIN / RST) and transparently redial. closeAll on
 	// CONNECT exit tears down every redial step (original + successors).
-	chain := newH1Chain(upstreamH1, connector.UpstreamTargetOf(stack, target), deps.BuildConfig, logger, deps.H1UpstreamMetrics)
+	chain := newH1Chain(upstreamH1, connector.UpstreamTargetOf(stack, target), connector.UpstreamTLSShapeOf(stack), deps.BuildConfig, logger, deps.H1UpstreamMetrics)
 	defer chain.closeAll()
 	var wg sync.WaitGroup
 	for {

@@ -122,7 +122,7 @@ func TestH1Chain_Redial_UpstreamTargetSplit(t *testing.T) {
 		http1.WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "c1", TargetHost: ut.Dial}),
 	)
 	cfg := &connector.BuildConfig{InsecureSkipVerify: true}
-	chain := newH1Chain(initial, ut, cfg, nil, nil)
+	chain := newH1Chain(initial, ut, connector.UpstreamTLSProfiled, cfg, nil, nil)
 	defer chain.closeAll()
 
 	if _, err := chain.Redial(context.Background()); err != nil {

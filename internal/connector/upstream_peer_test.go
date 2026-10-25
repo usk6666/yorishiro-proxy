@@ -252,7 +252,7 @@ func TestRedialUpstreamH1_RefreshesServerAddr(t *testing.T) {
 	)
 	defer stale.Close()
 
-	fresh, err := RedialUpstreamH1(context.Background(), SameUpstreamTarget(freshAddr), stale, &BuildConfig{}, 1)
+	fresh, err := RedialUpstreamH1(context.Background(), SameUpstreamTarget(freshAddr), UpstreamTLSProfiled, stale, &BuildConfig{}, 1)
 	if err != nil {
 		t.Fatalf("RedialUpstreamH1: %v", err)
 	}

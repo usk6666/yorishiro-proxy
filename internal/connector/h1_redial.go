@@ -33,10 +33,23 @@ import (
 // CONNECT inner) is redialed over plain TCP, a scheme="https" Layer over
 // TLS. See redialUpstreamH1Conn.
 //
-// ALPN (TLS redial only): offers only "http/1.1". By definition the prior negotiation
-// produced http/1.1 (we were holding a *http1.Layer); re-negotiating to
-// h2 would invalidate the Layer type already wired into the client side
-// of the stack.
+// ClientHello (TLS redial only): shape is how the stack's first upstream
+// connection was dialed (UpstreamTLSShapeOf), so the redial keeps its
+// shape:
+//
+//   - UpstreamTLSProfiled (zero value; CONNECT / SOCKS5 MITM and
+//     ALPN-carrying transparent MITM): the configured uTLS profile
+//     offering only "http/1.1". By definition the prior negotiation
+//     produced http/1.1 (we were holding a *http1.Layer); re-offering h2
+//     could negotiate h2 onto a stack whose client side is wired for an
+//     *http1.Layer. A first offer of [h2 http/1.1] is therefore narrowed
+//     to [http/1.1] deliberately; a solo [http/1.1] offer is reproduced
+//     as is.
+//   - UpstreamTLSStandardNoALPN (transparent MITM of a ClientHello with no
+//     ALPN extension): Go's standard crypto/tls with no ALPN extension,
+//     exactly like the first dial (dialUpstreamStandardNoALPN) — adding
+//     an http/1.1 offer or the uTLS fingerprint the client never sent
+//     would break MITM principle 1.
 //
 // ut carries the stack's dial target / TLS authority split (USK-1315;
 // UpstreamTargetOf): the fresh conn dials ut.Dial and a TLS redial sends the
@@ -54,6 +67,7 @@ import (
 func RedialUpstreamH1(
 	ctx context.Context,
 	ut UpstreamTarget,
+	shape UpstreamTLSShape,
 	stale *http1.Layer,
 	cfg *BuildConfig,
 	generation int,
@@ -73,7 +87,7 @@ func RedialUpstreamH1(
 		return nil, fmt.Errorf("connector: RedialUpstreamH1: invalid TLS authority %q", ut.tlsAuthority())
 	}
 
-	upstreamConn, err := redialUpstreamH1Conn(ctx, ut, host, stale.Scheme(), cfg)
+	upstreamConn, err := redialUpstreamH1Conn(ctx, ut, shape, host, stale.Scheme(), cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -110,8 +124,9 @@ func RedialUpstreamH1(
 // An "http" Layer comes from BuildPlainHTTPStack (plain-HTTP forward proxy
 // or plaintext CONNECT inner) and sits on plain TCP, so the redial is a
 // plain dial — a TLS dial to a plaintext upstream would only fail. Any
-// other scheme is the CONNECT MITM "https" stack and is redialed over TLS.
-func redialUpstreamH1Conn(ctx context.Context, ut UpstreamTarget, host, scheme string, cfg *BuildConfig) (net.Conn, error) {
+// other scheme is a TLS MITM "https" stack and is redialed over TLS in the
+// stack's first-dial shape (see RedialUpstreamH1).
+func redialUpstreamH1Conn(ctx context.Context, ut UpstreamTarget, shape UpstreamTLSShape, host, scheme string, cfg *BuildConfig) (net.Conn, error) {
 	target := ut.Dial
 	if scheme == "http" {
 		return dialPlainUpstream(ContextWithDialTarget(ctx, target), target, cfg)
@@ -120,6 +135,14 @@ func redialUpstreamH1Conn(ctx context.Context, ut UpstreamTarget, host, scheme s
 	hostTLS, err := resolvePerHostTLS(ut.tlsAuthority(), cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	if shape == UpstreamTLSStandardNoALPN {
+		upstreamConn, _, err := dialUpstreamStandardNoALPN(ctx, ut, host, hostTLS, cfg)
+		if err != nil {
+			return nil, err
+		}
+		return upstreamConn, nil
 	}
 
 	// Offer only http/1.1: the prior negotiation produced http/1.1 and the

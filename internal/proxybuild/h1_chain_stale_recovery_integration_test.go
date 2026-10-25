@@ -113,7 +113,7 @@ func TestHTTP1StaleConnRecovery_AfterIdleClose(t *testing.T) {
 	}
 	defer initial.Close()
 
-	chain := newH1Chain(initial, connector.SameUpstreamTarget(target), cfg, nil, nil)
+	chain := newH1Chain(initial, connector.SameUpstreamTarget(target), connector.UpstreamTLSProfiled, cfg, nil, nil)
 	defer chain.closeAll()
 
 	// First exchange: HealthCheck on a freshly dialed conn returns
@@ -202,7 +202,7 @@ func dialInitialUpstream(t *testing.T, target string, cfg *connector.BuildConfig
 		http1.WithEnvelopeContext(envCtxTmpl),
 	)
 	defer stale.Close()
-	return connector.RedialUpstreamH1(context.Background(), connector.SameUpstreamTarget(target), stale, cfg, 0)
+	return connector.RedialUpstreamH1(context.Background(), connector.SameUpstreamTarget(target), connector.UpstreamTLSProfiled, stale, cfg, 0)
 }
 
 // buildTestBuildConfig returns a BuildConfig that lets the redial

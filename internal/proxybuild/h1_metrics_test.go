@@ -370,7 +370,7 @@ func TestH1Chain_Metrics_HealthcheckPass(t *testing.T) {
 	defer initial.Close()
 
 	m := NewH1UpstreamMetrics()
-	chain := newH1Chain(initial, connector.SameUpstreamTarget("example.com:443"), nil, discardLogger(), m)
+	chain := newH1Chain(initial, connector.SameUpstreamTarget("example.com:443"), connector.UpstreamTLSProfiled, nil, discardLogger(), m)
 	defer chain.closeAll()
 
 	got, err := chain.EnsureFresh(context.Background())
@@ -401,7 +401,7 @@ func TestH1Chain_Metrics_EnsureFreshDialFail(t *testing.T) {
 	_ = client.Close()
 
 	m := NewH1UpstreamMetrics()
-	chain := newH1Chain(initial, connector.SameUpstreamTarget("127.0.0.1:1"), nil, discardLogger(), m) // nil cfg trips defensive guard
+	chain := newH1Chain(initial, connector.SameUpstreamTarget("127.0.0.1:1"), connector.UpstreamTLSProfiled, nil, discardLogger(), m) // nil cfg trips defensive guard
 	defer chain.closeAll()
 
 	// Poll until HealthCheck flips to stale.
@@ -441,7 +441,7 @@ func TestH1Chain_Metrics_CloseAllReleasesGauge(t *testing.T) {
 	// Don't defer initial.Close() — chain.closeAll handles it.
 
 	m := NewH1UpstreamMetrics()
-	chain := newH1Chain(initial, connector.SameUpstreamTarget("example.com:443"), nil, discardLogger(), m)
+	chain := newH1Chain(initial, connector.SameUpstreamTarget("example.com:443"), connector.UpstreamTLSProfiled, nil, discardLogger(), m)
 
 	// Simulate 2 successful redials by directly bumping the gauge
 	// under c.mu (avoids needing a working dial).
