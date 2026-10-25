@@ -345,7 +345,7 @@ func TestExportHAR_WebSocket(t *testing.T) {
 					Direction: "send",
 					Timestamp: now.Add(100 * time.Millisecond),
 					Body:      []byte("hello"),
-					Metadata:  map[string]string{"opcode": "1"},
+					Metadata:  map[string]string{"ws_opcode": "1"},
 				},
 				// WebSocket message: receive.
 				{
@@ -355,7 +355,7 @@ func TestExportHAR_WebSocket(t *testing.T) {
 					Direction: "receive",
 					Timestamp: now.Add(200 * time.Millisecond),
 					Body:      []byte("world"),
-					Metadata:  map[string]string{"opcode": "1"},
+					Metadata:  map[string]string{"ws_opcode": "1"},
 				},
 			},
 		},
@@ -470,7 +470,7 @@ func TestExportHAR_WebSocket_CanonicalProtocol(t *testing.T) {
 					Direction: "send",
 					Timestamp: now.Add(50 * time.Millisecond),
 					Body:      []byte("ping"),
-					Metadata:  map[string]string{"opcode": "1"},
+					Metadata:  map[string]string{"ws_opcode": "1"},
 				},
 				// WS text frame: server → client.
 				{
@@ -480,7 +480,7 @@ func TestExportHAR_WebSocket_CanonicalProtocol(t *testing.T) {
 					Direction: "receive",
 					Timestamp: now.Add(100 * time.Millisecond),
 					Body:      []byte("pong"),
-					Metadata:  map[string]string{"opcode": "1"},
+					Metadata:  map[string]string{"ws_opcode": "1"},
 				},
 			},
 		},

@@ -84,7 +84,13 @@ export function MessageList({
 }: MessageListProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  const isGrpc = protocol === "gRPC" || protocol === "gRPC-Web";
+  // Canonical Envelope.Protocol spellings ("grpc" / "grpc-web") plus the
+  // legacy display spellings.
+  const isGrpc =
+    protocol === "grpc" ||
+    protocol === "grpc-web" ||
+    protocol === "gRPC" ||
+    protocol === "gRPC-Web";
 
   // Pagination info
   const totalPages = Math.max(1, Math.ceil(total / limit));
@@ -143,12 +149,12 @@ export function MessageList({
                   </td>
                   {isGrpc && (
                     <td className="sd-message-meta">
-                      {msg.metadata?.service ?? "--"}
+                      {msg.metadata?.grpc_service ?? "--"}
                     </td>
                   )}
                   {isGrpc && (
                     <td className="sd-message-meta">
-                      {msg.metadata?.method ?? "--"}
+                      {msg.metadata?.grpc_method ?? "--"}
                     </td>
                   )}
                   <td className="sd-message-body-preview">

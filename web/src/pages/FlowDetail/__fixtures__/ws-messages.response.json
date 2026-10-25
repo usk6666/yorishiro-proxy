@@ -1,0 +1,94 @@
+{
+  "count": 5,
+  "messages": [
+    {
+      "body": "GET /echo HTTP/1.1\r\nHost: echo.example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+      "body_encoding": "text",
+      "direction": "send",
+      "headers": {
+        "Connection": [
+          "Upgrade"
+        ],
+        "Host": [
+          "echo.example.com"
+        ],
+        "Upgrade": [
+          "websocket"
+        ]
+      },
+      "id": "msg-0",
+      "metadata": {
+        "protocol": "http"
+      },
+      "method": "GET",
+      "sequence": 0,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://echo.example.com/echo"
+    },
+    {
+      "body": "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+      "body_encoding": "text",
+      "direction": "receive",
+      "headers": {
+        "Connection": [
+          "Upgrade"
+        ],
+        "Upgrade": [
+          "websocket"
+        ]
+      },
+      "id": "msg-1",
+      "metadata": {
+        "protocol": "http"
+      },
+      "sequence": 1,
+      "status_code": 101,
+      "timestamp": "2026-01-01T00:00:00Z"
+    },
+    {
+      "body": "hello",
+      "body_encoding": "text",
+      "direction": "send",
+      "id": "msg-2",
+      "metadata": {
+        "protocol": "ws",
+        "ws_compressed": "false",
+        "ws_fin": "true",
+        "ws_opcode": "1"
+      },
+      "sequence": 2,
+      "timestamp": "2026-01-01T00:00:00Z"
+    },
+    {
+      "body": "AAEC/w==",
+      "body_encoding": "base64",
+      "direction": "receive",
+      "id": "msg-3",
+      "metadata": {
+        "protocol": "ws",
+        "ws_compressed": "false",
+        "ws_fin": "true",
+        "ws_opcode": "2"
+      },
+      "sequence": 3,
+      "timestamp": "2026-01-01T00:00:00Z"
+    },
+    {
+      "body": "A+hieWU=",
+      "body_encoding": "base64",
+      "direction": "receive",
+      "id": "msg-4",
+      "metadata": {
+        "protocol": "ws",
+        "ws_close_code": "1000",
+        "ws_close_reason": "bye",
+        "ws_compressed": "false",
+        "ws_fin": "true",
+        "ws_opcode": "8"
+      },
+      "sequence": 4,
+      "timestamp": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "total": 5
+}

@@ -405,7 +405,7 @@ export function GrpcPanel({ flow }: GrpcPanelProps) {
   const method = summary.method ?? "";
   const grpcStatus = summary.grpc_status ?? "";
   const grpcStatusName = summary.grpc_status_name ?? "";
-  const isGrpcWeb = flow.protocol === "gRPC-Web";
+  const isGrpcWeb = flow.protocol === "grpc-web" || flow.protocol === "gRPC-Web";
   const panelTitle = isGrpcWeb ? "gRPC-Web Details" : "gRPC Details";
 
   return (
