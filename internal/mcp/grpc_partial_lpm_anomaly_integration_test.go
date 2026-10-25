@@ -160,8 +160,16 @@ func TestQuery_GRPCPartialLPMAnomaly_ProductionWiring(t *testing.T) {
 	if got := found.Metadata["grpc_anomaly_lpm_truncated"]; got != "declared=64 observed=10" {
 		t.Errorf("grpc_anomaly_lpm_truncated = %q, want %q", got, "declared=64 observed=10")
 	}
-	if got := decodeQueryBody(t, found.Body, found.BodyEncoding); !bytes.Equal(got, wire) {
-		t.Errorf("message body (raw fallback) = %x, want %x", got, wire)
+	// USK-1344: the overlay row has no L7 body; its frame bytes are in
+	// raw_bytes (base64), never in body.
+	if found.Body != "" {
+		t.Errorf("message body = %q, want empty (overlay frame bytes belong in raw_bytes)", found.Body)
+	}
+	if found.RawBytesEncoding != "base64" {
+		t.Errorf("raw_bytes_encoding = %q, want base64", found.RawBytesEncoding)
+	}
+	if got := decodeQueryBody(t, found.RawBytes, found.RawBytesEncoding); !bytes.Equal(got, wire) {
+		t.Errorf("message raw_bytes = %x, want %x", got, wire)
 	}
 	if found.BodyDecoded != "" || found.BodyDecodeAnomaly != nil {
 		t.Errorf("body_decoded = %q / anomaly %+v; the raw-bytes row must not be proto-decoded", found.BodyDecoded, found.BodyDecodeAnomaly)

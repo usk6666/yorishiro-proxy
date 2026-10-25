@@ -6,7 +6,7 @@
   "message_count": 3,
   "message_preview": [
     {
-      "body": "GET /events HTTP/1.1\r\nHost: sse.example.com\r\nAccept: text/event-stream\r\n\r\n",
+      "body": "",
       "body_encoding": "text",
       "direction": "send",
       "headers": {
@@ -22,12 +22,15 @@
         "protocol": "http"
       },
       "method": "GET",
+      "raw_bytes": "R0VUIC9ldmVudHMgSFRUUC8xLjENCkhvc3Q6IHNzZS5leGFtcGxlLmNvbQ0KQWNjZXB0OiB0ZXh0L2V2ZW50LXN0cmVhbQ0KDQo=",
+      "raw_bytes_encoding": "base64",
+      "raw_bytes_size": 74,
       "sequence": 0,
       "timestamp": "2026-01-01T00:00:00Z",
       "url": "https://sse.example.com/events"
     },
     {
-      "body": "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n",
+      "body": "",
       "body_encoding": "text",
       "direction": "receive",
       "headers": {
@@ -39,6 +42,9 @@
       "metadata": {
         "protocol": "http"
       },
+      "raw_bytes": "SFRUUC8xLjEgMjAwIE9LDQpDb250ZW50LVR5cGU6IHRleHQvZXZlbnQtc3RyZWFtDQoNCg==",
+      "raw_bytes_encoding": "base64",
+      "raw_bytes_size": 52,
       "sequence": 1,
       "status_code": 200,
       "timestamp": "2026-01-01T00:00:00Z"

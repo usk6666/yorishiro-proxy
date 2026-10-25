@@ -62,12 +62,14 @@ The original wire-form body is always returned in `*_body` regardless of this fl
 > **Schemaless gRPC heuristic ambiguity**: the proto wire format encodes embedded messages, packed-repeated varints, and raw bytes with the same wire type (length-delimited). The schemaless decoder picks one interpretation heuristically (printable UTF-8 → `String`; otherwise embedded → repeated → bytes); ambiguous payloads may surface as the wrong type. Register a schema via the `grpc_schema` tool to switch the affected service to schema-aware (`proto-json`) decoding; until then, use the raw wire bytes (`body` with `body_encoding="base64"`) when the schemaless projection is ambiguous.
 
 ### include_bodies (boolean, optional, default `true`)
-Include message body fields in the `flow` and `messages` responses. Set to `false` to suppress every body field (`*_body`, `*_body_encoding`, `*_body_decoded*`, `raw_request`, `raw_response`) and return metadata only. Headers, status, method, URL, timestamps, and the record-time `*_body_truncated` flag are preserved.
+Include message body fields in the `flow` and `messages` responses. Set to `false` to suppress every body field (`*_body`, `*_body_encoding`, `*_body_decoded*`, `raw_request`, `raw_response`, and the per-message `raw_bytes` / `raw_bytes_encoding`) and return metadata only. Headers, status, method, URL, timestamps, and the record-time `*_body_truncated` flag are preserved.
 
 Mirrors `manage.export_flows.include_bodies`. Useful when a single flow's body is large enough to push the MCP tool response over the per-tool token limit; the response then advertises that suppression occurred via `*_body_truncated_by_query=true` and `*_body_original_size` for each side, so the caller knows what was elided.
 
 ### body_max_bytes (integer, optional, default `0`)
 Cap each per-side body — and each per-side decoded body, independently — to at most this many bytes. `0` disables the cap. Truncation is applied to the body **byte slice before base64 encoding** so the response never base64-mid-quadruple-splits.
+
+The same cap applies to the per-message `raw_bytes` of a bodyless message (see [messages](#messages)); `raw_bytes_size` then still reports the stored length.
 
 When the cap fires, the response sets `*_body_truncated_by_query=true` and reports the pre-truncation byte length under `*_body_original_size` (wire-form side) and / or `*_body_decoded_original_size` (decoded side). Headers / metadata are unaffected. Distinct from the record-time `*_body_truncated` flag, which reflects the storage-time `MaxBodySize` cap from the pipeline `RecordStep`.
 
@@ -140,9 +142,11 @@ Get paginated messages within a flow. Supports direction filtering for streaming
 
 Requires: `id` (flow ID). Supports `limit`, `offset`, and `filter.direction`.
 
-Returns: `messages[]` (id, sequence, direction, method, url, status_code, headers, body, body_encoding, metadata, timestamp, body_truncated, optionally body_truncated_by_query / body_original_size / body_decoded_original_size when `include_bodies` / `body_max_bytes` apply), `count`, `total`, optional `advisory`.
+Returns: `messages[]` (id, sequence, direction, method, url, status_code, headers, body, body_encoding, metadata, timestamp, body_truncated, optionally raw_bytes / raw_bytes_encoding / raw_bytes_size for a bodyless message, optionally body_truncated_by_query / body_original_size / body_decoded_original_size when `include_bodies` / `body_max_bytes` apply), `count`, `total`, optional `advisory`.
 
+- **body**: The L7 body only — never the raw wire bytes. A message without a body (an HTTP/1.x or HTTP/2 `GET`, a WebSocket upgrade or `101`, gRPC Start / End, a WebSocket frame with an empty payload) has `body=""` and no `body_original_size`. Raw TCP chunks carry their bytes in `body`.
 - **body_encoding**: `"text"` for UTF-8 safe bodies, `"base64"` for binary content.
+- **raw_bytes** / **raw_bytes_encoding** / **raw_bytes_size**: Present only on a message that has no body but has recorded wire bytes. `raw_bytes` is the recorded wire bytes, always base64 (`raw_bytes_encoding="base64"`) — e.g. the HTTP/1.x request head, or the HPACK-encoded HEADERS block for HTTP/2 / gRPC. `raw_bytes_size` is the recorded length. Wire-level overlay rows (`filter.wire_level` = `h2-frame` / `h1-chunk` / `grpc-lpm-frame` / `grpcweb-base64`) carry their frame bytes here, not in `body`. Body-bearing messages do not repeat their wire bytes. `include_bodies=false` omits `raw_bytes` (keeps `raw_bytes_size`); `body_max_bytes` caps it and sets `body_truncated_by_query=true`. Output Filter masking applies (call `docs(topic="security")`). The same fields appear on `flow`'s `message_preview` entries.
 - **metadata**: Protocol-specific fields (e.g. WebSocket `opcode`, gRPC `service`/`method`/`grpc_status`).
 - **body_truncated**: Record-time truncation flag mirrored from `Flow.BodyTruncated` — set when the storage-time `MaxBodySize` cap fired.
 - **body_truncated_by_query**: Response-time truncation flag set when `include_bodies=false` or `body_max_bytes=N` capped the bytes returned to the caller. Distinct from `body_truncated`.

@@ -3,7 +3,6 @@ package mcp
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"net/url"
 	"strings"
 	"testing"
@@ -240,61 +239,40 @@ func TestQueryMessages_BodyMaxBytes_BelowCapNoTruncation(t *testing.T) {
 	}
 }
 
-// TestQueryMessages_BodyMaxBytes_BinaryRawBytesPath verifies the RawBytes
-// fallback (binary protocols with empty Body) is also capped.
+// TestQueryMessages_BodyMaxBytes_BinaryRawBytesPath verifies body_max_bytes
+// also caps raw_bytes on a bodyless message (USK-1344). Spec change: the
+// RawBytes→body fallback is removed, so the capped bytes are reported in
+// raw_bytes and `body` stays empty; raw_bytes_size carries the stored length
+// and body_original_size stays unset. The 5000-byte gRPC Start HEADERS block
+// is invented and recorded through the real RecordStep.
 func TestQueryMessages_BodyMaxBytes_BinaryRawBytesPath(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	cs := setupQueryTestSession(t, store)
 
 	raw := bytes.Repeat([]byte{0xff}, 5000)
-	ctx := context.Background()
-	if err := store.SaveStream(ctx, &flow.Stream{
-		ID:        "m-bin",
-		ConnID:    "conn-m-bin",
-		Protocol:  "ws",
-		State:     "complete",
-		Timestamp: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("SaveStream: %v", err)
-	}
-	if err := store.SaveFlow(ctx, &flow.Flow{
-		ID:        "m-bin-1",
-		StreamID:  "m-bin",
-		Sequence:  0,
-		Direction: "send",
-		Timestamp: time.Now().UTC(),
-		RawBytes:  raw,
-	}); err != nil {
-		t.Fatalf("SaveFlow: %v", err)
-	}
+	recordEnvelopesForQuery(t, store, grpcStartEnvelope("m-bin", raw))
+	cs := setupQueryTestSession(t, store)
 
-	result := callQuery(t, cs, queryInput{Resource: "messages", ID: "m-bin", BodyMaxBytes: 256})
-	if result.IsError {
-		t.Fatalf("query error: %v", result.Content)
-	}
-	var out queryMessagesResult
-	unmarshalQueryResult(t, result, &out)
-
+	out := queryMessagesForTest(t, cs, queryInput{ID: "m-bin", BodyMaxBytes: 256})
 	if len(out.Messages) != 1 {
 		t.Fatalf("messages len = %d, want 1", len(out.Messages))
 	}
 	got := out.Messages[0]
-	if got.BodyEncoding != "base64" {
-		t.Errorf("BodyEncoding = %q, want base64 (binary raw bytes)", got.BodyEncoding)
+	if got.Body != "" {
+		t.Errorf("body = %q, want empty (raw bytes are not the L7 body)", got.Body)
 	}
-	decoded, err := base64.StdEncoding.DecodeString(got.Body)
-	if err != nil {
-		t.Fatalf("base64 decode: %v", err)
+	if got.BodyOriginalSize != 0 {
+		t.Errorf("BodyOriginalSize = %d, want 0", got.BodyOriginalSize)
 	}
+	decoded := decodeRawBytesField(t, got)
 	if len(decoded) != 256 {
-		t.Errorf("decoded length = %d, want 256", len(decoded))
+		t.Errorf("decoded raw_bytes length = %d, want 256", len(decoded))
 	}
 	if !got.BodyTruncatedByQuery {
 		t.Errorf("BodyTruncatedByQuery = false, want true")
 	}
-	if got.BodyOriginalSize != len(raw) {
-		t.Errorf("BodyOriginalSize = %d, want %d", got.BodyOriginalSize, len(raw))
+	if got.RawBytesSize != len(raw) {
+		t.Errorf("RawBytesSize = %d, want %d", got.RawBytesSize, len(raw))
 	}
 }
 

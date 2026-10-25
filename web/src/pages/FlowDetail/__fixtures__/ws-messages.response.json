@@ -2,7 +2,7 @@
   "count": 5,
   "messages": [
     {
-      "body": "GET /echo HTTP/1.1\r\nHost: echo.example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+      "body": "",
       "body_encoding": "text",
       "direction": "send",
       "headers": {
@@ -21,12 +21,15 @@
         "protocol": "http"
       },
       "method": "GET",
+      "raw_bytes": "R0VUIC9lY2hvIEhUVFAvMS4xDQpIb3N0OiBlY2hvLmV4YW1wbGUuY29tDQpVcGdyYWRlOiB3ZWJzb2NrZXQNCkNvbm5lY3Rpb246IFVwZ3JhZGUNCg0K",
+      "raw_bytes_encoding": "base64",
+      "raw_bytes_size": 87,
       "sequence": 0,
       "timestamp": "2026-01-01T00:00:00Z",
       "url": "https://echo.example.com/echo"
     },
     {
-      "body": "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+      "body": "",
       "body_encoding": "text",
       "direction": "receive",
       "headers": {
@@ -41,6 +44,9 @@
       "metadata": {
         "protocol": "http"
       },
+      "raw_bytes": "SFRUUC8xLjEgMTAxIFN3aXRjaGluZyBQcm90b2NvbHMNClVwZ3JhZGU6IHdlYnNvY2tldA0KQ29ubmVjdGlvbjogVXBncmFkZQ0KDQo=",
+      "raw_bytes_encoding": "base64",
+      "raw_bytes_size": 77,
       "sequence": 1,
       "status_code": 101,
       "timestamp": "2026-01-01T00:00:00Z"

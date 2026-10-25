@@ -12,6 +12,7 @@ import { Table } from "../../components/ui/Table.js";
 import { isGrpcProtocol } from "../../lib/mcp/dispatch.js";
 import type { MessageEntry } from "../../lib/mcp/types.js";
 import { BodyViewer } from "./BodyViewer.js";
+import { RawBytesViewer } from "./RawBytesViewer.js";
 import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,102 @@ function truncateBody(body: string, maxLen: number = 120): string {
   if (!body) return "(empty)";
   if (body.length <= maxLen) return body;
   return body.slice(0, maxLen) + "...";
+}
+
+// ---------------------------------------------------------------------------
+// Message detail
+// ---------------------------------------------------------------------------
+
+export interface MessageDetailProps {
+  message: MessageEntry;
+  onClose: () => void;
+}
+
+/** Expanded detail of a single message (metadata, headers, body). */
+export function MessageDetail({ message, onClose }: MessageDetailProps) {
+  return (
+    <div className="sd-message-detail">
+      <div className="sd-message-detail-header">
+        <span className="sd-message-detail-title">
+          Message #{message.sequence}
+        </span>
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+
+      {/* Message metadata */}
+      {message.metadata &&
+        Object.keys(message.metadata).length > 0 && (
+          <div className="sd-message-detail-meta">
+            {Object.entries(message.metadata).map(
+              ([key, value]) => (
+                <div key={key} className="sd-meta-item">
+                  <span className="sd-meta-label">{key}</span>
+                  <span className="sd-meta-value">{value}</span>
+                </div>
+              ),
+            )}
+          </div>
+        )}
+
+      {/* Message headers */}
+      {message.headers &&
+        Object.keys(message.headers).length > 0 && (
+          <div className="sd-message-detail-section">
+            <span className="sd-message-detail-section-title">
+              Headers
+            </span>
+            <table className="sd-headers-table">
+              <thead>
+                <tr>
+                  <th>Header</th>
+                  <th>Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(message.headers).map(
+                  ([key, values]) =>
+                    values?.map((value, idx) => (
+                      <tr key={`${key}-${idx}`}>
+                        <td className="sd-header-key">{key}</td>
+                        <td className="sd-header-value">{value}</td>
+                      </tr>
+                    )),
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+      {/* Message body */}
+      <div className="sd-message-detail-section">
+        <span className="sd-message-detail-section-title">Body</span>
+        <BodyViewer
+          key={message.id}
+          body={message.body}
+          encoding={message.body_encoding}
+          truncated={
+            (message.body_truncated ?? false) ||
+            (message.body_truncated_by_query ?? false)
+          }
+          headers={message.headers}
+          bodyDecoded={message.body_decoded}
+          bodyDecodedEncoding={message.body_decoded_encoding}
+          bodyEncodingApplied={message.body_encoding_applied}
+          bodyDecodeAnomaly={message.body_decode_anomaly}
+        />
+      </div>
+
+      {/* Wire bytes of a bodyless message (USK-1344) */}
+      {message.raw_bytes && (
+        <div className="sd-message-detail-section">
+          <span className="sd-message-detail-section-title">Raw Bytes</span>
+          <RawBytesViewer rawBytes={message.raw_bytes} label="Raw Bytes" />
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -175,83 +272,10 @@ export function MessageList({
 
       {/* Expanded message detail */}
       {expandedMessage && (
-        <div className="sd-message-detail">
-          <div className="sd-message-detail-header">
-            <span className="sd-message-detail-title">
-              Message #{expandedMessage.sequence}
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setExpandedId(null)}
-            >
-              Close
-            </Button>
-          </div>
-
-          {/* Message metadata */}
-          {expandedMessage.metadata &&
-            Object.keys(expandedMessage.metadata).length > 0 && (
-              <div className="sd-message-detail-meta">
-                {Object.entries(expandedMessage.metadata).map(
-                  ([key, value]) => (
-                    <div key={key} className="sd-meta-item">
-                      <span className="sd-meta-label">{key}</span>
-                      <span className="sd-meta-value">{value}</span>
-                    </div>
-                  ),
-                )}
-              </div>
-            )}
-
-          {/* Message headers */}
-          {expandedMessage.headers &&
-            Object.keys(expandedMessage.headers).length > 0 && (
-              <div className="sd-message-detail-section">
-                <span className="sd-message-detail-section-title">
-                  Headers
-                </span>
-                <table className="sd-headers-table">
-                  <thead>
-                    <tr>
-                      <th>Header</th>
-                      <th>Value</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Object.entries(expandedMessage.headers).map(
-                      ([key, values]) =>
-                        values?.map((value, idx) => (
-                          <tr key={`${key}-${idx}`}>
-                            <td className="sd-header-key">{key}</td>
-                            <td className="sd-header-value">{value}</td>
-                          </tr>
-                        )),
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-          {/* Message body */}
-          <div className="sd-message-detail-section">
-            <span className="sd-message-detail-section-title">Body</span>
-            <BodyViewer
-              key={expandedMessage.id}
-              body={expandedMessage.body}
-              encoding={expandedMessage.body_encoding}
-              truncated={
-                (expandedMessage.body_truncated ?? false) ||
-                (expandedMessage.body_truncated_by_query ?? false)
-              }
-              headers={expandedMessage.headers}
-              bodyDecoded={expandedMessage.body_decoded}
-              bodyDecodedEncoding={expandedMessage.body_decoded_encoding}
-              bodyEncodingApplied={expandedMessage.body_encoding_applied}
-              bodyDecodeAnomaly={expandedMessage.body_decode_anomaly}
-            />
-          </div>
-        </div>
+        <MessageDetail
+          message={expandedMessage}
+          onClose={() => setExpandedId(null)}
+        />
       )}
 
       {/* Pagination */}
