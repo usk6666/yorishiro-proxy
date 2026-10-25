@@ -35,7 +35,7 @@ var oversizeTail = []byte("TAIL-UNIQUE-0123456789-abcdefghijklmnopqrstuvwxyz-END
 // oversizeTestCap; next back-references big's tail.
 func oversizeMessages() (big, next []byte) {
 	big = append(bytes.Repeat([]byte("X"), 200), oversizeTail...)
-	next = append([]byte("next message "), oversizeTail...)
+	next = append([]byte("next "), oversizeTail...)
 	return big, next
 }
 
@@ -289,7 +289,7 @@ func TestOversize_Send_AnomalyWithoutSnapshotRefused(t *testing.T) {
 // share the same LZ77 window. A modified earlier message makes them diverge,
 // so the unmodified over-cap message that follows is refused.
 func TestOversize_Send_WindowDivergenceRefused(t *testing.T) {
-	small := append([]byte("small message "), oversizeTail...)
+	small := append([]byte("small "), oversizeTail...)
 	big, _ := oversizeMessages()
 	big = append(append([]byte{}, oversizeTail...), big...)
 	comp := compressMessages(t, true, small, big)
