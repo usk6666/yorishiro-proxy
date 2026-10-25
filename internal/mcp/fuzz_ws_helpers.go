@@ -1011,25 +1011,6 @@ func (s *Server) runFuzzWSSingleVariant(ctx context.Context, plan *fuzzWSPlan, p
 		applyFuzzWSPosition(variantPlan, pos.Path, payload)
 	}
 
-	row.StreamID = variantPlan.streamID
-
-	// USK-1158: per-variant TargetScope re-check (upgrade URL + dial
-	// target), Scope → Safety like the Pipeline. The engine is live, so a
-	// policy reload or an agent `security` change since the plan-time
-	// check applies to every variant not yet sent. Recorded exactly like a
-	// safety violation below.
-	if err := s.checkResendWSScope(variantPlan); err != nil {
-		row.Error = err.Error()
-		return row, false, nil
-	}
-
-	// SafetyFilter input gating after position application, before
-	// dial. Mirrors fuzz_http per-variant semantics.
-	if v := s.checkSafetyInput(variantPlan.payload, variantPlan.upgradeURL, variantPlan.upgradeHeaders); v != nil {
-		row.Error = safetyViolationError(v)
-		return row, false, nil
-	}
-
 	variantMsg := &envelope.WSMessage{
 		Opcode:      variantPlan.opcode,
 		Fin:         variantPlan.fin,
@@ -1053,11 +1034,37 @@ func (s *Server) runFuzzWSSingleVariant(ctx context.Context, plan *fuzzWSPlan, p
 			UpgradeQuery: variantPlan.upgradeURL.RawQuery,
 		},
 	}
+
+	// USK-1158: per-variant TargetScope re-check (upgrade URL + dial
+	// target), Scope → Safety like the Pipeline. The engine is live, so a
+	// policy reload or an agent `security` change since the plan-time
+	// check applies to every variant not yet sent. Recorded exactly like a
+	// safety violation below.
+	//
+	// USK-1371: both rejections leave a metadata-only blocked_by audit
+	// Stream (sendEnv carries the ws Protocol + StreamID), so the row's
+	// stream_id names a Stream; it stays empty if nothing was recorded.
+	if err := s.checkResendWSScope(variantPlan); err != nil {
+		row.Error = err.Error()
+		row.StreamID = s.recordFuzzBlockedVariant(ctx, sendEnv, pipeline.BlockedByTargetScope, tag, err)
+		return row, false, nil
+	}
+
+	// SafetyFilter input gating after position application, before
+	// dial. Mirrors fuzz_http per-variant semantics.
+	if v := s.checkSafetyInput(variantPlan.payload, variantPlan.upgradeURL, variantPlan.upgradeHeaders); v != nil {
+		row.Error = safetyViolationError(v)
+		row.StreamID = s.recordFuzzBlockedVariant(ctx, sendEnv, pipeline.BlockedBySafetyFilter, tag, errors.New(row.Error))
+		return row, false, nil
+	}
+
 	rawBytes, err := plan.encoder(sendEnv)
 	if err != nil {
+		// Nothing was recorded for this variant: leave row.StreamID empty.
 		return row, false, fmt.Errorf("pre-encode: %w", err)
 	}
 	sendEnv.Raw = rawBytes
+	row.StreamID = variantPlan.streamID
 
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

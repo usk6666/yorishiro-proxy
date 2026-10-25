@@ -108,7 +108,7 @@ The `fuzz_macro_results` table (one row per hook invocation) keys on `(fuzz_id, 
 - `stopped_reason` — non-empty when stopped early (e.g. `"stop_on_5xx triggered"`)
 - `variants[]` — per-variant compact rows:
   - `index` (int): variant index (0-based)
-  - `stream_id` (string): variant's Stream record ID
+  - `stream_id` (string): variant's Stream record ID. For a variant blocked before it was sent (target scope, SafetyFilter, budget) it names a metadata-only audit Stream — `state: "error"`, `blocked_by: "target_scope" | "safety_filter" | "budget"`, no flows. Empty when nothing was recorded (a plugin dropped or answered the request before it was recorded).
   - `status_code` (int)
   - `body_size` (int): response body byte length (full body retrievable via `query` keyed by `stream_id`)
   - `payloads` (object): position path -> chosen payload, for correlation

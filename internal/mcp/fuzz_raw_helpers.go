@@ -864,8 +864,15 @@ func (s *Server) runFuzzRawSingleVariantWithResponse(ctx context.Context, plan *
 	// policy reload or an agent `security` change since the plan-time
 	// check applies to every variant not yet sent. Recorded exactly like a
 	// safety violation below.
+	//
+	// USK-1371: both rejections leave a metadata-only blocked_by audit
+	// Stream so the row's stream_id names a Stream; it stays empty if
+	// nothing was recorded. The audit envelope carries identity only —
+	// the variant bytes never reach the flow store.
+	blockedEnv := &envelope.Envelope{StreamID: row.StreamID, Protocol: envelope.ProtocolRaw}
 	if err := s.checkRawDialScope(plan.useTLS, plan.dialAddr); err != nil {
 		row.Error = err.Error()
+		row.StreamID = s.recordFuzzBlockedVariant(ctx, blockedEnv, pipeline.BlockedByTargetScope, tag, err)
 		return row, nil, 0, false, nil
 	}
 
@@ -876,6 +883,7 @@ func (s *Server) runFuzzRawSingleVariantWithResponse(ctx context.Context, plan *
 	// continues to the next variant.
 	if v := s.checkSafetyInput(variantBytes, nil, nil); v != nil {
 		row.Error = safetyViolationError(v)
+		row.StreamID = s.recordFuzzBlockedVariant(ctx, blockedEnv, pipeline.BlockedBySafetyFilter, tag, errors.New(row.Error))
 		return row, nil, 0, false, nil
 	}
 

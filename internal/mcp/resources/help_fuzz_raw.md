@@ -92,7 +92,7 @@ Mix-scope is supported — `pre_macro` and `post_macro` may pick their scope ind
 - `fuzz_id` (string, UUID) — primary key of the `fuzz_jobs` row created for this run. Chain with `query { resource: "fuzz_results", filter: { fuzz_id: "...", outliers_only: true } }` to surface outlier variants without re-running the fuzz job (USK-837 + USK-278, parity with USK-827 for `fuzz_http`).
 - `total_variants`, `completed_variants`, `stopped_reason`
 - `variants[]` — per-variant compact rows:
-  - `index`, `stream_id`
+  - `index`, `stream_id` — for a variant blocked before it was sent (target scope, SafetyFilter, budget) `stream_id` names a metadata-only audit Stream (`state: "error"`, `blocked_by: "target_scope" | "safety_filter" | "budget"`, no flows); empty when nothing was recorded
   - `response_size` (int): total received byte count
   - `response_chunks` (int): envelope count
   - `truncated` (bool): receive loop hit the response cap

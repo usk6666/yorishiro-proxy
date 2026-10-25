@@ -1245,6 +1245,9 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	row.StreamID = variantEnv.StreamID
 	if err := s.checkFuzzHTTPVariantScope(plan, variantMsg); err != nil {
 		row.Error = err.Error()
+		// USK-1371: leave a metadata-only blocked_by audit Stream so
+		// row.StreamID names a Stream, like the live HTTPScopeStep Drop.
+		row.StreamID = s.recordFuzzBlockedVariant(ctx, variantEnv, pipeline.BlockedByTargetScope, tag, err)
 		return row, 0, nil
 	}
 
@@ -1255,13 +1258,22 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	// run loop continues to the next variant.
 	if v := s.checkSafetyInput(variantMsg.Body, resendHTTPRequestURL(variantMsg), variantMsg.Headers); v != nil {
 		row.Error = safetyViolationError(v)
+		row.StreamID = s.recordFuzzBlockedVariant(ctx, variantEnv, pipeline.BlockedBySafetyFilter, tag, errors.New(row.Error))
 		return row, 0, nil
 	}
 
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	respEnv, err := s.runFuzzHTTPSingleExchange(rtCtx, variantEnv, dial, p)
+	respEnv, responded, err := s.runFuzzHTTPSingleExchange(rtCtx, variantEnv, dial, p)
+	// USK-1371: a plugin Drop / Respond on the Send side exits the
+	// pipeline before RecordStep opens the Stream and carries no
+	// blocked_by attribution, so nothing is recorded (the live path
+	// records nothing for an unlabelled Drop either). Blank the ID rather
+	// than return one that names no Stream.
+	if responded || errors.Is(err, errSendDroppedByPipeline) {
+		row.StreamID = ""
+	}
 	// USK-832 (parity with USK-789 for resend_http): fuzz_http bypasses
 	// session.RunSession so the proxy-path's OnComplete-driven Stream
 	// finalisation never fires. Without this, the per-variant Stream
@@ -1269,7 +1281,9 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	// Use the parent ctx (not rtCtx) so the terminal UPDATE — State,
 	// Duration, and the user tag (USK-1362) — lands even when the
 	// per-variant request timeout expired, on success and error alike.
-	finalizeResendStream(ctx, s.flowStore.store, variantEnv.StreamID, tag, err)
+	// row.StreamID, not variantEnv.StreamID: finalize no-ops on the
+	// blanked ID instead of updating a Stream that does not exist.
+	finalizeResendStream(ctx, s.flowStore.store, row.StreamID, tag, err)
 	if err != nil {
 		return row, 0, err
 	}
@@ -1344,35 +1358,41 @@ func (s *Server) checkFuzzHTTPVariantScope(plan *fuzzHTTPPlan, variantMsg *envel
 // runFuzzHTTPSingleExchange runs one variant's send/receive cycle and
 // returns the response envelope. Mirrors runResendHTTP but takes the
 // already-cloned send envelope and uses the per-variant pipeline.
-func (s *Server) runFuzzHTTPSingleExchange(ctx context.Context, sendEnv *envelope.Envelope, dial session.DialFunc, p *pipeline.Pipeline) (*envelope.Envelope, error) {
+//
+// responded reports a Send-side pipeline Respond (plugin custom
+// response): the pipeline stopped before RecordStep saw the Send, so no
+// Stream row exists for sendEnv.StreamID. An unlabelled Send-side Drop
+// returns errSendDroppedByPipeline for the same reason (USK-1371).
+func (s *Server) runFuzzHTTPSingleExchange(ctx context.Context, sendEnv *envelope.Envelope, dial session.DialFunc, p *pipeline.Pipeline) (respEnv *envelope.Envelope, responded bool, err error) {
 	postSend, action, custom, blockedBy := p.RunWithBlockedBy(ctx, sendEnv)
 	switch action {
 	case pipeline.Drop:
 		if blockedBy == pipeline.BlockedByBudget {
 			recordBudgetBlockedStream(ctx, s.flowStore.store, postSend, sendEnv.StreamID, flow.OriginFuzz)
-			return nil, errBudgetExhausted
+			return nil, false, errBudgetExhausted
 		}
-		return nil, errors.New("send envelope dropped by pipeline")
+		return nil, false, errSendDroppedByPipeline
 	case pipeline.Respond:
 		if custom == nil {
-			return nil, errors.New("pipeline returned Respond with nil response envelope")
+			return nil, true, errors.New("pipeline returned Respond with nil response envelope")
 		}
 		custom.StreamID = postSend.StreamID
 		custom.Sequence = 1
 		_, _, _ = p.Run(ctx, custom)
-		return custom, nil
+		return custom, true, nil
 	}
 
 	ch, err := dial(ctx, postSend)
 	if err != nil {
-		return nil, fmt.Errorf("dial: %w", err)
+		return nil, false, fmt.Errorf("dial: %w", err)
 	}
 	defer ch.Close()
 
 	if err := ch.Send(ctx, postSend); err != nil {
-		return nil, fmt.Errorf("upstream send: %w", err)
+		return nil, false, fmt.Errorf("upstream send: %w", err)
 	}
-	return receiveResendHTTPResponse(ctx, ch, p, postSend.StreamID)
+	respEnv, err = receiveResendHTTPResponse(ctx, ch, p, postSend.StreamID)
+	return respEnv, false, err
 }
 
 // nextIndices increments the variant index counter. Treats
