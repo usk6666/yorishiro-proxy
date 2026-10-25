@@ -258,19 +258,31 @@ func (ds *deflateState) readDecompressed(reader io.Reader, maxSize int64) (decod
 // drainIntoWindow inflates the rest of a message from reader, discarding
 // the output except for the trailing maxDictSize bytes, which it appends to
 // window. It returns the updated window and the number of bytes inflated.
-// Memory is bounded by one maxDictSize read buffer plus the window.
+// window is not modified.
+//
+// One fixed 2*maxDictSize buffer serves the whole drain: it holds the
+// current window followed by at least maxDictSize bytes of read space, and
+// is compacted in place to its trailing maxDictSize bytes before each read
+// once the window part has grown past that. A deflate bomb therefore costs
+// inflate CPU and memmoves but no per-read allocation; the returned window
+// is copied out once.
 func drainIntoWindow(reader io.Reader, window []byte) ([]byte, int64, error) {
-	buf := make([]byte, maxDictSize)
+	if len(window) > maxDictSize {
+		window = window[len(window)-maxDictSize:]
+	}
+	buf := make([]byte, 2*maxDictSize)
+	l := copy(buf, window)
 	var n int64
 	for {
-		k, err := reader.Read(buf)
-		if k > 0 {
-			window = appendWindow(window, buf[:k])
-			n += int64(k)
+		if l > maxDictSize {
+			l = copy(buf, buf[l-maxDictSize:l])
 		}
+		k, err := reader.Read(buf[l:])
+		l += k
+		n += int64(k)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return window, n, nil
+				return cloneBytes(buf[max(0, l-maxDictSize):l]), n, nil
 			}
 			return nil, n, fmt.Errorf("deflate decompress: %w", err)
 		}

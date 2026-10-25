@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"fmt"
+	"io"
 	"math"
 	"sync"
 	"testing"
@@ -389,6 +390,55 @@ func TestDeflateState_Decompress_ContextTakeover_TruncatedWindowIsLast32KiB(t *t
 	}
 	if !bytes.Equal(ds.dict, big[len(big)-maxDictSize:]) {
 		t.Errorf("dict = len %d, want last %d bytes of the full plaintext", len(ds.dict), maxDictSize)
+	}
+}
+
+// chunkReader returns at most size bytes per Read, then io.EOF.
+type chunkReader struct {
+	data []byte
+	size int
+}
+
+func (r *chunkReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), r.size, len(r.data))
+	copy(p, r.data[:n])
+	r.data = r.data[n:]
+	return n, nil
+}
+
+// TestDrainIntoWindow_LastWindowAcrossChunkSizes checks drainIntoWindow
+// returns the last maxDictSize bytes of window+drained for any read
+// granularity, leaves its input window untouched, and counts every byte.
+func TestDrainIntoWindow_LastWindowAcrossChunkSizes(t *testing.T) {
+	var data []byte
+	for i := 0; len(data) < 3*maxDictSize+123; i++ {
+		data = append(data, []byte(fmt.Sprintf("%07x,", i))...)
+	}
+	for _, windowLen := range []int{0, 10, maxDictSize - 1, maxDictSize} {
+		for _, size := range []int{1, 7, maxDictSize - 1, maxDictSize, maxDictSize + 1, len(data)} {
+			for _, dataLen := range []int{0, 5, maxDictSize - 3, maxDictSize, len(data)} {
+				window := bytes.Repeat([]byte("w"), windowLen)
+				orig := bytes.Clone(window)
+				got, n, err := drainIntoWindow(&chunkReader{data: data[:dataLen], size: size}, window)
+				if err != nil {
+					t.Fatalf("window %d chunk %d data %d: %v", windowLen, size, dataLen, err)
+				}
+				full := append(bytes.Clone(window), data[:dataLen]...)
+				want := full[max(0, len(full)-maxDictSize):]
+				if !bytes.Equal(got, want) {
+					t.Errorf("window %d chunk %d data %d: window len %d, want last %d bytes", windowLen, size, dataLen, len(got), len(want))
+				}
+				if n != int64(dataLen) {
+					t.Errorf("window %d chunk %d data %d: n = %d, want %d", windowLen, size, dataLen, n, dataLen)
+				}
+				if !bytes.Equal(window, orig) {
+					t.Errorf("window %d chunk %d data %d: input window modified", windowLen, size, dataLen)
+				}
+			}
+		}
 	}
 }
 

@@ -666,8 +666,9 @@ func (c *wsChannel) populateCloseFields(msg *envelope.WSMessage, frame *Frame) {
 // Payload, so re-compressing it would silently deliver a cut message. If
 // it reaches Send unmodified the received wire frame is written verbatim;
 // if it was modified, or the verbatim frame no longer fits the peer's
-// deflate window, Send fails with a StreamError and writes nothing. See
-// sendReceivedFrame.
+// deflate window, Send fails with a StreamError and writes nothing. The
+// verbatim frame is held to max_frame_size like a Message-path frame
+// (raw wins stays exempt). See sendReceivedFrame.
 func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -721,16 +722,7 @@ func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 	}
 
 	// Cap pre-mask payload size.
-	maxSize := c.opts.maxFrameSize
-	if maxSize <= 0 {
-		maxSize = maxFramePayloadSize
-	}
-	if int64(len(payload)) > maxSize {
-		se := &layer.StreamError{
-			Code:   layer.ErrorAborted,
-			Reason: fmt.Sprintf("ws: send: payload too large: %d > %d", len(payload), maxSize),
-		}
-		c.markTerminated(se)
+	if se := c.checkSendPayloadSize(uint64(len(payload))); se != nil {
 		return se
 	}
 	frame.Payload = payload
@@ -748,6 +740,25 @@ func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 		return se
 	}
 	return nil
+}
+
+// checkSendPayloadSize enforces max_frame_size on a frame's pre-mask
+// payload length for Send. Over the cap it terminates the Channel and
+// returns the StreamError; nothing has been written.
+func (c *wsChannel) checkSendPayloadSize(n uint64) *layer.StreamError {
+	maxSize := c.opts.maxFrameSize
+	if maxSize <= 0 {
+		maxSize = maxFramePayloadSize
+	}
+	if n <= uint64(maxSize) {
+		return nil
+	}
+	se := &layer.StreamError{
+		Code:   layer.ErrorAborted,
+		Reason: fmt.Sprintf("ws: send: payload too large: %d > %d", n, maxSize),
+	}
+	c.markTerminated(se)
+	return se
 }
 
 // compressForSend compresses payload with the send direction's deflate

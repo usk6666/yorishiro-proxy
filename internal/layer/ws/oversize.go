@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -140,6 +141,8 @@ func receivedFrameOf(env *envelope.Envelope, msg *envelope.WSMessage) (snap *rec
 //   - the snapshot is gone (cloned envelope) or msg was modified;
 //   - this leg cannot carry the frame as received (deflate not negotiated
 //     here, or a masking shape this Role must not emit);
+//   - the frame's payload exceeds this leg's max_frame_size, the same
+//     pre-mask cap a Message-path frame is held to;
 //   - under context takeover, this leg's send window differs from the
 //     receiving leg's window before the message — an earlier compressed
 //     message in this direction was modified or dropped, so the frame's
@@ -163,6 +166,9 @@ func (c *wsChannel) sendReceivedFrame(ctx context.Context, snap *receivedFrame, 
 	if len(snap.raw) < 2 || (snap.raw[1]&0x80 != 0) != c.sendMasks() {
 		return c.refuseTruncated(snap.inflateCap, "the received frame's masking does not fit the sending leg")
 	}
+	if se := c.checkReceivedFrameSize(snap.raw); se != nil {
+		return se
+	}
 	if snap.contextTakeover && !ds.windowMatches(snap.windowBefore) {
 		return c.refuseTruncated(snap.inflateCap, "the deflate window diverged (an earlier message in this direction was modified or dropped)")
 	}
@@ -180,6 +186,22 @@ func (c *wsChannel) sendReceivedFrame(ctx context.Context, snap *receivedFrame, 
 		ds.setWindow(snap.windowAfter)
 	}
 	return nil
+}
+
+// checkReceivedFrameSize applies the send-side max_frame_size to the
+// payload length declared in raw's frame header (len(raw) >= 2 is checked
+// by the caller).
+func (c *wsChannel) checkReceivedFrameSize(raw []byte) *layer.StreamError {
+	n, err := decodePayloadLength(bytes.NewReader(raw[2:]), raw[1]&0x7F)
+	if err != nil {
+		se := &layer.StreamError{
+			Code:   layer.ErrorAborted,
+			Reason: "ws: send: received frame header: " + err.Error(),
+		}
+		c.markTerminated(se)
+		return se
+	}
+	return c.checkSendPayloadSize(n)
 }
 
 // sendMasks reports whether frames this Channel writes carry a mask: only
