@@ -189,13 +189,15 @@ type BuildConfig struct {
 
 	// WSMaxFrameSize is the per-frame WebSocket payload cap applied to
 	// the post-Upgrade *ws.Layer pair on both client- and upstream-facing
-	// sides. Resolved at BuildConfig construction time from
+	// sides, in both directions (received frames, sent frames, and the
+	// permessage-deflate decompression; see ws.WithMaxFrameSize). Resolved at BuildConfig construction time from
 	// ProxyConfig.WebSocket via config.ResolveWSMaxFrameSize. Zero falls
 	// back to the Layer default (config.MaxWebSocketFrameSize, 16 MiB).
 	// Read by proxybuild.buildSessionOptions, threaded through
 	// session.SessionOptions.WSMaxFrameSize, and applied by runUpgradeWS
 	// / runUpgradeWSOverH2 to both ws.New constructions via
-	// ws.WithMaxFrameSize (USK-806).
+	// ws.WithMaxFrameSize (USK-806). TCP forward listeners bridge it the
+	// same way (proxybuild tcpForwardSessionOpts / tcpForwardH2SessionOpts).
 	WSMaxFrameSize int64
 
 	// WSDeflateEnabled toggles permessage-deflate (RFC 7692) on the

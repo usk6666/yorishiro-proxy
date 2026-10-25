@@ -235,7 +235,8 @@ type proxyManager interface {
 	// setter.
 	BodySpillDir() string
 	// WSMaxFrameSize surfaces the per-frame WebSocket payload cap
-	// (USK-807). On the Live wiring path the returned value is
+	// (USK-807), which bounds received and sent frames and the
+	// permessage-deflate decompression (USK-1322). On the Live wiring path the returned value is
 	// resolver-normalised via config.ResolveWSMaxFrameSize (substitutes
 	// config.MaxWebSocketFrameSize, 16 MiB, when the operator left the
 	// knob zero); zero may still be observed from non-Live BuildConfig

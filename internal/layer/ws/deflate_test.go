@@ -442,6 +442,44 @@ func TestDrainIntoWindow_LastWindowAcrossChunkSizes(t *testing.T) {
 	}
 }
 
+// TestDeflateState_Inflate_MaxInt64CapDecodesFully pins that a decompression
+// cap of math.MaxInt64 (web_socket.max_frame_size has no configured upper
+// bound) still decodes the full message: the cap+1 read limit must not wrap
+// negative and silently yield an empty payload (USK-1322).
+func TestDeflateState_Inflate_MaxInt64CapDecodesFully(t *testing.T) {
+	for _, contextTakeover := range []bool{false, true} {
+		t.Run(fmt.Sprintf("contextTakeover=%v", contextTakeover), func(t *testing.T) {
+			ds := newDeflateState(deflateParams{enabled: true, contextTakeover: contextTakeover, windowBits: 15})
+			defer ds.close()
+
+			messages := [][]byte{[]byte("hello hello hello"), []byte("hello again hello again")}
+			var compressed [][]byte
+			if contextTakeover {
+				compressed = deflateCompressWithContext(t, messages)
+			} else {
+				for _, m := range messages {
+					compressed = append(compressed, deflateCompress(t, m))
+				}
+			}
+			for i, want := range messages {
+				res, err := ds.inflate(compressed[i], 0, math.MaxInt64)
+				if err != nil {
+					t.Fatalf("inflate message %d: %v", i, err)
+				}
+				if res.truncated {
+					t.Fatalf("inflate message %d: truncated = true, want false", i)
+				}
+				if !bytes.Equal(res.payload, want) {
+					t.Fatalf("inflate message %d = %q, want %q", i, res.payload, want)
+				}
+				if res.fullSize != int64(len(want)) {
+					t.Fatalf("inflate message %d: fullSize = %d, want %d", i, res.fullSize, len(want))
+				}
+			}
+		})
+	}
+}
+
 func TestCheckAllocationOverflow(t *testing.T) {
 	trailerLen := len(flateTrailer)
 

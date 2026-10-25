@@ -22,12 +22,12 @@ const (
 // maxControlPayloadSize is the maximum payload size for control frames (125 bytes per RFC 6455).
 const maxControlPayloadSize = 125
 
-// maxFramePayloadSize limits the maximum payload size to prevent memory
-// exhaustion (CWE-400). WebSocket frames can theoretically be up to 2^63
-// bytes per RFC 6455; we cap at config.MaxWebSocketFrameSize (16 MiB by
-// default). Threading the cap through the public config package keeps the
-// frame-parser's enforcement and the WSLayer.WithMaxFrameSize Option
-// reading from a single source of truth.
+// maxFramePayloadSize is the default per-frame payload cap that prevents
+// memory exhaustion (CWE-400). WebSocket frames can theoretically be up to
+// 2^63 bytes per RFC 6455; the default is config.MaxWebSocketFrameSize
+// (16 MiB). It is the cap ReadFrame / ReadFrameRaw enforce and the default
+// of the Layer's WithMaxFrameSize Option; a Layer reads its frames through
+// ReadFrameRawLimit with the configured cap (web_socket.max_frame_size).
 const maxFramePayloadSize = config.MaxWebSocketFrameSize
 
 // Frame represents a parsed WebSocket frame.
@@ -53,8 +53,9 @@ func (f *Frame) IsControl() bool {
 	return f.Opcode >= OpcodeClose
 }
 
-// ReadFrame reads a single WebSocket frame from r.
-// If the frame is masked, the payload is automatically unmasked.
+// ReadFrame reads a single WebSocket frame from r, enforcing the default
+// 16 MiB payload cap. If the frame is masked, the payload is automatically
+// unmasked.
 func ReadFrame(r io.Reader) (*Frame, error) {
 	f, _, err := ReadFrameRaw(r)
 	return f, err
@@ -68,7 +69,26 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 //
 // On error the raw byte slice is the bytes consumed up to the error point;
 // callers may discard or surface them as part of an Anomaly.
+//
+// The payload cap is the 16 MiB default; use ReadFrameRawLimit for a
+// different cap.
 func ReadFrameRaw(r io.Reader) (*Frame, []byte, error) {
+	return ReadFrameRawLimit(r, maxFramePayloadSize)
+}
+
+// ReadFrameRawLimit is ReadFrameRaw with an explicit per-frame payload cap.
+// A frame whose header claims more than maxPayload bytes is rejected with
+// a "frame payload too large: N > maxPayload" error before the payload is
+// allocated or read. A non-positive maxPayload selects the 16 MiB default,
+// so the parser never runs without a bound.
+//
+// The Layer reads every frame through it with its configured cap
+// (WithMaxFrameSize / web_socket.max_frame_size); test peers use it to
+// read frames above the default.
+func ReadFrameRawLimit(r io.Reader, maxPayload int64) (*Frame, []byte, error) {
+	if maxPayload <= 0 {
+		maxPayload = maxFramePayloadSize
+	}
 	var raw bytes.Buffer
 	tee := io.TeeReader(r, &raw)
 
@@ -92,7 +112,7 @@ func ReadFrameRaw(r io.Reader) (*Frame, []byte, error) {
 		return nil, raw.Bytes(), err
 	}
 
-	if err := validateFrameConstraints(f, payloadLen); err != nil {
+	if err := validateFrameConstraints(f, payloadLen, maxPayload); err != nil {
 		return nil, raw.Bytes(), err
 	}
 
@@ -128,8 +148,9 @@ func decodePayloadLength(r io.Reader, initial byte) (uint64, error) {
 	return payloadLen, nil
 }
 
-// validateFrameConstraints checks control frame rules and payload size limits.
-func validateFrameConstraints(f *Frame, payloadLen uint64) error {
+// validateFrameConstraints checks control frame rules and the payload size
+// limit maxPayload (positive).
+func validateFrameConstraints(f *Frame, payloadLen uint64, maxPayload int64) error {
 	if f.IsControl() {
 		if payloadLen > maxControlPayloadSize {
 			return fmt.Errorf("control frame payload too large: %d > %d", payloadLen, maxControlPayloadSize)
@@ -138,8 +159,8 @@ func validateFrameConstraints(f *Frame, payloadLen uint64) error {
 			return fmt.Errorf("control frame must not be fragmented")
 		}
 	}
-	if payloadLen > uint64(maxFramePayloadSize) {
-		return fmt.Errorf("frame payload too large: %d > %d", payloadLen, maxFramePayloadSize)
+	if payloadLen > uint64(maxPayload) {
+		return fmt.Errorf("frame payload too large: %d > %d", payloadLen, maxPayload)
 	}
 	return nil
 }

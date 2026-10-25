@@ -299,7 +299,7 @@ func (c *wsChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	}
 	c.mu.Unlock()
 
-	frame, raw, err := ReadFrameRaw(c.layer.reader)
+	frame, raw, err := ReadFrameRawLimit(c.layer.reader, c.opts.frameCap())
 	// USK-841 Phase A milestone (e): emit ONE Debug log on the first
 	// wire-read attempt per Channel. Captures whether the read returned a
 	// frame (opcode + length) or an error (typed reason). Operators tracing
@@ -500,7 +500,7 @@ func (c *wsChannel) buildEnvelope(frame *Frame, raw []byte, dir envelope.Directi
 // and decompression. Sets msg.Compressed and may overwrite msg.Payload.
 //
 // The cumulative size of the per-direction continuation buffer is capped at
-// maxCompressedPayloadSize to prevent unbounded memory growth from a peer
+// the Layer's frame cap (WithMaxFrameSize) to prevent unbounded memory growth from a peer
 // chaining many continuation frames (mirror of the USK-640 / USK-641
 // decompression-bomb defense, applied to the pre-decompress accumulator).
 //
@@ -521,7 +521,7 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 			// Buffer payload for later reassembly; surface verbatim.
 			// Reset to start fresh (any prior buffer state is discarded
 			// by validateFragmentAppend's len-only-check on the new total).
-			if se := validateFragmentAppend(0, len(frame.Payload)); se != nil {
+			if se := validateFragmentAppend(0, len(frame.Payload), c.opts.frameCap()); se != nil {
 				return nil, se
 			}
 			*bufPtr = append((*bufPtr)[:0], frame.Payload...)
@@ -529,7 +529,7 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 			return nil, nil
 		}
 		// Single-frame compressed message: decompress the payload.
-		res, err := ds.inflate(frame.Payload, c.opts.decompressCap())
+		res, err := ds.inflate(frame.Payload, c.opts.frameCap(), c.opts.decompressCap())
 		if err != nil {
 			return nil, &layer.StreamError{
 				Code:   layer.ErrorProtocol,
@@ -543,7 +543,7 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 	if frame.Opcode == OpcodeContinuation && *onPtr {
 		// Continuation of a compressed message.
 		msg.Compressed = true
-		if se := validateFragmentAppend(len(*bufPtr), len(frame.Payload)); se != nil {
+		if se := validateFragmentAppend(len(*bufPtr), len(frame.Payload), c.opts.frameCap()); se != nil {
 			// Reset accumulator on overflow so a future legitimate message
 			// is not contaminated by truncated state.
 			*bufPtr = (*bufPtr)[:0]
@@ -557,7 +557,7 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 		}
 		// FIN continuation: reassemble + decompress, surface decoded.
 		*bufPtr = append(*bufPtr, frame.Payload...)
-		res, err := ds.inflate(*bufPtr, c.opts.decompressCap())
+		res, err := ds.inflate(*bufPtr, c.opts.frameCap(), c.opts.decompressCap())
 		if err != nil {
 			return nil, &layer.StreamError{
 				Code:   layer.ErrorProtocol,
@@ -576,15 +576,18 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 }
 
 // validateFragmentAppend rejects a continuation-buffer append that would
-// exceed maxCompressedPayloadSize. The cap matches the cumulative cap that
-// (*deflateState).decompress enforces on its compressed input, so a chain
-// of fragments cannot grow the accumulator past what decompress will accept
-// on the FIN frame anyway.
-func validateFragmentAppend(have, add int) *layer.StreamError {
-	if int64(have)+int64(add) > maxCompressedPayloadSize {
+// exceed limit. Callers pass the same cap inflate enforces on its
+// compressed input, so a chain of fragments cannot grow the accumulator
+// past what inflate will accept on the FIN frame anyway. A non-positive
+// limit selects maxCompressedPayloadSize.
+func validateFragmentAppend(have, add int, limit int64) *layer.StreamError {
+	if limit <= 0 {
+		limit = maxCompressedPayloadSize
+	}
+	if int64(have)+int64(add) > limit {
 		return &layer.StreamError{
 			Code:   layer.ErrorProtocol,
-			Reason: fmt.Sprintf("ws: deflate: fragment buffer overflow: %d + %d > %d", have, add, maxCompressedPayloadSize),
+			Reason: fmt.Sprintf("ws: deflate: fragment buffer overflow: %d + %d > %d", have, add, limit),
 		}
 	}
 	return nil
@@ -746,10 +749,7 @@ func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 // payload length for Send. Over the cap it terminates the Channel and
 // returns the StreamError; nothing has been written.
 func (c *wsChannel) checkSendPayloadSize(n uint64) *layer.StreamError {
-	maxSize := c.opts.maxFrameSize
-	if maxSize <= 0 {
-		maxSize = maxFramePayloadSize
-	}
+	maxSize := c.opts.frameCap()
 	if n <= uint64(maxSize) {
 		return nil
 	}
@@ -773,7 +773,7 @@ func (c *wsChannel) compressForSend(msg *envelope.WSMessage, wireDir envelope.Di
 	if ds == nil {
 		return payload, nil
 	}
-	compressed, err := ds.compress(payload, c.opts.maxFrameSize)
+	compressed, err := ds.compress(payload, c.opts.frameCap())
 	if err != nil {
 		se := &layer.StreamError{
 			Code:   layer.ErrorAborted,

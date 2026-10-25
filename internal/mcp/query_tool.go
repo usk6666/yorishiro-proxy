@@ -2364,8 +2364,10 @@ type queryConfigResult struct {
 	// resolver default and a normal operating mode, not a missing value.
 	BodySpillDir string `json:"body_spill_dir,omitempty"`
 	// WSMaxFrameSize echoes the per-frame WebSocket payload cap
-	// configured via Config.WebSocket (USK-807). Zero / omitted means the
-	// layer default (config.MaxWebSocketFrameSize, 16 MiB) is in effect.
+	// configured via Config.WebSocket (USK-807). It bounds received and
+	// sent frames and the permessage-deflate decompression (USK-1322).
+	// Zero / omitted means the layer default (config.MaxWebSocketFrameSize,
+	// 16 MiB) is in effect.
 	WSMaxFrameSize int64 `json:"ws_max_frame_size,omitempty"`
 	// GRPCMaxMessageSize echoes the per-LPM gRPC / gRPC-Web payload cap
 	// configured via Config.GRPC (USK-807). Zero / omitted means the

@@ -54,6 +54,13 @@ func (c *wsChannel) resyncSendDeflate(ctx context.Context, raw []byte) {
 		return
 	}
 	bufPtr, onPtr := c.fragStateForDirection(wireDir)
+	// The bytes are already in memory and on the wire, so the resync is
+	// bounded by their length rather than the frame cap: a plugin frame
+	// over max_frame_size (raw-wins is exempt from the Send check) must
+	// still advance the window. The compressed-input cap keeps the frame
+	// cap as its floor for a fragmented message spanning several raw-wins
+	// envelopes.
+	inCap := max(c.opts.frameCap(), int64(len(raw)))
 	r := bytes.NewReader(raw)
 	for r.Len() > 0 {
 		// Reject a frame whose header claims more bytes than raw holds
@@ -61,10 +68,10 @@ func (c *wsChannel) resyncSendDeflate(ctx context.Context, raw []byte) {
 		err := checkRawFrameFits(raw[len(raw)-r.Len():])
 		var frame *Frame
 		if err == nil {
-			frame, _, err = ReadFrameRaw(r)
+			frame, _, err = ReadFrameRawLimit(r, int64(r.Len()))
 		}
 		if err == nil {
-			err = advanceSendDeflate(ds, frame, bufPtr, onPtr, c.opts.decompressCap())
+			err = advanceSendDeflate(ds, frame, bufPtr, onPtr, inCap, c.opts.decompressCap())
 		}
 		if err != nil {
 			*bufPtr = (*bufPtr)[:0]
@@ -108,8 +115,11 @@ func checkRawFrameFits(b []byte) error {
 // state: a compressed message's payload is decompressed (on its FIN
 // frame) so ds's dictionary takes in the plaintext. Mirrors the
 // receive-side applyDeflate state machine. Control frames are not
-// compressed and do not interrupt a fragmented message.
-func advanceSendDeflate(ds *deflateState, frame *Frame, bufPtr *[]byte, onPtr *bool, inflateCap int64) error {
+// compressed and do not interrupt a fragmented message. inCap bounds the
+// compressed input (a single frame or the accumulated fragments);
+// inflateCap bounds the returned plaintext (the window advances in full
+// either way).
+func advanceSendDeflate(ds *deflateState, frame *Frame, bufPtr *[]byte, onPtr *bool, inCap, inflateCap int64) error {
 	if frame.IsControl() {
 		return nil
 	}
@@ -126,17 +136,17 @@ func advanceSendDeflate(ds *deflateState, frame *Frame, bufPtr *[]byte, onPtr *b
 			*onPtr = true
 			return nil
 		}
-		_, err := ds.decompress(frame.Payload, inflateCap)
+		_, err := ds.inflate(frame.Payload, inCap, inflateCap)
 		return err
 	case *onPtr:
-		if se := validateFragmentAppend(len(*bufPtr), len(frame.Payload)); se != nil {
+		if se := validateFragmentAppend(len(*bufPtr), len(frame.Payload), inCap); se != nil {
 			return errors.New(se.Reason)
 		}
 		*bufPtr = append(*bufPtr, frame.Payload...)
 		if !frame.Fin {
 			return nil
 		}
-		_, err := ds.decompress(*bufPtr, inflateCap)
+		_, err := ds.inflate(*bufPtr, inCap, inflateCap)
 		*bufPtr = (*bufPtr)[:0]
 		*onPtr = false
 		return err

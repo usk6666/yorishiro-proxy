@@ -12,9 +12,26 @@ import (
 // "web_socket" at all behaves identically to a config that omits all
 // fields inside it.
 type WebSocketLimits struct {
-	// MaxFrameSize caps the per-frame payload byte count. The cap applies
-	// to both Receive (pre-decompression) and Send (pre-mask). Zero
-	// (or omitted) selects MaxWebSocketFrameSize (16 MiB).
+	// MaxFrameSize caps the per-frame payload byte count on both legs of a
+	// WebSocket relay, in both directions. Zero (or omitted) selects
+	// MaxWebSocketFrameSize (16 MiB). It has two meanings (USK-1322):
+	//
+	//   - Wire frame size: a received frame whose header claims a larger
+	//     payload fails the connection on read (before it is recorded or
+	//     forwarded), and a Send frame whose pre-mask payload is larger
+	//     is refused. Raise it to relay frames above 16 MiB; lowering it
+	//     blocks larger frames, which is the operator's explicit choice.
+	//   - permessage-deflate view/memory cap: the compressed input of a
+	//     message (including its accumulated fragments) and the decoded
+	//     message shown as the payload are bounded by the same value. A
+	//     message that decompresses past it is recorded truncated with a
+	//     WSDecompressedTooLarge anomaly and still forwarded verbatim.
+	//
+	// A separate decompression knob can be split off if an operator needs
+	// the two to differ.
+	//
+	// Applies to every WebSocket entry path, TCP forward listeners
+	// included; MCP resend_ws / fuzz_ws still use the 16 MiB default.
 	MaxFrameSize int64 `json:"max_frame_size,omitempty"`
 
 	// DeflateEnabled toggles the permessage-deflate (RFC 7692) feature on
@@ -238,7 +255,10 @@ func ValidateProtocolLimits(c *ProxyConfig) error {
 		}
 		// MaxFrameSize is int64; the WebSocket Layer Option signature is
 		// also int64 (WithMaxFrameSize). No upper-bound check here — the
-		// CWE-400 cap is the operator's responsibility.
+		// CWE-400 cap is the operator's responsibility. The value is a real
+		// per-frame memory bound: roughly 2x the cap per in-flight read per
+		// leg (payload + raw copy), plus up to the cap for decompression,
+		// plus the recorded body.
 		if d := time.Duration(c.WebSocket.HoldKeepaliveInterval); d < 0 {
 			return fmt.Errorf("web_socket.hold_keepalive_interval must be >= 0, got %s", d)
 		}

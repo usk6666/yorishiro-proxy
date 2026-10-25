@@ -722,6 +722,12 @@ func (m *Manager) tcpForwardSessionOpts(parent *Stack, connCtx context.Context) 
 		opts.LifecycleEngine = parent.PluginV2Engine
 		opts.StateReleaser = parent.PluginV2Engine
 	}
+	// Mirrors proxybuild.buildSessionOptions: the websocket forward's
+	// runUpgradeWS builds both ws.Layer legs from these options, so the
+	// operator's web_socket.max_frame_size must reach them here too.
+	if parent.BuildConfig != nil {
+		opts.WSMaxFrameSize = parent.BuildConfig.WSMaxFrameSize
+	}
 	// Mirrors proxybuild.buildSessionOptions: when a FlowStore is wired,
 	// finalise Stream state on session completion so recordings transition
 	// active → complete (or active → error). Without this hook every Stream

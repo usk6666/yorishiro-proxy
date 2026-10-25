@@ -615,6 +615,11 @@ func tcpForwardH2SessionOpts(parent *Stack, connCtx context.Context, logger *slo
 		opts.StateReleaser = parent.PluginV2Engine
 		opts.PluginEngine = parent.PluginV2Engine
 	}
+	// Mirrors proxybuild.buildSessionOptions: WS over h2 (RFC 8441) on
+	// this forward builds its ws.Layer legs from these options.
+	if parent.BuildConfig != nil {
+		opts.WSMaxFrameSize = parent.BuildConfig.WSMaxFrameSize
+	}
 	if parent.FlowStore != nil {
 		store := parent.FlowStore
 		blocked := newBlockedStreamSet()

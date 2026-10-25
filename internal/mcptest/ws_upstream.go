@@ -102,15 +102,17 @@ func computeWSAccept(key string) string {
 // run the WS frame loop without involving net/http's body machinery —
 // the proxy's WS layer expects a raw TCP byte stream after the 101
 // response, not chunked HTTP body framing. Frame parsing reuses
-// internal/layer/ws/frame.go (ws.ReadFrame / ws.WriteFrame) so no
+// internal/layer/ws/frame.go (ws.ReadFrameRawLimit / ws.WriteFrame) so no
 // per-test re-implementation of the WS wire format exists in mcptest.
+// maxFrameSize is the reader's per-frame payload cap; zero keeps the
+// 16 MiB default.
 //
 // MITM Implementation Principle 5 (graceful malformed input):
 //   - Non-WS HTTP requests respond with 400 Bad Request and DO NOT panic.
-//   - ws.ReadFrame returns a typed error on truncated frames; the serve
+//   - ws.ReadFrameRawLimit returns a typed error on truncated frames; the serve
 //     loop treats every such error as connection-terminating and exits
 //     cleanly without leaking goroutines.
-func buildWSUpstream() (*httptest.Server, *FingerprintObserver, *WSHitCounter, error) {
+func buildWSUpstream(maxFrameSize int64) (*httptest.Server, *FingerprintObserver, *WSHitCounter, error) {
 	leafCert, err := newSelfSignedLeaf("localhost", "127.0.0.1")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("self-signed leaf: %w", err)
@@ -146,7 +148,7 @@ func buildWSUpstream() (*httptest.Server, *FingerprintObserver, *WSHitCounter, e
 			return
 		}
 		// From here on, w is unusable — the underlying connection is ours.
-		serveWSConnection(conn, brw, key, hits)
+		serveWSConnection(conn, brw, key, hits, maxFrameSize)
 	})
 
 	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -215,7 +217,7 @@ func headerContainsToken(headerValue, token string) bool {
 // the client. Control frames are honored: Ping is answered with Pong,
 // Close terminates the loop after echoing the close frame back. The
 // connection is always closed on return.
-func serveWSConnection(conn net.Conn, brw *bufio.ReadWriter, key string, hits *WSHitCounter) {
+func serveWSConnection(conn net.Conn, brw *bufio.ReadWriter, key string, hits *WSHitCounter, maxFrameSize int64) {
 	defer conn.Close()
 
 	resp := "HTTP/1.1 101 Switching Protocols\r\n" +
@@ -236,12 +238,18 @@ func serveWSConnection(conn net.Conn, brw *bufio.ReadWriter, key string, hits *W
 	// Use the bufio.Reader directly so those buffered bytes are not lost.
 	reader := brw.Reader
 
+	// Bound each frame read so a wedged client cannot keep this goroutine
+	// alive past test cleanup. The deadline is generous (15s) to tolerate
+	// slow CI hosts; a test that raised the frame cap moves tens of MiB per
+	// frame (received, recorded, and relayed by the proxy under -race
+	// before the first byte arrives here), so it gets more headroom.
+	readTimeout := 15 * time.Second
+	if maxFrameSize > 0 {
+		readTimeout = 2 * time.Minute
+	}
 	for {
-		// Bound each frame read so a wedged client cannot keep this
-		// goroutine alive past test cleanup. The deadline is generous
-		// (15s) to tolerate slow CI hosts.
-		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-		f, err := wslayer.ReadFrame(reader)
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+		f, _, err := wslayer.ReadFrameRawLimit(reader, maxFrameSize)
 		if err != nil {
 			return
 		}
@@ -281,7 +289,7 @@ func serveWSConnection(conn net.Conn, brw *bufio.ReadWriter, key string, hits *W
 			_ = wslayer.WriteFrame(conn, closeFrame)
 			return
 		default:
-			// Unknown opcode — ignore and continue. ws.ReadFrame already
+			// Unknown opcode — ignore and continue. ws.ReadFrameRawLimit already
 			// validated frame-level constraints (size, control-frame fin),
 			// so we cannot crash on a well-formed but novel opcode.
 		}
