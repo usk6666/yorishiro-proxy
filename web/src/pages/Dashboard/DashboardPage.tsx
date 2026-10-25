@@ -7,11 +7,11 @@ import { protocolVariant } from "../../lib/mcp/dispatch.js";
 import { useQuery, useSecurity } from "../../lib/mcp/hooks.js";
 import { PROTOCOL_BREAKDOWN } from "../../lib/mcp/protocols.js";
 import type {
-  FlowsResult,
   ListenerStatusEntry,
   SecurityGetBudgetResult,
   SecurityGetRateLimitsResult,
 } from "../../lib/mcp/types.js";
+import { useBreakdownCounts } from "./breakdownCounts.js";
 import { BudgetWidget } from "./BudgetWidget.js";
 import { RateLimitWidget } from "./RateLimitWidget.js";
 import "./DashboardPage.css";
@@ -71,24 +71,11 @@ export function DashboardPage() {
   } = useQuery("flows", { pollInterval: POLL_INTERVAL, limit: 0 });
 
   // Fetch per-protocol flow counts: one query per PROTOCOL_BREAKDOWN row,
-  // in its order. Hooks cannot run in a loop, so each row is listed
-  // explicitly; keep this list in step with PROTOCOL_BREAKDOWN.
-  const breakdownQuery = (i: number) => ({
-    pollInterval: POLL_INTERVAL,
-    limit: 0,
-    filter: PROTOCOL_BREAKDOWN[i].filter,
-  });
-  const breakdownResults: (FlowsResult | null)[] = [
-    useQuery("flows", breakdownQuery(0)).data,
-    useQuery("flows", breakdownQuery(1)).data,
-    useQuery("flows", breakdownQuery(2)).data,
-    useQuery("flows", breakdownQuery(3)).data,
-    useQuery("flows", breakdownQuery(4)).data,
-    useQuery("flows", breakdownQuery(5)).data,
-    useQuery("flows", breakdownQuery(6)).data,
-    useQuery("flows", breakdownQuery(7)).data,
-    useQuery("flows", breakdownQuery(8)).data,
-  ];
+  // aligned with the rows.
+  const { counts: breakdownCounts, refetch: refetchBreakdown } = useBreakdownCounts(
+    PROTOCOL_BREAKDOWN,
+    POLL_INTERVAL,
+  );
 
   // Fetch intercept queue count
   const {
@@ -188,21 +175,22 @@ export function DashboardPage() {
     refetchIntercept();
     refetchFuzz();
     refetchConfig();
+    refetchBreakdown();
     fetchBudget();
     fetchRateLimits();
-  }, [refetchStatus, refetchFlows, refetchIntercept, refetchFuzz, refetchConfig, fetchBudget, fetchRateLimits]);
-
-  // Build protocol breakdown
-  const protocolCounts: Record<string, number> = {};
-  PROTOCOL_BREAKDOWN.forEach((row, i) => {
-    const result = breakdownResults[i];
-    if (result) {
-      protocolCounts[row.label] = result.total;
-    }
-  });
+  }, [
+    refetchStatus,
+    refetchFlows,
+    refetchIntercept,
+    refetchFuzz,
+    refetchConfig,
+    refetchBreakdown,
+    fetchBudget,
+    fetchRateLimits,
+  ]);
 
   const totalFlows = flowsData?.total ?? statusData?.total_flows ?? 0;
-  const maxProtocolCount = Math.max(1, ...Object.values(protocolCounts));
+  const maxProtocolCount = Math.max(1, ...breakdownCounts.map((c) => c ?? 0));
 
   return (
     <div className="page dashboard-page">
@@ -380,8 +368,8 @@ export function DashboardPage() {
           <div className="dashboard-empty">No flows captured yet.</div>
         ) : (
           <div className="dashboard-protocol-chart">
-            {PROTOCOL_BREAKDOWN.map(({ label: proto, filter }) => {
-              const count = protocolCounts[proto] ?? 0;
+            {PROTOCOL_BREAKDOWN.map(({ label: proto, filter }, i) => {
+              const count = breakdownCounts[i] ?? 0;
               if (count === 0) return null;
               const pct = Math.round((count / maxProtocolCount) * 100);
               return (
