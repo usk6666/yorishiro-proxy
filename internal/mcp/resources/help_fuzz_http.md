@@ -37,6 +37,8 @@ When `flow_id` is set, the recorded send seeds the per-variant base envelope; us
 
 Call `docs(topic="resend_http")` for the inherited fields. Documentation here is on fuzz-specific fields only.
 
+`body_patches[]` are applied to the base body before positions, with the same semantics as `resend_http`: a `json_path` patch replaces only the target value's bytes (key order, whitespace, escapes elsewhere are kept; with duplicate keys the last occurrence is rewritten). `value` passes through the MCP JSON layer as float64 / map, so use `value_json` (raw JSON text, spliced verbatim) for exact large integers or raw JSON — e.g. `{"json_path": "$.big", "value_json": "12345678901234567890"}`.
+
 > **Wire protocol**: chosen once for the whole run from the base request, with the same rule as `resend_http` (explicit `http_version`, else the recorded flow's — an `h2` / `h2c` flow is fuzzed over HTTP/2 — else `http/1.1`). Every variant uses it on its own fresh connection. Over HTTP/2 no `Host` header is injected (the target is `:authority`, so fuzz it through the `authority` path) and a `scheme` position rewrites `:scheme` on the wire. If the upstream does not negotiate `h2`, each variant fails with an error naming the negotiated ALPN instead of falling back to HTTP/1.1; pass `http_version: "http/1.1"` to fuzz over HTTP/1.1.
 
 > `path` accepts a literal `?` and auto-splits into `path` + `raw_query` at the MCP boundary (USK-859). Supplying both `raw_query` AND a `?` in `path` is rejected. The split applies once to the base envelope; per-position payloads written into `path` or `raw_query` via the `positions[]` mechanism are passed through verbatim (the package-level "Payload passthrough" rule in `fuzz_http_helpers.go`).
