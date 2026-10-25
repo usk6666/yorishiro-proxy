@@ -13,6 +13,15 @@ const (
 	WSPong         WSOpcode = 0xA
 )
 
+// AnomalyWSDecompressedTooLarge marks a permessage-deflate (RFC 7692)
+// message whose decompressed size exceeded the WebSocket Layer's
+// decompression cap. WSMessage.Payload then holds only the first cap
+// bytes; the wire frame in Envelope.Raw is complete and is what the Layer
+// forwards when the message reaches Send unmodified. A modified message
+// carrying this anomaly is refused on Send rather than forwarded
+// truncated (USK-1321).
+const AnomalyWSDecompressedTooLarge AnomalyType = "WSDecompressedTooLarge"
+
 // WSMessage represents one WebSocket frame. See RFC-001 section 3.2.2.
 //
 // Frame-per-Envelope: control frames (Ping/Pong/Close) and continuation
@@ -45,6 +54,11 @@ type WSMessage struct {
 	// Compressed indicates the frame was sent with the per-message-deflate
 	// extension RSV1 bit (RFC 7692).
 	Compressed bool
+
+	// Anomalies records Layer-detected deviations for this frame, e.g.
+	// AnomalyWSDecompressedTooLarge when Payload is a truncated view of a
+	// compressed message. Read-only for plugins.
+	Anomalies []Anomaly
 }
 
 // Protocol returns ProtocolWebSocket.
@@ -62,5 +76,6 @@ func (m *WSMessage) CloneMessage() Message {
 		CloseCode:   m.CloseCode,
 		CloseReason: m.CloseReason,
 		Compressed:  m.Compressed,
+		Anomalies:   cloneAnomalies(m.Anomalies),
 	}
 }

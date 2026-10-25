@@ -313,11 +313,14 @@ func TestDeflateState_Close_ContextTakeover(t *testing.T) {
 	ds.close()
 }
 
-func TestDeflateState_Decompress_ContextTakeover_MaxSizeTruncationResetsDictionary(t *testing.T) {
-	// When maxSize truncation occurs during context takeover decompression, the
-	// dictionary must be reset to prevent LZ77 window desync with the peer's
-	// compressor. After truncation, subsequent messages should still decompress
-	// (without context) rather than silently produce incorrect data.
+// TestDeflateState_Decompress_ContextTakeover_MaxSizeTruncationKeepsWindow
+// replaces the former ..._MaxSizeTruncationResetsDictionary test, which
+// pinned the USK-1321 bug: on truncation the dictionary was reset to nil,
+// so the proxy's LZ77 window no longer matched the peer's compressor and
+// the next back-referencing message failed to decode. Truncation only
+// limits what is surfaced as the L7 payload; the window must advance over
+// the FULL decompressed message (RFC 7692 §7.2.2 / §8.1).
+func TestDeflateState_Decompress_ContextTakeover_MaxSizeTruncationKeepsWindow(t *testing.T) {
 	params := deflateParams{
 		enabled:         true,
 		contextTakeover: true,
@@ -326,15 +329,15 @@ func TestDeflateState_Decompress_ContextTakeover_MaxSizeTruncationResetsDictiona
 	ds := newDeflateState(params)
 	defer ds.close()
 
-	// Compress 3 messages with shared context.
+	tail := []byte("TAIL-UNIQUE-0123456789-abcdefghijklmnopqrstuvwxyz")
+	big := append(bytes.Repeat([]byte("X"), 200), tail...)
 	messages := [][]byte{
 		[]byte("first message with some content"),
-		bytes.Repeat([]byte("X"), 200), // This will be truncated by maxSize=50
-		[]byte("third message"),        // Must still be processable after reset
+		big, // truncated by maxSize=50
+		append([]byte("third message "), tail...), // back-references big's tail
 	}
 	compressedMsgs := deflateCompressWithContext(t, messages)
 
-	// Decompress first message normally (large maxSize).
 	decompressed, err := ds.decompress(compressedMsgs[0], 1<<20)
 	if err != nil {
 		t.Fatalf("decompress message 0: %v", err)
@@ -342,22 +345,50 @@ func TestDeflateState_Decompress_ContextTakeover_MaxSizeTruncationResetsDictiona
 	if !bytes.Equal(decompressed, messages[0]) {
 		t.Errorf("message 0 = %q, want %q", decompressed, messages[0])
 	}
-	// Dictionary should be populated.
-	if ds.dict == nil {
-		t.Fatal("dict should be non-nil after first message")
-	}
 
-	// Decompress second message with a small maxSize that forces truncation.
 	decompressed, err = ds.decompress(compressedMsgs[1], 50)
 	if err != nil {
 		t.Fatalf("decompress message 1 (truncated): %v", err)
 	}
-	if len(decompressed) != 50 {
-		t.Errorf("truncated message length = %d, want 50", len(decompressed))
+	if !bytes.Equal(decompressed, big[:50]) {
+		t.Errorf("truncated message = %q, want the first 50 bytes %q", decompressed, big[:50])
 	}
-	// After truncation, dictionary must be reset to nil.
-	if ds.dict != nil {
-		t.Error("dict should be nil after maxSize truncation (LZ77 window desync prevention)")
+	// The window must hold the FULL plaintext of message 1, not be nil.
+	wantDict := append(append([]byte{}, messages[0]...), big...)
+	if !bytes.Equal(ds.dict, wantDict) {
+		t.Errorf("dict after truncation = %q (len %d), want message0+FULL message1 (len %d)", ds.dict, len(ds.dict), len(wantDict))
+	}
+
+	decompressed, err = ds.decompress(compressedMsgs[2], 1<<20)
+	if err != nil {
+		t.Fatalf("decompress message 2 after truncation: %v", err)
+	}
+	if !bytes.Equal(decompressed, messages[2]) {
+		t.Errorf("message 2 = %q, want %q", decompressed, messages[2])
+	}
+}
+
+// TestDeflateState_Decompress_ContextTakeover_TruncatedWindowIsLast32KiB
+// checks that the window after an over-cap message larger than 32 KiB is
+// the last maxDictSize bytes of the full plaintext.
+func TestDeflateState_Decompress_ContextTakeover_TruncatedWindowIsLast32KiB(t *testing.T) {
+	ds := newDeflateState(deflateParams{enabled: true, contextTakeover: true, windowBits: 15})
+	defer ds.close()
+
+	var big []byte
+	for i := 0; len(big) < 100*1024; i++ {
+		big = append(big, []byte(fmt.Sprintf("%08x", i))...)
+	}
+	compressed := deflateCompressWithContext(t, [][]byte{big})
+	decoded, err := ds.decompress(compressed[0], 1000)
+	if err != nil {
+		t.Fatalf("decompress: %v", err)
+	}
+	if !bytes.Equal(decoded, big[:1000]) {
+		t.Errorf("decoded prefix mismatch (len %d)", len(decoded))
+	}
+	if !bytes.Equal(ds.dict, big[len(big)-maxDictSize:]) {
+		t.Errorf("dict = len %d, want last %d bytes of the full plaintext", len(ds.dict), maxDictSize)
 	}
 }
 

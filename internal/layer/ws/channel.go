@@ -521,7 +521,7 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 			return nil
 		}
 		// Single-frame compressed message: decompress the payload.
-		decoded, err := ds.decompress(frame.Payload, maxFramePayloadSize)
+		decoded, err := ds.decompress(frame.Payload, c.opts.decompressCap())
 		if err != nil {
 			return &layer.StreamError{
 				Code:   layer.ErrorProtocol,
@@ -549,7 +549,7 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 		}
 		// FIN continuation: reassemble + decompress, surface decoded.
 		*bufPtr = append(*bufPtr, frame.Payload...)
-		decoded, err := ds.decompress(*bufPtr, maxFramePayloadSize)
+		decoded, err := ds.decompress(*bufPtr, c.opts.decompressCap())
 		if err != nil {
 			return &layer.StreamError{
 				Code:   layer.ErrorProtocol,
