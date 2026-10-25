@@ -74,15 +74,9 @@ func (r *webUIFixtureRecorder) run(streamID string, envs ...*envelope.Envelope) 
 	}
 }
 
-// h2HeadersFrame builds a single HEADERS frame (END_HEADERS|END_STREAM on
-// stream 1) whose block HPACK-encodes fields in order — the bytes the h2
-// Layer records as Envelope.Raw for a semantic HTTPMessage.
-func h2HeadersFrame(t *testing.T, fields ...hpack.HeaderField) []byte {
-	t.Helper()
-	return h2HeadersFrameOn(t, 1, fields...)
-}
-
-// h2HeadersFrameOn is h2HeadersFrame on h2 stream h2StreamID.
+// h2HeadersFrameOn builds a single HEADERS frame (END_HEADERS|END_STREAM
+// on h2 stream h2StreamID) whose block HPACK-encodes fields in order — the
+// bytes the h2 Layer records as Envelope.Raw for a semantic HTTPMessage.
 func h2HeadersFrameOn(t *testing.T, h2StreamID uint32, fields ...hpack.HeaderField) []byte {
 	t.Helper()
 	var block bytes.Buffer

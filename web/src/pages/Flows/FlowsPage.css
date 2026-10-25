@@ -321,6 +321,49 @@
   padding: var(--space-md);
 }
 
+/* --- Active URL-driven filters --- */
+
+.flows-active-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+}
+
+.flows-active-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  max-width: 100%;
+  padding: 2px var(--space-sm);
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.flows-active-filter-text {
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flows-active-filter-clear {
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  line-height: 1;
+}
+
+.flows-active-filter-clear:hover {
+  color: var(--text-primary);
+}
+
 /* --- Bulk actions bar --- */
 
 .flows-bulk-bar {

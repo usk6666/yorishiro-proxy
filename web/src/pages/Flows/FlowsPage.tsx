@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { useDialog } from "../../components/ui/dialogContext.js";
@@ -114,6 +114,7 @@ function stateVariant(state: string): "default" | "success" | "warning" | "dange
 
 export function FlowsPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { addToast } = useToast();
   const { showDialog } = useDialog();
   const { manage, loading: executeLoading } = useManage();
@@ -155,6 +156,29 @@ export function FlowsPage() {
   const [importConflictPolicy, setImportConflictPolicy] = useState<"skip" | "replace">("skip");
   const [importResult, setImportResult] = useState<ManageImportFlowsResult | null>(null);
 
+  // --- Connection filter (URL-driven) ---
+  // FlowDetail's "Flows on this connection" link opens `/?conn_id=<id>`.
+  // Read from the URL on every render (not copied into state) and sent
+  // verbatim: the server matches conn_id exactly.
+  const connId = searchParams.get("conn_id") ?? "";
+
+  // A URL-driven conn_id change bypasses the filter setters, so reset
+  // offset and selection here, during render, for the same reason
+  // handleFilterChange does it synchronously (USK-964): the next useQuery
+  // call must see offset=0 alongside the new filter.
+  const [prevConnId, setPrevConnId] = useState(connId);
+  if (prevConnId !== connId) {
+    setPrevConnId(connId);
+    setOffset(0);
+    setSelectedIds(new Set());
+  }
+
+  const clearConnId = useCallback(() => {
+    const params = new URLSearchParams(searchParams);
+    params.delete("conn_id");
+    navigate({ search: params.toString() }, { replace: true });
+  }, [searchParams, navigate]);
+
   // --- Build query filter ---
   const filter = useMemo<QueryFilter | undefined>(
     () =>
@@ -169,9 +193,9 @@ export function FlowsPage() {
         state: selectedState,
         host: debouncedHostFilter,
         tag: debouncedTagFilter,
-        connId: "",
+        connId,
       }),
-    [selectedProtocol, selectedHttpVersion, selectedScheme, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedBlockedBy, selectedState, debouncedHostFilter, debouncedTagFilter],
+    [selectedProtocol, selectedHttpVersion, selectedScheme, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedBlockedBy, selectedState, debouncedHostFilter, debouncedTagFilter, connId],
   );
 
   // --- Query flows ---
@@ -533,6 +557,23 @@ export function FlowsPage() {
         </div>
       </div>
 
+      {/* Active URL-driven filter: shown even while the filters panel is collapsed */}
+      {connId !== "" && (
+        <div className="flows-active-filters">
+          <span className="flows-active-filter" title="Flows on the same client connection">
+            <span className="flows-active-filter-text">Connection: {connId}</span>
+            <button
+              type="button"
+              className="flows-active-filter-clear"
+              aria-label="Clear connection filter"
+              onClick={clearConnId}
+            >
+              {"×"}
+            </button>
+          </span>
+        </div>
+      )}
+
       {/* Filters panel */}
       {showFilters && (
         <div className="flows-filters">
@@ -733,8 +774,14 @@ export function FlowsPage() {
       {/* Empty state */}
       {!loading && !error && data && flows.length === 0 && (
         <div className="flows-empty">
-          <span>No flows captured yet.</span>
-          <span>Start the proxy and send some traffic to see flows here.</span>
+          {connId !== "" ? (
+            <span>No flows on this connection.</span>
+          ) : (
+            <>
+              <span>No flows captured yet.</span>
+              <span>Start the proxy and send some traffic to see flows here.</span>
+            </>
+          )}
         </div>
       )}
 

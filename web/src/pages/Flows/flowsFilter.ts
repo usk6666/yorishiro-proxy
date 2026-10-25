@@ -62,5 +62,8 @@ export function buildFlowsFilter(inputs: FlowsFilterInputs): QueryFilter | undef
   if (inputs.tag) {
     f.tag = inputs.tag;
   }
+  if (inputs.connId) {
+    f.conn_id = inputs.connId;
+  }
   return Object.keys(f).length > 0 ? f : undefined;
 }
