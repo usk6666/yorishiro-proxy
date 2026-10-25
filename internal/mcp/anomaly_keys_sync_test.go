@@ -106,3 +106,48 @@ func TestQuery_TruncatedBodyAnomaly_RoundTrip(t *testing.T) {
 	}
 	t.Fatalf("query flow anomalies = %+v, want %s", got.Anomalies, envelope.AnomalyTruncatedBody)
 }
+
+// TestQuery_RawHeaderTruncatedAnomaly_RoundTrip records a request whose
+// header section exceeded max_raw_capture_size (USK-1320) through the real
+// RecordStep and reads the RawHeaderTruncated anomaly back with the query
+// tool, so a capped record is discoverable.
+func TestQuery_RawHeaderTruncatedAnomaly_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	p := pipeline.New(pipeline.NewRecordStep(store, testutil.DiscardLogger()))
+
+	const streamID = "stream-usk1320-raw-header-truncated"
+	const detail = "RawBytes capped at 17 of 40 header bytes"
+	p.Run(ctx, &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    "flow-usk1320-req",
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("GET / HTTP/1.1\r\nH"),
+		Message: &envelope.HTTPMessage{
+			Method:    "GET",
+			Scheme:    "http",
+			Authority: "example.com",
+			Path:      "/",
+			Headers:   []envelope.KeyValue{{Name: "Host", Value: "example.com"}},
+			Anomalies: []envelope.Anomaly{{Type: envelope.AnomalyRawHeaderTruncated, Detail: detail}},
+		},
+	})
+
+	cs := setupQueryTestSession(t, store)
+	result := callQuery(t, cs, queryInput{Resource: "flow", ID: streamID})
+	if result.IsError {
+		t.Fatalf("query flow: %v", result.Content)
+	}
+	var got queryFlowResult
+	unmarshalQueryResult(t, result, &got)
+	for _, a := range got.Anomalies {
+		if a.Type == string(envelope.AnomalyRawHeaderTruncated) {
+			if a.Detail != detail {
+				t.Errorf("RawHeaderTruncated Detail = %q, want %q", a.Detail, detail)
+			}
+			return
+		}
+	}
+	t.Fatalf("query flow anomalies = %+v, want %s", got.Anomalies, envelope.AnomalyRawHeaderTruncated)
+}

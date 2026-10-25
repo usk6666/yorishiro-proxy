@@ -1659,7 +1659,8 @@ func (c *channel) sendRawWins(raw []byte, kind string) error {
 //     or status line (status / status_reason) differs from the parse-time
 //     snapshot, so the start line is rebuilt (USK-1148).
 //   - zeroCopy: none of the above forces a re-serialization, so the
-//     header section is the parser's RawBytes verbatim.
+//     header section is the parser's WireHead verbatim (the complete head;
+//     RawBytes is only the capped record copy, USK-1320).
 //
 // USK-769.
 type opaqueSendDecision struct {
@@ -1691,12 +1692,10 @@ func (d opaqueSendDecision) lineOnly() bool {
 // cannot reproduce (obs-fold continuations, orphan continuation lines,
 // colon-less lines, bare-LF terminators). The parser reads the start line
 // with bufio.Reader.ReadSlice('\n'), so its terminator is the first LF in
-// raw. ok is false when raw was truncated at the capture cap or holds no
-// LF (a partial start line); the caller must then re-serialize.
-func headerSectionAfterStartLine(raw []byte, truncated bool) ([]byte, bool) {
-	if truncated {
-		return nil, false
-	}
+// raw. raw must be the complete head (WireHead), never the capped record
+// copy. ok is false when raw holds no LF (a partial start line or a
+// hand-built envelope without WireHead); the caller must then re-serialize.
+func headerSectionAfterStartLine(raw []byte) ([]byte, bool) {
 	i := bytes.IndexByte(raw, '\n')
 	if i < 0 {
 		return nil, false
@@ -1710,8 +1709,10 @@ func headerSectionAfterStartLine(raw []byte, truncated bool) ([]byte, bool) {
 // EncodeWireBytes, so the recorded modified variant's Raw equals the wire
 // (RFC-001 §9.3 item 2).
 //
-// When nothing forces a re-serialization the head is rawReq.RawBytes
-// itself (d.zeroCopy); callers must not mutate it. When only the request
+// When nothing forces a re-serialization the head is rawReq.WireHead
+// itself (d.zeroCopy) — the complete head as read, never the RawBytes
+// record copy, which may be capped at max_raw_capture_size (USK-1320);
+// callers must not mutate it. When only the request
 // line changed (d.lineOnly) the head is the rebuilt line followed by the
 // wire header section verbatim. Otherwise the head is
 // freshly serialized from a clone of the wire headers patched toward
@@ -1724,12 +1725,12 @@ func opaqueRequestHead(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte, 
 	d := classifyOpaqueSend(rawReq.Headers, rawReq.RawBody, rawReq.RawBodyBuffer != nil, rawReq.RawBodyTruncated,
 		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
 	d.lineChanged = lineChanged
-	if d.canZeroCopy(rawReq.RawBytes) {
+	if d.canZeroCopy(rawReq.WireHead) {
 		d.zeroCopy = true
-		return rawReq.RawBytes, d
+		return rawReq.WireHead, d
 	}
 	if d.lineOnly() {
-		if tail, ok := headerSectionAfterStartLine(rawReq.RawBytes, rawReq.Truncated); ok {
+		if tail, ok := headerSectionAfterStartLine(rawReq.WireHead); ok {
 			var buf bytes.Buffer
 			_ = serializeRequestLine(&buf, method, target, rawReq.Proto)
 			buf.Write(tail)
@@ -1752,12 +1753,12 @@ func opaqueResponseHead(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte,
 	d := classifyOpaqueSend(rawResp.Headers, rawResp.RawBody, rawResp.RawBodyBuffer != nil, rawResp.RawBodyTruncated,
 		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
 	d.lineChanged = lineChanged
-	if d.canZeroCopy(rawResp.RawBytes) {
+	if d.canZeroCopy(rawResp.WireHead) {
 		d.zeroCopy = true
-		return rawResp.RawBytes, d
+		return rawResp.WireHead, d
 	}
 	if d.lineOnly() {
-		if tail, ok := headerSectionAfterStartLine(rawResp.RawBytes, rawResp.Truncated); ok {
+		if tail, ok := headerSectionAfterStartLine(rawResp.WireHead); ok {
 			var buf bytes.Buffer
 			_ = serializeStatusLine(&buf, rawResp.Proto, status, msg.Status)
 			buf.Write(tail)

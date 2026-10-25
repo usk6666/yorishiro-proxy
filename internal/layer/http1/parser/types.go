@@ -64,6 +64,12 @@ const (
 	// terminal zero-size chunk (USK-1229). The captured body and RawBody
 	// hold exactly the bytes received.
 	AnomalyTruncatedBody AnomalyType = "TruncatedBody"
+	// AnomalyRawHeaderTruncated indicates that the header section (start
+	// line + headers + terminating blank line) exceeded the raw-capture cap
+	// (ParseOptions.MaxRawCapture, default MaxRawCaptureSize), so RawBytes —
+	// the record copy — is a prefix only. The message is still forwarded
+	// from the complete WireHead; only the record is capped.
+	AnomalyRawHeaderTruncated AnomalyType = "RawHeaderTruncated"
 )
 
 // TrailerProvider is implemented by body readers that parse chunked trailers
@@ -273,6 +279,12 @@ type RawRequest struct {
 
 	// Truncated is true when RawBytes was capped at MaxRawCaptureSize.
 	Truncated bool
+
+	// WireHead is the complete header section as read from the wire,
+	// bounded only by the parser limits and never capped at the raw-capture
+	// cap. It is the send source for an unmodified head; RawBytes is the
+	// capped record copy and always a prefix of WireHead.
+	WireHead []byte
 }
 
 // RawResponse represents a parsed HTTP/1.x response.
@@ -296,4 +308,10 @@ type RawResponse struct {
 
 	// Truncated is true when RawBytes was capped at MaxRawCaptureSize.
 	Truncated bool
+
+	// WireHead is the complete header section as read from the wire,
+	// bounded only by the parser limits and never capped at the raw-capture
+	// cap. It is the send source for an unmodified head; RawBytes is the
+	// capped record copy and always a prefix of WireHead.
+	WireHead []byte
 }

@@ -611,6 +611,7 @@ var flowMetadataAnomalyKeyToType = map[string]string{
 	"http_anomaly_trailers_in_passthrough": string(envelope.AnomalyTrailersInPassthrough),
 	"http_anomaly_raw_body_truncated":      string(envelope.AnomalyRawBodyTruncated),
 	"http_anomaly_truncated_body":          string(envelope.AnomalyTruncatedBody),
+	"http_anomaly_raw_header_truncated":    string(envelope.AnomalyRawHeaderTruncated),
 	// HTTP/2 receive-side anomalies.
 	"http_anomaly_h2_duplicate_pseudo_header":      string(envelope.H2DuplicatePseudoHeader),
 	"http_anomaly_h2_pseudo_header_after_regular":  string(envelope.H2PseudoHeaderAfterRegular),

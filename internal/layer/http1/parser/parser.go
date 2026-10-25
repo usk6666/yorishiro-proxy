@@ -143,8 +143,9 @@ type ParseOptions struct {
 // rawSink is the minimal write/truncation interface used by readLine and
 // parseHeaderLines. Two implementations satisfy it:
 //
-//   - *captureWriter for header-section capture (RawBytes), capped at
-//     MaxRawCaptureSize and memory-only (header sections never spill).
+//   - *captureWriter for header-section capture (WireHead, with the
+//     RawBytes record view capped at MaxRawCaptureSize); memory-only
+//     (header sections never spill) and bounded by the parser limits.
 //   - *bodyCaptureSink for body capture (RawBody), where USK-772 added a
 //     memory-then-disk-spill mode bounded by MaxBodySize.
 //
@@ -155,12 +156,15 @@ type rawSink interface {
 	write(p []byte)
 }
 
-// captureWriter records bytes written to it up to cap. cap is the per-parse
-// cap injected via ParseOptions.MaxRawCapture; zero means use MaxRawCaptureSize.
+// captureWriter records every header-section byte written to it. The
+// buffer is bounded by the parser limits (maxRequestLineSize /
+// maxHeaderSize), not by cap: the complete head is the send source
+// (WireHead, USK-1320). cap is the per-parse raw-capture cap injected via
+// ParseOptions.MaxRawCapture (zero means MaxRawCaptureSize) and applies
+// only to the record view (RawBytes / PartialRequestError.Raw).
 type captureWriter struct {
-	buf       bytes.Buffer
-	truncated bool
-	cap       int
+	buf bytes.Buffer
+	cap int
 }
 
 // effectiveCap returns the active byte cap, falling back to the package
@@ -173,29 +177,50 @@ func (cw *captureWriter) effectiveCap() int {
 }
 
 func (cw *captureWriter) write(p []byte) {
-	if cw == nil || cw.truncated {
-		return
-	}
-	remaining := cw.effectiveCap() - cw.buf.Len()
-	if remaining <= 0 {
-		cw.truncated = true
-		return
-	}
-	if len(p) > remaining {
-		cw.buf.Write(p[:remaining])
-		cw.truncated = true
+	if cw == nil {
 		return
 	}
 	cw.buf.Write(p)
 }
 
-func (cw *captureWriter) bytes() []byte {
+// truncated reports whether the captured head exceeds the record cap.
+func (cw *captureWriter) truncated() bool {
+	return cw.buf.Len() > cw.effectiveCap()
+}
+
+// cappedCopy returns a fresh copy of the record view: the first
+// effectiveCap bytes of the capture. Nil when nothing was captured. Used on
+// the error path so the PartialRequestError does not pin the full buffer.
+func (cw *captureWriter) cappedCopy() []byte {
 	if cw.buf.Len() == 0 {
 		return nil
 	}
-	out := make([]byte, cw.buf.Len())
-	copy(out, cw.buf.Bytes())
-	return out
+	return bytes.Clone(cw.buf.Bytes()[:min(cw.buf.Len(), cw.effectiveCap())])
+}
+
+// finalize copies the complete capture once and returns it as wireHead,
+// together with the record view rawBytes — a prefix of wireHead capped at
+// effectiveCap, sharing its backing array with a capacity limit so an
+// append on either cannot clobber the other — and whether the record view
+// was capped.
+func (cw *captureWriter) finalize() (wireHead, rawBytes []byte, truncated bool) {
+	if cw.buf.Len() == 0 {
+		return nil, nil, false
+	}
+	wireHead = bytes.Clone(cw.buf.Bytes())
+	n := min(len(wireHead), cw.effectiveCap())
+	return wireHead, wireHead[:n:n], len(wireHead) > n
+}
+
+// rawHeaderTruncatedAnomaly describes a header section whose record view
+// was capped. Envelope.Raw for such a message is the capped head followed
+// by the captured body, not a contiguous wire prefix.
+func rawHeaderTruncatedAnomaly(recorded, total int) Anomaly {
+	return Anomaly{
+		Type: AnomalyRawHeaderTruncated,
+		Detail: fmt.Sprintf("RawBytes capped at %d of %d header bytes (max_raw_capture_size); "+
+			"the complete header section is kept for the wire; the record keeps the capped head followed by the body", recorded, total),
+	}
 }
 
 // ParseRequest reads and parses an HTTP/1.x request from r using the
@@ -226,8 +251,8 @@ func ParseRequestWithOptions(r *bufio.Reader, opts ParseOptions) (*RawRequest, e
 	if err != nil {
 		return nil, &PartialRequestError{
 			Err:       fmt.Errorf("parse request line: %w", err),
-			Raw:       cw.bytes(),
-			Truncated: cw.truncated,
+			Raw:       cw.cappedCopy(),
+			Truncated: cw.truncated(),
 		}
 	}
 
@@ -245,8 +270,8 @@ func ParseRequestWithOptions(r *bufio.Reader, opts ParseOptions) (*RawRequest, e
 		}
 		perr := &PartialRequestError{
 			Err:                 fmt.Errorf("parse headers: %w", err),
-			Raw:                 cw.bytes(),
-			Truncated:           cw.truncated,
+			Raw:                 cw.cappedCopy(),
+			Truncated:           cw.truncated(),
 			RequestLineComplete: lineTerminated,
 			Headers:             headers,
 		}
@@ -268,9 +293,12 @@ func ParseRequestWithOptions(r *bufio.Reader, opts ParseOptions) (*RawRequest, e
 	// Set connection close semantics.
 	req.Close = shouldClose(req.Headers, req.Proto)
 
-	// Finalize raw bytes capture.
-	req.RawBytes = cw.bytes()
-	req.Truncated = cw.truncated
+	// Finalize raw bytes capture: WireHead is the send source, RawBytes
+	// the capped record copy (USK-1320).
+	req.WireHead, req.RawBytes, req.Truncated = cw.finalize()
+	if req.Truncated {
+		req.Anomalies = append(req.Anomalies, rawHeaderTruncatedAnomaly(len(req.RawBytes), len(req.WireHead)))
+	}
 
 	return req, nil
 }
@@ -321,9 +349,11 @@ func ParseResponseWithOptions(r *bufio.Reader, opts ParseOptions) (*RawResponse,
 		resp.Body = resolveResponseBody(r, resp.Headers, resp.Proto, resp.StatusCode, opts.MaxRawCapture)
 	}
 
-	// Finalize raw bytes capture.
-	resp.RawBytes = cw.bytes()
-	resp.Truncated = cw.truncated
+	// Finalize raw bytes capture (see ParseRequestWithOptions).
+	resp.WireHead, resp.RawBytes, resp.Truncated = cw.finalize()
+	if resp.Truncated {
+		resp.Anomalies = append(resp.Anomalies, rawHeaderTruncatedAnomaly(len(resp.RawBytes), len(resp.WireHead)))
+	}
 
 	return resp, nil
 }

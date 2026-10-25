@@ -98,6 +98,13 @@ type Envelope struct {
 	// HTTP/1.x parser surfaces AnomalyRawBodyTruncated on the message and Raw
 	// holds the truncated header+body prefix.
 	//
+	// The HTTP/1.x header section is bounded by the same cap
+	// (max_raw_capture_size). On cap breach the message carries
+	// AnomalyRawHeaderTruncated and Raw holds the capped head followed by the
+	// captured body — not a contiguous wire prefix. The cap is a recording
+	// policy only: the complete header section is still sent on the wire
+	// (USK-1320).
+	//
 	// Memory profile on the variant-record path: Clone deep-copies these
 	// bytes via cloneBytes, so an intercept that produces both an original
 	// and a modified variant peaks at roughly 2 × len(Raw) per flow on top of
