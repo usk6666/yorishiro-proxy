@@ -73,13 +73,18 @@ func readBigFrame(conn net.Conn, maxPayload int64, timeout time.Duration) (*wsla
 }
 
 // upgradeStreams returns the recorded Streams of the /ws Upgrade in
-// state (whatever protocol they are tagged with: a Stream whose first WS
-// frame fails before recording keeps its pre-swap http tag). The state
+// state, or in any state when state is "" (whatever protocol they are
+// tagged with: a Stream whose first WS frame fails before recording keeps
+// its pre-swap http tag). The state
 // filter keeps polling cheap: the flows listing loads every matched
 // Stream's messages, which here carry tens of MiB.
 func upgradeStreams(t *testing.T, h *mcptest.Harness, state string) []map[string]any {
 	t.Helper()
-	res := h.MustOK(t, "query", map[string]any{"resource": "flows", "filter": map[string]any{"url_pattern": "/ws", "state": state}})
+	filter := map[string]any{"url_pattern": "/ws"}
+	if state != "" {
+		filter["state"] = state
+	}
+	res := h.MustOK(t, "query", map[string]any{"resource": "flows", "filter": filter})
 	raw, _ := res.Decoded["flows"].([]any)
 	out := make([]map[string]any, 0, len(raw))
 	for _, r := range raw {
@@ -207,11 +212,21 @@ func TestE2E_WSMaxFrameSize_LoweredCapFailsOnReceive(t *testing.T) {
 		t.Errorf("upstream data-frame hits = %d, want 0 (the over-cap frame was forwarded)", got)
 	}
 
-	streamID, _ := waitUpgradeStreamState(t, h, "error", 15*time.Second)["id"].(string)
-	for dir, got := range wsDataMessageSizes(t, h, streamID) {
-		for _, size := range got {
-			if size == n {
-				t.Errorf("a %s data frame with the %d-byte over-cap body was recorded", dir, n)
+	waitUpgradeStreamState(t, h, "error", 15*time.Second)
+	// No large body is recorded here, so an unfiltered listing is cheap:
+	// exactly one /ws Stream may exist in total, and the size scan covers
+	// every one of them rather than only the "error" Stream.
+	all := upgradeStreams(t, h, "")
+	if len(all) != 1 {
+		t.Errorf("%d /ws Streams recorded in total, want 1: %v", len(all), all)
+	}
+	for _, st := range all {
+		streamID, _ := st["id"].(string)
+		for dir, got := range wsDataMessageSizes(t, h, streamID) {
+			for _, size := range got {
+				if size == n {
+					t.Errorf("Stream %s: a %s data frame with the %d-byte over-cap body was recorded", streamID, dir, n)
+				}
 			}
 		}
 	}

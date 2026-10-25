@@ -165,6 +165,14 @@ func (ds *deflateState) inflate(payload []byte, inCap, maxSize int64) (inflateRe
 		return inflateResult{}, fmt.Errorf("deflate decompress: compressed payload too large: %d > %d", len(payload), inCap)
 	}
 
+	// maxSize follows the operator-configured web_socket.max_frame_size,
+	// which has no upper bound. readDecompressed reads maxSize+1 bytes, so
+	// clamp here to keep that limit from wrapping negative (which would
+	// decode every message to an empty payload).
+	if maxSize > math.MaxInt64-1 {
+		maxSize = math.MaxInt64 - 1
+	}
+
 	// Guard against integer overflow when computing the allocation size
 	// for make([]byte, len(payload)+len(flateTrailer)).
 	if err := checkAllocationOverflow(len(payload), len(flateTrailer)); err != nil {
