@@ -12,10 +12,11 @@ import (
 
 // blockedStreamWriterStub is a flow.StreamWriter whose SaveStream always
 // fails (the Stream row already exists), forcing recordBlockedStream onto
-// its UpdateStream fallback.
+// its UpdateStream fallback. A non-nil updateErr makes the fallback fail too.
 type blockedStreamWriterStub struct {
-	updates []flow.StreamUpdate
-	ids     []string
+	updates   []flow.StreamUpdate
+	ids       []string
+	updateErr error
 }
 
 func (w *blockedStreamWriterStub) SaveStream(context.Context, *flow.Stream) error {
@@ -25,7 +26,7 @@ func (w *blockedStreamWriterStub) SaveStream(context.Context, *flow.Stream) erro
 func (w *blockedStreamWriterStub) UpdateStream(_ context.Context, id string, u flow.StreamUpdate) error {
 	w.ids = append(w.ids, id)
 	w.updates = append(w.updates, u)
-	return nil
+	return w.updateErr
 }
 
 // TestRecordBlockedStream_UpdateFallbackWritesPassedBlockedBy pins that the
@@ -68,5 +69,15 @@ func TestRecordBlockedStream_NothingRecorded(t *testing.T) {
 	}
 	if recordBlockedStream(context.Background(), &blockedStreamWriterStub{}, env, "", pipeline.BlockedBySafetyFilter, flow.OriginFuzz) {
 		t.Errorf("empty streamID: recordBlockedStream reported recorded, want false")
+	}
+
+	// SaveStream and the UpdateStream fallback both fail: no Stream row
+	// exists under the ID, so the report must be false.
+	failing := &blockedStreamWriterStub{updateErr: errors.New("disk I/O error")}
+	if recordBlockedStream(context.Background(), failing, env, "sid-1", pipeline.BlockedBySafetyFilter, flow.OriginFuzz) {
+		t.Errorf("SaveStream and UpdateStream both failed: recordBlockedStream reported recorded, want false")
+	}
+	if len(failing.updates) != 1 {
+		t.Errorf("UpdateStream calls = %d, want 1 (fallback must be attempted)", len(failing.updates))
 	}
 }
