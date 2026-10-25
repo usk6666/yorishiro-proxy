@@ -162,7 +162,7 @@ make test-cover     # ensure-ui → test with coverage report
 make vet            # ensure-ui → go vet ./...
 make fmt            # Format all files with gofmt -w .
 make lint           # gofmt check + golangci-lint (govet/staticcheck/unused/ineffassign/gocyclo)
-make lint-workflows # .github/ checks: status-check needs guard (yq), pinact, ghalint, actionlint+shellcheck
+make lint-workflows # .github/ checks: status-check needs + job permissions guards (yq), pinact, ghalint, actionlint+shellcheck
                     #   (needs network; tools pinned + sha256-verified in .workflow-lint-tools)
 make bench          # ensure-ui → run benchmarks
 make clean          # Delete build artifacts
@@ -197,7 +197,9 @@ make clean          # Delete build artifacts
 > binaries. Rule ownership: **pinact** owns action pinning (`--check --verify-comment
 > --min-age 7`: full SHA, the `# vX.Y.Z` comment must resolve to that SHA, no action
 > younger than 7 days); **ghalint** owns permissions / timeouts / `persist-credentials` /
-> secret and App-token scoping (its own SHA-pin policy is excluded in `.github/ghalint.yaml`);
+> secret and App-token scoping (its own SHA-pin policy is excluded in `.github/ghalint.yaml`),
+> except "every job declares its own `permissions:`" — ghalint skips that under a top-level
+> `permissions: {}`, so `tools/lint-workflows/check-job-permissions.sh` (yq) owns it;
 > **actionlint** owns expressions, contexts and `run:` scripts via the pinned shellcheck.
 > These are build-time tools run as separate executables, never shipped, so they are
 > outside the Dependency License Policy (shellcheck is GPL-3.0).

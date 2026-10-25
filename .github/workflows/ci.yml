@@ -7,8 +7,9 @@ on:
     branches: [main]
 
 # Nothing at the top level: every job declares its own permissions, so a job
-# added later starts from zero instead of silently inheriting a grant (ghalint
-# job_permissions, enforced by `make lint-workflows`).
+# added later starts from zero instead of silently inheriting a grant. That
+# every job declares its own block is enforced by `make lint-workflows`
+# (tools/lint-workflows/check-job-permissions.sh).
 permissions: {}
 
 jobs:

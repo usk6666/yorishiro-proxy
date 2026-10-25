@@ -32,7 +32,8 @@ on:
         default: "168h"
 
 # Nothing at the top level: the job below declares exactly what it needs, so a
-# job added later starts from zero instead of inheriting a grant.
+# job added later starts from zero instead of inheriting a grant (every job
+# declaring its own block is enforced by `make lint-workflows`).
 permissions: {}
 
 concurrency:

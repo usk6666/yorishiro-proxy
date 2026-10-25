@@ -27,7 +27,8 @@ on:
       - "go.mod"
       - "go.sum"
 
-# Nothing at the top level; each job declares its own (ghalint job_permissions).
+# Nothing at the top level; each job declares its own (enforced by
+# tools/lint-workflows/check-job-permissions.sh via `make lint-workflows`).
 permissions: {}
 
 jobs:
