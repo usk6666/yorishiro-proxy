@@ -9,7 +9,9 @@
       "protocol": "grpc",
       "protocol_summary": {
         "grpc_status": "0",
-        "grpc_status_name": "OK"
+        "grpc_status_name": "OK",
+        "method": "Do",
+        "service": "pkg.Svc"
       },
       "scheme": "https",
       "state": "complete",
@@ -25,7 +27,9 @@
       "protocol": "grpc-web",
       "protocol_summary": {
         "grpc_status": "0",
-        "grpc_status_name": "OK"
+        "grpc_status_name": "OK",
+        "method": "Do",
+        "service": "pkg.Svc"
       },
       "scheme": "https",
       "state": "complete",
@@ -114,6 +118,7 @@
       "method": "GET",
       "protocol": "ws",
       "protocol_summary": {
+        "last_frame_type": "Text",
         "message_count": "3"
       },
       "scheme": "https",
