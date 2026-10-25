@@ -864,6 +864,19 @@ type ProxyConfig struct {
 	// Valid values: "none" (default), "password".
 	SOCKS5Auth string `json:"socks5_auth,omitempty"`
 
+	// TransparentMode is the proxy_start transparent_mode default
+	// (USK-1316): "" (inherit / off), "none" (explicitly off) or
+	// "redirect" (accept REDIRECTed connections and route every TCP
+	// connection by its first bytes to its original destination; Linux
+	// only). See ValidateTransparentMode.
+	TransparentMode string `json:"transparent_mode,omitempty"`
+
+	// TransparentPeekTimeoutMs is the proxy_start
+	// transparent_peek_timeout_ms default: how long a transparent listener
+	// waits for the client's first bytes before treating the connection
+	// as server-first (passthrough). Zero = DefaultTransparentPeekTimeoutMs.
+	TransparentPeekTimeoutMs int `json:"transparent_peek_timeout_ms,omitempty"`
+
 	// SOCKS5Username is the username for SOCKS5 password authentication.
 	SOCKS5Username string `json:"socks5_username,omitempty"`
 
@@ -1038,6 +1051,12 @@ func (c *ProxyConfig) Validate() error {
 	}
 	if err := c.TargetScopePolicy.Validate(); err != nil {
 		return fmt.Errorf("target_scope_policy: %w", err)
+	}
+	if err := ValidateTransparentMode(c.TransparentMode, len(c.TCPForwards), c.SOCKS5Auth); err != nil {
+		return err
+	}
+	if err := ValidateTransparentPeekTimeoutMs(c.TransparentPeekTimeoutMs); err != nil {
+		return err
 	}
 	return nil
 }

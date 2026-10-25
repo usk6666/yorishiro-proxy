@@ -80,6 +80,21 @@ type FullListenerConfig struct {
 	// because MaxConnections was saturated (USK-1142). It runs on the
 	// reject goroutine and must be O(1), non-blocking, and I/O-free.
 	OnReject func(RejectInfo)
+
+	// OriginalDst, when non-nil together with OnTransparent, makes the
+	// listener a transparent (REDIRECT) listener (USK-1316): protocol
+	// detection and the PeekTimeout deadline are skipped; each accepted
+	// connection's original destination is resolved through it before a
+	// byte is read, and a connection without a usable one — the resolver
+	// failed, or it names an unspecified address, port 0 or the
+	// connection's own local address — is closed with a Warn log and
+	// OnTransparent is not called. The admitted destination reaches
+	// OnTransparent via OriginalDstFromContext.
+	OriginalDst OriginalDstResolver
+
+	// OnTransparent handles every admitted connection of a transparent
+	// listener (see OriginalDst).
+	OnTransparent HandlerFunc
 }
 
 // FullListener accepts TCP connections, performs two-stage protocol detection,
@@ -105,6 +120,11 @@ type FullListener struct {
 	// onReject receives one RejectInfo per capacity rejection (USK-1142).
 	// nil keeps the log-only behaviour.
 	onReject func(RejectInfo)
+
+	// originalDst / onTransparent are the transparent-mode resolver and
+	// handler (USK-1316); both nil on an explicit-proxy listener.
+	originalDst   OriginalDstResolver
+	onTransparent HandlerFunc
 
 	// now is the clock used for rejection timestamps and the Warn
 	// rate limiter. Overridable in tests (before Start).
@@ -160,6 +180,8 @@ func NewFullListener(cfg FullListenerConfig) *FullListener {
 		onHTTP2:        cfg.OnHTTP2,
 		onTCP:          cfg.OnTCP,
 		onReject:       cfg.OnReject,
+		originalDst:    cfg.OriginalDst,
+		onTransparent:  cfg.OnTransparent,
 		now:            time.Now,
 
 		rejectPeekTimeout: defaultRejectPeekTimeout,

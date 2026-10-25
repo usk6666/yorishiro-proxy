@@ -2129,6 +2129,8 @@ type queryListenerStatusEntry struct {
 	UpstreamProxy               string `json:"upstream_proxy,omitempty"`
 	UpstreamProxyTemplate       string `json:"upstream_proxy_template,omitempty"`
 	UpstreamProxyRotationPolicy string `json:"upstream_proxy_rotation_policy,omitempty"`
+	// TransparentMode is "redirect" for a transparent listener (USK-1316).
+	TransparentMode string `json:"transparent_mode,omitempty"`
 }
 
 // queryStatusResult is the response for the status resource.
@@ -2242,6 +2244,7 @@ func (s *Server) populateManagerStatus(result *queryStatusResult) {
 				UpstreamProxy:               connector.RedactProxyURL(st.UpstreamProxy),
 				UpstreamProxyTemplate:       connector.RedactProxyURL(st.UpstreamProxyTemplate),
 				UpstreamProxyRotationPolicy: st.UpstreamProxyRotationPolicy,
+				TransparentMode:             st.TransparentMode,
 			}
 			result.Listeners = append(result.Listeners, entry)
 		}

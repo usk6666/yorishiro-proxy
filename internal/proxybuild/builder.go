@@ -305,6 +305,30 @@ type Deps struct {
 	// BuildConfig's dynamic slot so the live dial path picks them up
 	// (USK-734).
 	UpstreamProxy *url.URL
+
+	// --- Optional transparent mode (USK-1316) ---
+
+	// TransparentMode selects the listener mode: "" / "none" for the
+	// explicit proxy (CONNECT / SOCKS5 / plain-HTTP forward), "redirect"
+	// for a transparent listener that accepts REDIRECTed connections and
+	// routes every TCP connection to its original destination by its
+	// first bytes (plain HTTP → L7, everything else → metadata-only
+	// passthrough). Any other value is a BuildLiveStack error.
+	TransparentMode string
+
+	// OriginalDstResolver resolves a transparent listener's original
+	// destinations. Nil uses connector.PlatformOriginalDstResolver, which
+	// is a BuildLiveStack error on a platform without REDIRECT support.
+	// Tests inject a fake (a real REDIRECT needs root + nftables).
+	OriginalDstResolver connector.OriginalDstResolver
+
+	// TransparentPeekTimeout is the transparent first-bytes peek
+	// deadline. Zero = connector.DefaultTransparentPeekTimeout.
+	TransparentPeekTimeout time.Duration
+
+	// NameResolver resolves SNI / Host names for the transparent
+	// name-binding check. Nil = net.DefaultResolver.
+	NameResolver connector.NameResolver
 }
 
 // Stack holds the per-listener live RFC-001 assembly produced by

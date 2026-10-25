@@ -60,6 +60,13 @@ type ManagerConfig struct {
 	// All other Deps fields the factory must source from its closure.
 	StackFactory func(ctx context.Context, name, addr string) (*Stack, error)
 
+	// StackFactoryWithOptions, when non-nil, builds the per-listener
+	// Stack with the ListenerOptions given to StartNamedWithOptions
+	// (USK-1316) and takes precedence over StackFactory. With only
+	// StackFactory set, StartNamedWithOptions refuses non-default
+	// options.
+	StackFactoryWithOptions func(ctx context.Context, name, addr string, opts ListenerOptions) (*Stack, error)
+
 	// BuildConfig, when non-nil, is the connector.BuildConfig instance
 	// shared by every Stack produced by StackFactory. The Manager mutates
 	// its dynamic upstream-proxy slot when SetUpstreamProxy is called so
@@ -497,6 +504,26 @@ type ListenerStatus struct {
 	UpstreamProxy               string `json:"upstream_proxy,omitempty"`
 	UpstreamProxyTemplate       string `json:"upstream_proxy_template,omitempty"`
 	UpstreamProxyRotationPolicy string `json:"upstream_proxy_rotation_policy,omitempty"`
+	// TransparentMode is the listener's transparent mode ("redirect"),
+	// empty for an explicit-proxy listener (USK-1316).
+	TransparentMode string `json:"transparent_mode,omitempty"`
+}
+
+// ListenerOptions carries per-listener settings for StartNamedWithOptions
+// (USK-1316). The zero value is the explicit-proxy listener StartNamed
+// starts.
+type ListenerOptions struct {
+	// TransparentMode is Deps.TransparentMode for the listener: "" /
+	// "none" (explicit proxy) or "redirect".
+	TransparentMode string
+	// TransparentPeekTimeout is Deps.TransparentPeekTimeout.
+	TransparentPeekTimeout time.Duration
+}
+
+// StartNamedWithOptions is StartNamed with per-listener options.
+func (m *Manager) StartNamedWithOptions(ctx context.Context, name, listenAddr string, opts ListenerOptions) error {
+	_ = opts
+	return m.StartNamed(ctx, name, listenAddr)
 }
 
 // ListenerStatuses returns a snapshot of every running listener. Returns

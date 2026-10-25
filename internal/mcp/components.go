@@ -136,6 +136,9 @@ func (p *Pipeline) WithReleaseTracker(tr *common.ReleaseTracker) *Pipeline {
 type proxyManager interface {
 	Start(ctx context.Context, listenAddr string) error
 	StartNamed(ctx context.Context, name, listenAddr string) error
+	// StartNamedWithOptions starts a listener with per-listener options
+	// (USK-1316: transparent_mode).
+	StartNamedWithOptions(ctx context.Context, name, listenAddr string, opts proxybuild.ListenerOptions) error
 	Stop(ctx context.Context) error
 	StopNamed(ctx context.Context, name string) error
 	StopAll(ctx context.Context) error
@@ -315,6 +318,7 @@ type ListenerStatus struct {
 	UpstreamProxy               string `json:"upstream_proxy,omitempty"`
 	UpstreamProxyTemplate       string `json:"upstream_proxy_template,omitempty"`
 	UpstreamProxyRotationPolicy string `json:"upstream_proxy_rotation_policy,omitempty"`
+	TransparentMode             string `json:"transparent_mode,omitempty"`
 }
 
 // managerIsNil reports whether m is either a nil interface or wraps a
@@ -358,6 +362,7 @@ func listenerStatuses(m proxyManager) []ListenerStatus {
 				UpstreamProxy:               s.UpstreamProxy,
 				UpstreamProxyTemplate:       s.UpstreamProxyTemplate,
 				UpstreamProxyRotationPolicy: s.UpstreamProxyRotationPolicy,
+				TransparentMode:             s.TransparentMode,
 			}
 		}
 		return out

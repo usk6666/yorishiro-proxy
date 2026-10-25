@@ -117,6 +117,18 @@ type proxyStartInput struct {
 	// Required when socks5_auth is "password".
 	SOCKS5Password string `json:"socks5_password,omitempty" jsonschema:"password for SOCKS5 password authentication"`
 
+	// TransparentMode selects the listener mode (USK-1316): omitted
+	// inherits the config-file default (off when none), "none" is the
+	// explicit proxy, "redirect" accepts connections an nftables REDIRECT
+	// rule diverted to the listener and routes every TCP connection to
+	// its original destination by its first bytes (Linux only).
+	TransparentMode string `json:"transparent_mode,omitempty" jsonschema:"listener mode: none (explicit proxy, default) or redirect (transparent egress gateway: accept nftables-REDIRECTed TCP and relay each connection to its original destination; plain HTTP via the L7 pipeline, TLS and everything else as metadata-only passthrough; Linux only). Incompatible with tcp_forwards and socks5_auth=password. Full reference: call docs(topic=\"proxy_start\")"`
+
+	// TransparentPeekTimeoutMs is how long a transparent listener waits
+	// for the client's first bytes before treating the connection as
+	// server-first (passthrough). Default 1000.
+	TransparentPeekTimeoutMs *int `json:"transparent_peek_timeout_ms,omitempty" jsonschema:"transparent mode only: milliseconds to wait for the client's first bytes before relaying as server-first passthrough (100-600000; default: 1000)"`
+
 	// TLSFingerprint selects the TLS ClientHello fingerprint profile for upstream connections.
 	// Valid values: "firefox" (default), "chrome", "safari", "edge", "random", "none" (standard crypto/tls).
 	// If omitted, defaults to "firefox" (camoufox coherence, USK-1013).
@@ -229,6 +241,9 @@ type proxyStartResult struct {
 	Status string `json:"status"`
 	// TCPForwards is the configured TCP forwarding map (if any).
 	TCPForwards map[string]*config.ForwardConfig `json:"tcp_forwards,omitempty"`
+	// TransparentMode is "redirect" for a transparent listener, omitted
+	// for an explicit-proxy listener (USK-1316).
+	TransparentMode string `json:"transparent_mode,omitempty"`
 }
 
 // registerProxyStart registers the proxy_start MCP tool.
