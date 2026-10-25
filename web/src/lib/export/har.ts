@@ -135,7 +135,7 @@ export function downloadHar(har: HarLog, filename: string): void {
 // ---------------------------------------------------------------------------
 
 function buildEntry(flow: FlowDetailResult): HarEntry {
-  const httpVersion = mapHttpVersion(flow.protocol);
+  const httpVersion = harHttpVersion(flow.http_version);
 
   return {
     startedDateTime: flow.timestamp,
@@ -148,7 +148,9 @@ function buildEntry(flow: FlowDetailResult): HarEntry {
 }
 
 function buildEntryFromListItem(flow: FlowEntry): HarEntry {
-  const httpVersion = mapHttpVersion(flow.protocol);
+  // `query resource=flows` entries carry no http_version, so list exports
+  // use the same fallback as a flow without a recorded version.
+  const httpVersion = harHttpVersion(undefined);
 
   return {
     startedDateTime: flow.timestamp,
@@ -247,16 +249,22 @@ function buildResponse(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function mapHttpVersion(protocol: string): string {
-  switch (protocol) {
-    case "HTTP/1.x":
+/**
+ * HAR httpVersion for a flow's wire HTTP version. Mirrors Go
+ * `harHTTPVersion` (internal/flow/har.go) so the WebUI and server-side HAR
+ * exports agree: http/1.0 and http/1.1 become "HTTP/1.0" / "HTTP/1.1", h2 /
+ * h2c (and any other value) are written verbatim, and an empty version
+ * falls back to "HTTP/1.1".
+ */
+function harHttpVersion(httpVersion: string | null | undefined): string {
+  switch (httpVersion ?? "") {
+    case "http/1.0":
+      return "HTTP/1.0";
+    case "http/1.1":
+    case "":
       return "HTTP/1.1";
-    case "HTTPS":
-      return "HTTP/1.1";
-    case "HTTP/2":
-      return "h2";
     default:
-      return "HTTP/1.1";
+      return httpVersion as string;
   }
 }
 

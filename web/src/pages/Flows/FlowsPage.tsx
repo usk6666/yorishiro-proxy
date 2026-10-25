@@ -8,7 +8,13 @@ import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
 import { useToast } from "../../components/ui/Toast.js";
 import { buildHarFromList, downloadHar } from "../../lib/export/har.js";
+import { protocolVariant } from "../../lib/mcp/dispatch.js";
 import { useManage, useQuery } from "../../lib/mcp/hooks.js";
+import {
+  HTTP_VERSION_FILTER_VALUES,
+  PROTOCOL_FILTER_VALUES,
+  SCHEME_FILTER_VALUES,
+} from "../../lib/mcp/protocols.js";
 import type { FlowEntry, ManageImportFlowsResult, QueryFilter } from "../../lib/mcp/types.js";
 import "./FlowsPage.css";
 
@@ -29,10 +35,8 @@ function useDebounce<T>(value: T, delay: number): T {
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "gRPC-Web", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"] as const;
 const METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] as const;
 const FLOW_STATES = ["active", "complete", "error"] as const;
-const SCHEMES = ["https", "http", "wss", "ws", "tcp"] as const;
 const BLOCKED_BY = ["target_scope", "intercept_drop", "intercept_cancelled", "rate_limit", "safety_filter", "budget", "capacity"] as const;
 const PAGE_SIZES = [25, 50, 100] as const;
 const POLL_INTERVALS = [
@@ -59,31 +63,6 @@ function statusCodeClass(code: number): string {
   if (code >= 400 && code < 500) return "status-code--4xx";
   if (code >= 500 && code < 600) return "status-code--5xx";
   return "status-code--other";
-}
-
-/** Get the Badge variant for a protocol. */
-function protocolVariant(protocol: string): "default" | "success" | "warning" | "danger" | "info" {
-  switch (protocol) {
-    case "HTTP/1.x":
-      return "default";
-    case "HTTPS":
-      return "success";
-    case "WebSocket":
-      return "info";
-    case "HTTP/2":
-      return "info";
-    case "gRPC":
-    case "gRPC-Web":
-      return "warning";
-    case "TCP":
-      return "danger";
-    case "SOCKS5+HTTPS":
-      return "success";
-    case "SOCKS5+HTTP":
-      return "default";
-    default:
-      return "default";
-  }
 }
 
 /** Format duration in milliseconds to a human-readable string. */
@@ -141,6 +120,7 @@ export function FlowsPage() {
   // --- Filter state ---
   const [showFilters, setShowFilters] = useState(false);
   const [selectedProtocol, setSelectedProtocol] = useState<string>("");
+  const [selectedHttpVersion, setSelectedHttpVersion] = useState<string>("");
   const [selectedMethod, setSelectedMethod] = useState<string>("");
   const [statusCodeRange, setStatusCodeRange] = useState<string>("");
   const [urlPattern, setUrlPattern] = useState<string>("");
@@ -183,6 +163,9 @@ export function FlowsPage() {
     if (selectedProtocol) {
       f.protocol = selectedProtocol;
     }
+    if (selectedHttpVersion) {
+      f.http_version = selectedHttpVersion;
+    }
     if (selectedScheme) {
       f.scheme = selectedScheme;
     }
@@ -214,7 +197,7 @@ export function FlowsPage() {
       f.tag = debouncedTagFilter.trim();
     }
     return Object.keys(f).length > 0 ? f : undefined;
-  }, [selectedProtocol, selectedScheme, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedBlockedBy, selectedState, debouncedHostFilter, debouncedBodyContains, debouncedTagFilter]);
+  }, [selectedProtocol, selectedHttpVersion, selectedScheme, selectedMethod, debouncedUrlPattern, statusCodeRange, selectedBlockedBy, selectedState, debouncedHostFilter, debouncedBodyContains, debouncedTagFilter]);
 
   // --- Query flows ---
   const { data, loading, error, refetch } = useQuery("flows", {
@@ -242,6 +225,15 @@ export function FlowsPage() {
   const selectProtocol = useCallback(
     (protocol: string) => {
       setSelectedProtocol(protocol);
+      handleFilterChange();
+    },
+    [handleFilterChange],
+  );
+
+  // --- HTTP version select ---
+  const handleHttpVersionChange = useCallback(
+    (e: React.ChangeEvent<HTMLSelectElement>) => {
+      setSelectedHttpVersion(e.target.value);
       handleFilterChange();
     },
     [handleFilterChange],
@@ -590,7 +582,7 @@ export function FlowsPage() {
                 />
                 All
               </label>
-              {PROTOCOLS.map((proto) => (
+              {PROTOCOL_FILTER_VALUES.map((proto) => (
                 <label key={proto} className="flows-filter-checkbox">
                   <input
                     type="radio"
@@ -602,6 +594,22 @@ export function FlowsPage() {
                 </label>
               ))}
             </div>
+          </div>
+
+          <div className="flows-filter-group">
+            <span className="flows-filter-label">HTTP Version</span>
+            <select
+              className="flows-filter-select"
+              value={selectedHttpVersion}
+              onChange={handleHttpVersionChange}
+            >
+              <option value="">All</option>
+              {HTTP_VERSION_FILTER_VALUES.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="flows-filter-group">
@@ -659,7 +667,7 @@ export function FlowsPage() {
               onChange={handleSchemeChange}
             >
               <option value="">All</option>
-              {SCHEMES.map((s) => (
+              {SCHEME_FILTER_VALUES.map((s) => (
                 <option key={s} value={s}>
                   {s}
                 </option>
