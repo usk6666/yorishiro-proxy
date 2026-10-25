@@ -44,10 +44,28 @@ func TestApplyBodyPatches_JSONPath_ByteExact(t *testing.T) {
 			want:    `{"o":{"k":1},"o":{"k":9}}`,
 		},
 		{
+			// The key is spelled with a JSON escape; it is matched on its
+			// decoded form, and the raw key bytes (and the other escaped
+			// string) are preserved byte-for-byte.
 			name:    "escaped_key",
-			body:    `{"zeta":1, "other":"é"}`,
+			body:    `{"\u007aeta":1, "other":"\u00e9"}`,
 			patches: []BodyPatch{{JSONPath: "$.zeta", Value: "v"}},
-			want:    `{"zeta":"v", "other":"é"}`,
+			want:    `{"\u007aeta":"v", "other":"\u00e9"}`,
+		},
+		{
+			// A plain and an escaped spelling of the same key are duplicates
+			// after decoding; the last one (the escaped spelling) wins.
+			name:    "escaped_key_duplicate_last_wins",
+			body:    `{"zeta":5,"\u007aeta":1}`,
+			patches: []BodyPatch{{JSONPath: "$.zeta", Value: "v"}},
+			want:    `{"zeta":5,"\u007aeta":"v"}`,
+		},
+		{
+			// A surrogate-pair escaped key matches the decoded code point.
+			name:    "escaped_key_surrogate_pair",
+			body:    `{"\ud83d\ude00":1}`,
+			patches: []BodyPatch{{JSONPath: "$.\U0001F600", Value: float64(2)}},
+			want:    `{"\ud83d\ude00":2}`,
 		},
 		{
 			name: "sequential_length_change",

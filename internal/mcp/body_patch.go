@@ -12,7 +12,7 @@ import (
 )
 
 // BodyPatch represents a single body modification operation.
-// Either json_path+value or regex+replace must be specified (mutually exclusive).
+// Either json_path+(value|value_json) or regex+replace must be specified (mutually exclusive).
 type BodyPatch struct {
 	// JSONPath is a dot-notation JSON path (e.g., "$.user.name") for JSON body patching.
 	JSONPath string `json:"json_path,omitempty"`
