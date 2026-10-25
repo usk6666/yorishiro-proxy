@@ -130,12 +130,14 @@ type FuzzStore interface {
 }
 
 // FuzzResultListOptions configures fuzz result listing behavior.
+//
+// There is deliberately no response-body predicate here: flows.body holds the
+// still Content-Encoded wire bytes, so an SQL substring match would silently
+// miss compressed responses. Body filtering is done on the MCP read side after
+// decoding (internal/mcp query_fuzz_body_filter.go).
 type FuzzResultListOptions struct {
 	// StatusCode filters results by HTTP status code (0 means no filter).
 	StatusCode int
-	// BodyContains filters results whose response body (in the linked flow message)
-	// contains this substring. Empty string means no filter.
-	BodyContains string
 	// ResultIDs filters results to only those whose ID is in this set.
 	// When non-nil and non-empty, an IN clause is added to the query.
 	ResultIDs []string
@@ -284,17 +286,6 @@ func fuzzResultWhereClause(fuzzID string, opts FuzzResultListOptions) (string, [
 	if opts.StatusCode != 0 {
 		where += " AND status_code = ?"
 		args = append(args, opts.StatusCode)
-	}
-	if opts.BodyContains != "" {
-		// Join with messages table to filter by response body content.
-		// Use CAST to convert BLOB body to TEXT for substring matching.
-		where += ` AND EXISTS (
-			SELECT 1 FROM flows m
-			WHERE m.stream_id = fuzz_results.stream_id
-			  AND m.direction = 'receive'
-			  AND INSTR(CAST(m.body AS TEXT), ?) > 0
-		)`
-		args = append(args, opts.BodyContains)
 	}
 	if len(opts.ResultIDs) > 0 {
 		placeholders := ""

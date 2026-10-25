@@ -263,9 +263,10 @@ type queryFilter struct {
 	ListenerName string `json:"listener_name,omitempty" jsonschema:"listener name filter for flows (exact match on the proxy_start name, e.g. default)"`
 	// Host filters flows by host (matches server_addr, tags.target or URL host).
 	Host string `json:"host,omitempty" jsonschema:"host filter for flows (matches server_addr, tags.target or URL host, e.g. example.com)"`
-	// BodyContains filters fuzz_results by response body substring.
-	// Rejected on resource=flows (validateFlowFilters).
-	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter; applies to fuzz_results only (rejected on flows)"`
+	// BodyContains filters fuzz_results by response body substring, matched
+	// against both the stored wire bytes and the Content-Encoding-decoded body
+	// (filterFuzzResultsByBody). Rejected on resource=flows (validateFlowFilters).
+	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter (matches the raw or the gzip/deflate/br/zstd-decoded receive body); applies to fuzz_results only (rejected on flows)"`
 	// OutliersOnly filters fuzz_results to return only outlier results.
 	// Rejected on resource=flows (validateFlowFilters).
 	OutliersOnly bool `json:"outliers_only,omitempty" jsonschema:"return only outlier fuzz results (by status_code, body_length, or timing); applies to fuzz_results only (rejected on flows)"`

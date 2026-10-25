@@ -28,7 +28,7 @@ Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` reso
 - **listener_name** (string): Listener filter for flows (exact match). Selects the streams accepted by the listener started with `proxy_start` `name` (`"default"` when no name was given); TCP-forward streams carry their parent listener's name. Streams from `resend_*` / fuzz and rows recorded before this field existed have an empty `listener_name` and never match.
 - **host** (string): Host filter for flows. Matches against the `server_addr`, the requested destination in `tags.target` (error / audit streams that never reached an upstream socket: `upstream_tls_error`, `client_tls_error`, proxy-closed request heads, `capacity` rejections), or the host portion of the request URL (e.g. `"example.com"`). Because `server_addr` is the upstream socket's peer, a stream reached through an upstream proxy matches the proxy's host here.
 - **direction** (string): Message direction filter for the `messages` resource (`"send"` or `"receive"`).
-- **body_contains** (string): Response body substring filter. fuzz_results only; rejected on `flows`.
+- **body_contains** (string): Response body substring filter (byte-exact, case-sensitive). Matches when the substring appears in either the raw recorded receive body or its Content-Encoding-decoded form (`gzip`, `x-gzip`, `deflate`, `br`, `zstd`). Stacked / unknown codings and bodies that fail to decode (including bodies truncated at storage time) are matched on the raw bytes only. fuzz_results only; rejected on `flows`.
 - **outliers_only** (boolean): Return only outlier fuzz results (detected by status_code, body_length, or timing deviation). fuzz_results only; rejected on `flows`.
 - **status** (string): Job status filter (`"running"`, `"paused"`, `"completed"`, `"cancelled"`, `"error"`). fuzz_jobs only; rejected on `flows` (use `state` for the flow lifecycle state).
 - **tag** (string): Exact-match tag filter (case-sensitive, not trimmed). fuzz_jobs: the job tag. flows: `Stream.Tags["tag"]`, the label `resend_*` / `fuzz_*` record from their `tag` parameter. Attempts that failed before completion may be untagged.
@@ -337,6 +337,12 @@ Returns: `jobs[]` (id, flow_id, status, tag, total, completed_count, error_count
 Get results for a specific fuzz job with filtering, sorting, pagination, aggregate statistics, and outlier detection.
 
 Requires: `fuzz_id` (fuzz job ID). Supports `filter.status_code`, `filter.body_contains`, `filter.outliers_only`, `fields`, `sort_by`, `limit`, and `offset`.
+
+`filter.body_contains` searches every receive flow of the result's stream, raw and Content-Encoding-decoded (gzip / deflate / br / zstd), so a payload reflected in a compressed response is found. When it is set, `total`, `summary`, and `outliers_only` are all computed over the body-matched results.
+
+The match runs against the recorded bytes (raw and decoded) **before** Output Filter masking, so a `body_contains` hit can confirm content that `query` output shows masked; the masking applies only to returned data, not to the filter predicate.
+
+Cost: with `body_contains`, every candidate's receive bodies are read and decoded (up to 16 MiB each) on every call, including each page of a paginated listing. Narrow the candidate set with `filter.status_code` where possible.
 
 The `summary` includes:
 - **total_results**: Total number of matching results.
