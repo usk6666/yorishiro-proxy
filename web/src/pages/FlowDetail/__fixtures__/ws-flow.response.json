@@ -1,0 +1,105 @@
+{
+  "conn_id": "conn-stream-ws",
+  "duration_ms": 0,
+  "http_version": "http/1.1",
+  "id": "stream-ws",
+  "message_count": 3,
+  "message_preview": [
+    {
+      "body": "GET /echo HTTP/1.1\r\nHost: ws.example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+      "body_encoding": "text",
+      "direction": "send",
+      "headers": {
+        "Connection": [
+          "Upgrade"
+        ],
+        "Host": [
+          "ws.example.com"
+        ],
+        "Upgrade": [
+          "websocket"
+        ]
+      },
+      "id": "stream-ws-0",
+      "metadata": {
+        "protocol": "http"
+      },
+      "method": "GET",
+      "sequence": 0,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://ws.example.com/echo"
+    },
+    {
+      "body": "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+      "body_encoding": "text",
+      "direction": "receive",
+      "headers": {
+        "Connection": [
+          "Upgrade"
+        ],
+        "Upgrade": [
+          "websocket"
+        ]
+      },
+      "id": "stream-ws-1",
+      "metadata": {
+        "protocol": "http"
+      },
+      "sequence": 1,
+      "status_code": 101,
+      "timestamp": "2026-01-01T00:00:00Z"
+    },
+    {
+      "body": "hi",
+      "body_encoding": "text",
+      "direction": "send",
+      "id": "stream-ws-2",
+      "metadata": {
+        "protocol": "ws",
+        "ws_compressed": "false",
+        "ws_fin": "true",
+        "ws_opcode": "1"
+      },
+      "sequence": 2,
+      "timestamp": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "method": "GET",
+  "protocol": "ws",
+  "protocol_summary": {
+    "last_frame_type": "Text",
+    "message_count": "3"
+  },
+  "raw_request": "R0VUIC9lY2hvIEhUVFAvMS4xDQpIb3N0OiB3cy5leGFtcGxlLmNvbQ0KVXBncmFkZTogd2Vic29ja2V0DQpDb25uZWN0aW9uOiBVcGdyYWRlDQoNCg==",
+  "raw_response": "SFRUUC8xLjEgMTAxIFN3aXRjaGluZyBQcm90b2NvbHMNClVwZ3JhZGU6IHdlYnNvY2tldA0KQ29ubmVjdGlvbjogVXBncmFkZQ0KDQo=",
+  "request_body": "",
+  "request_body_encoding": "text",
+  "request_body_truncated": false,
+  "request_headers": {
+    "Connection": [
+      "Upgrade"
+    ],
+    "Host": [
+      "ws.example.com"
+    ],
+    "Upgrade": [
+      "websocket"
+    ]
+  },
+  "response_body": "",
+  "response_body_encoding": "text",
+  "response_body_truncated": false,
+  "response_headers": {
+    "Connection": [
+      "Upgrade"
+    ],
+    "Upgrade": [
+      "websocket"
+    ]
+  },
+  "response_status_code": 101,
+  "scheme": "https",
+  "state": "complete",
+  "timestamp": "2026-01-01T00:00:00Z",
+  "url": "https://ws.example.com/echo"
+}

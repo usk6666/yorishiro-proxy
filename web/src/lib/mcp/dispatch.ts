@@ -222,6 +222,15 @@ export function isStreamingFlow(
   return (flow.flow_type ?? "") !== "unary";
 }
 
+/** Scaffolding: alias with isStreamingFlow's semantics until the fix lands. */
+export function needsMessagesQuery(
+  flow: Pick<FlowDetailResult, "protocol"> | null | undefined,
+): boolean {
+  return isStreamingFlow(
+    flow as unknown as Pick<FlowDetailResult, "flow_type"> | null,
+  );
+}
+
 /**
  * Whether a flow recorded a response. Used to decide between rendering a
  * response panel vs an explanatory empty state. Tolerant to missing fields.
