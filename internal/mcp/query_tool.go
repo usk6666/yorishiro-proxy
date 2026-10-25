@@ -1943,13 +1943,15 @@ func buildConnInfoResult(ci *flow.ConnectionInfo) *connInfoResult {
 // flowHasOversizedBody reports whether the categorized send/recv messages
 // (request/response) or any per-message body in the streaming preview window
 // carries a stored body larger than oversizeAdvisoryThreshold. Used to gate
-// the Advisory hint on the flow resource.
+// the Advisory hint on the flow resource. The send/recv messages are also
+// emitted as raw_request / raw_response with their full, uncapped RawBytes,
+// so their raw length counts regardless of whether they carry a body; the
+// preview window counts only what message_preview emits.
 func flowHasOversizedBody(cat categorizedMessages, msgs []*flow.Flow) bool {
-	if cat.sendMsg != nil && len(cat.sendMsg.Body) > oversizeAdvisoryThreshold {
-		return true
-	}
-	if cat.recvMsg != nil && len(cat.recvMsg.Body) > oversizeAdvisoryThreshold {
-		return true
+	for _, m := range []*flow.Flow{cat.sendMsg, cat.recvMsg} {
+		if m != nil && (len(m.Body) > oversizeAdvisoryThreshold || len(m.RawBytes) > oversizeAdvisoryThreshold) {
+			return true
+		}
 	}
 	for _, m := range msgs {
 		if m == nil {
