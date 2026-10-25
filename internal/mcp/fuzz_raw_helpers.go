@@ -906,11 +906,20 @@ func (s *Server) runFuzzRawSingleVariantWithResponse(ctx context.Context, plan *
 // Drop / Respond on the receive side is intentionally ignored (mirror
 // resend_raw): the diagnostic caller sees what the upstream actually
 // sent.
+//
+// A BudgetStep Drop on the send side leaves a state="error",
+// blocked_by="budget" audit Stream under streamID stamped
+// flow.OriginFuzz (mirror resend_raw / fuzz_http) and returns
+// errBudgetExhausted.
 func (s *Server) runFuzzRawSingleExchange(ctx context.Context, plan *fuzzRawPlan, streamID string, payload []byte, p *pipeline.Pipeline) ([]byte, int, bool, error) {
 	sendEnv := buildFuzzRawSendEnvelope(plan, streamID, payload)
-	postSend, action, custom := p.Run(ctx, sendEnv)
+	postSend, action, custom, blockedBy := p.RunWithBlockedBy(ctx, sendEnv)
 	switch action {
 	case pipeline.Drop:
+		if blockedBy == pipeline.BlockedByBudget {
+			recordBudgetBlockedStream(ctx, s.flowStore.store, postSend, streamID, flow.OriginFuzz)
+			return nil, 0, false, errBudgetExhausted
+		}
 		return nil, 0, false, errors.New("send envelope dropped by pipeline")
 	case pipeline.Respond:
 		if custom == nil {

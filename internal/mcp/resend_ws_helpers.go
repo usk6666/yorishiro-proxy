@@ -708,17 +708,22 @@ func lookupKVHeader(headers []envelope.KeyValue, name string) string {
 //
 // Returns the terminating envelope (the result frame). nil is returned
 // when the pipeline drops the send envelope before it reaches the wire.
-func (s *Server) runResendWS(ctx context.Context, plan *resendWSPlan, sendEnv *envelope.Envelope, p *pipeline.Pipeline) (*envelope.Envelope, error) {
+//
+// origin is the caller's flow.Origin (flow.OriginResend from resend_ws,
+// flow.OriginFuzz from fuzz_ws). It stamps the budget audit Stream left
+// when the call is over budget, so it must match the WithOrigin value of
+// the caller's pipeline.
+func (s *Server) runResendWS(ctx context.Context, plan *resendWSPlan, sendEnv *envelope.Envelope, p *pipeline.Pipeline, origin flow.Origin) (*envelope.Envelope, error) {
 	if p == nil {
 		return nil, errors.New("resend pipeline is nil")
 	}
 
 	// USK-818: explicit budget check. The synthetic WSMessage envelope
 	// passed through the pipeline is filtered by BudgetStep (treated as
-	// post-Upgrade), but the user-facing resend_ws invocation should
-	// count as one request. Check before the upstream dial so an
+	// post-Upgrade), but the user-facing resend_ws / fuzz_ws invocation
+	// should count as one request. Check before the upstream dial so an
 	// over-budget call short-circuits without performing the Upgrade.
-	if err := s.budgetCheckResendUpgrade(ctx, sendEnv, sendEnv.StreamID, flow.OriginResend); err != nil {
+	if err := s.budgetCheckResendUpgrade(ctx, sendEnv, sendEnv.StreamID, origin); err != nil {
 		return nil, err
 	}
 

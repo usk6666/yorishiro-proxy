@@ -30,6 +30,8 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // resendWSInput is the typed input for the resend_ws tool.
@@ -170,7 +172,7 @@ func (s *Server) handleResendWS(ctx context.Context, _ *gomcp.CallToolRequest, i
 		return nil, nil, fmt.Errorf("resend_ws: %w", err)
 	}
 
-	respEnv, err := s.runResendWS(rtCtx, plan, sendEnv, pipe)
+	respEnv, err := s.runResendWS(rtCtx, plan, sendEnv, pipe, flow.OriginResend)
 	// USK-789: resend bypasses session.RunSession so the proxy path's
 	// OnComplete-driven Stream finalisation never fires. Mirror the
 	// contract here so the new Stream transitions out of State="active"
