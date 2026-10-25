@@ -72,12 +72,14 @@ func readBigFrame(conn net.Conn, maxPayload int64, timeout time.Duration) (*wsla
 	return f, err
 }
 
-// upgradeStreams returns the recorded Streams of the /ws Upgrade
-// (whatever protocol they are tagged with: a Stream whose first WS frame
-// fails before recording keeps its pre-swap http tag).
-func upgradeStreams(t *testing.T, h *mcptest.Harness) []map[string]any {
+// upgradeStreams returns the recorded Streams of the /ws Upgrade in
+// state (whatever protocol they are tagged with: a Stream whose first WS
+// frame fails before recording keeps its pre-swap http tag). The state
+// filter keeps polling cheap: the flows listing loads every matched
+// Stream's messages, which here carry tens of MiB.
+func upgradeStreams(t *testing.T, h *mcptest.Harness, state string) []map[string]any {
 	t.Helper()
-	res := h.MustOK(t, "query", map[string]any{"resource": "flows", "filter": map[string]any{"url_pattern": "/ws"}})
+	res := h.MustOK(t, "query", map[string]any{"resource": "flows", "filter": map[string]any{"url_pattern": "/ws", "state": state}})
 	raw, _ := res.Decoded["flows"].([]any)
 	out := make([]map[string]any, 0, len(raw))
 	for _, r := range raw {
@@ -88,36 +90,35 @@ func upgradeStreams(t *testing.T, h *mcptest.Harness) []map[string]any {
 	return out
 }
 
-// waitUpgradeStreamState polls until exactly one /ws Upgrade Stream
-// exists and reaches want; it returns the Stream's ID.
-func waitUpgradeStreamState(t *testing.T, h *mcptest.Harness, want string, d time.Duration) string {
+// waitUpgradeStreamState polls until a /ws Upgrade Stream reaches want
+// and returns it; exactly one such Stream must exist.
+func waitUpgradeStreamState(t *testing.T, h *mcptest.Harness, want string, d time.Duration) map[string]any {
 	t.Helper()
 	deadline := time.Now().Add(d)
-	var last []map[string]any
 	for {
-		last = upgradeStreams(t, h)
-		if len(last) == 1 {
-			if st, _ := last[0]["state"].(string); st == want {
-				id, _ := last[0]["id"].(string)
-				return id
-			}
+		got := upgradeStreams(t, h, want)
+		if len(got) == 1 {
+			return got[0]
+		}
+		if len(got) > 1 {
+			t.Fatalf("%d /ws Streams in state %q, want 1: %v", len(got), want, got)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no single /ws Stream in state %q within %v; streams: %v", want, d, last)
+			t.Fatalf("no /ws Stream reached state %q within %v", want, d)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
 // wsDataMessageSizes returns direction → body sizes of the recorded WS
-// binary data frames of streamID (bodies are capped in the response; the
-// original size is reported in body_original_size).
+// binary data frames of streamID (bodies are suppressed in the response;
+// their size is reported in body_original_size).
 func wsDataMessageSizes(t *testing.T, h *mcptest.Harness, streamID string) map[string][]int {
 	t.Helper()
 	res := h.MustOK(t, "query", map[string]any{
 		"resource":       "messages",
 		"id":             streamID,
-		"body_max_bytes": 16,
+		"include_bodies": false,
 	})
 	msgs, _ := res.Decoded["messages"].([]any)
 	out := map[string][]int{}
@@ -150,7 +151,7 @@ func TestE2E_WSMaxFrameSize_RaisedCapRelaysLargeFrameBothWays(t *testing.T) {
 	if err := writeBigMaskedFrame(conn, wslayer.OpcodeBinary, payload); err != nil {
 		t.Fatalf("write 24 MiB frame: %v", err)
 	}
-	echo, err := readBigFrame(conn, capN, 60*time.Second)
+	echo, err := readBigFrame(conn, capN, 2*time.Minute)
 	if err != nil {
 		t.Fatalf("read 24 MiB echo: %v (upstream hits=%d)", err, h.WSObservedHits.Total())
 	}
@@ -165,13 +166,14 @@ func TestE2E_WSMaxFrameSize_RaisedCapRelaysLargeFrameBothWays(t *testing.T) {
 	if err := writeBigMaskedFrame(conn, wslayer.OpcodeClose, []byte{0x03, 0xe8}); err != nil {
 		t.Fatalf("write close: %v", err)
 	}
-	_, _ = readBigFrame(conn, capN, 5*time.Second)
+	_, _ = readBigFrame(conn, capN, 30*time.Second)
 	_ = conn.Close()
 
-	streamID := waitUpgradeStreamState(t, h, "complete", 15*time.Second)
-	if proto, _ := upgradeStreams(t, h)[0]["protocol"].(string); proto != "ws" {
+	st := waitUpgradeStreamState(t, h, "complete", 30*time.Second)
+	if proto, _ := st["protocol"].(string); proto != "ws" {
 		t.Errorf("Stream protocol = %q, want ws", proto)
 	}
+	streamID, _ := st["id"].(string)
 	sizes := wsDataMessageSizes(t, h, streamID)
 	if got := sizes["send"]; len(got) != 1 || got[0] != n {
 		t.Errorf("recorded send data frames body sizes = %v, want [%d]", got, n)
@@ -205,7 +207,7 @@ func TestE2E_WSMaxFrameSize_LoweredCapFailsOnReceive(t *testing.T) {
 		t.Errorf("upstream data-frame hits = %d, want 0 (the over-cap frame was forwarded)", got)
 	}
 
-	streamID := waitUpgradeStreamState(t, h, "error", 15*time.Second)
+	streamID, _ := waitUpgradeStreamState(t, h, "error", 15*time.Second)["id"].(string)
 	for dir, got := range wsDataMessageSizes(t, h, streamID) {
 		for _, size := range got {
 			if size == n {

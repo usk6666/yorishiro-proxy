@@ -238,11 +238,17 @@ func serveWSConnection(conn net.Conn, brw *bufio.ReadWriter, key string, hits *W
 	// Use the bufio.Reader directly so those buffered bytes are not lost.
 	reader := brw.Reader
 
+	// Bound each frame read so a wedged client cannot keep this goroutine
+	// alive past test cleanup. The deadline is generous (15s) to tolerate
+	// slow CI hosts; a test that raised the frame cap moves tens of MiB per
+	// frame (received, recorded, and relayed by the proxy under -race
+	// before the first byte arrives here), so it gets more headroom.
+	readTimeout := 15 * time.Second
+	if maxFrameSize > 0 {
+		readTimeout = 2 * time.Minute
+	}
 	for {
-		// Bound each frame read so a wedged client cannot keep this
-		// goroutine alive past test cleanup. The deadline is generous
-		// (15s) to tolerate slow CI hosts.
-		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 		f, _, err := wslayer.ReadFrameRawLimit(reader, maxFrameSize)
 		if err != nil {
 			return
