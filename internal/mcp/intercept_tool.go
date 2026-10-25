@@ -144,8 +144,8 @@ func (s *Server) handleInterceptTool(ctx context.Context, _ *gomcp.CallToolReque
 // closed shortly after the release (typical when the hold exceeded the
 // upstream's WS idle timeout). The pipeline.releaseTracker is also
 // stamped so the live session relay loops can append that tag on EOF.
-func (s *Server) handleInterceptHoldQueue(_ context.Context, input interceptInput, entry *common.HeldEntry) (*gomcp.CallToolResult, *holdQueueInterceptResult, error) {
-	action, err := resolveHoldQueueAction(entry, input, input.Action)
+func (s *Server) handleInterceptHoldQueue(ctx context.Context, input interceptInput, entry *common.HeldEntry) (*gomcp.CallToolResult, *holdQueueInterceptResult, error) {
+	action, err := resolveHoldQueueAction(ctx, entry, input, input.Action)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", input.Action, err)
 	}

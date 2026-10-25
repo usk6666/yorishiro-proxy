@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -130,13 +131,13 @@ type sseMessageModify struct {
 // rawMode signals that the caller already routed via Mode=raw and supplied
 // a RawOverrideBase64 OR rawMessageModify.BytesOverride; the helper
 // preserves Envelope.Raw for downstream encoders.
-func dispatchTypedModify(env *envelope.Envelope, input interceptInput, rawMode bool) (*envelope.Envelope, error) {
+func dispatchTypedModify(ctx context.Context, env *envelope.Envelope, input interceptInput, rawMode bool) (*envelope.Envelope, error) {
 	switch m := env.Message.(type) {
 	case *envelope.HTTPMessage:
 		if input.HTTP == nil {
 			return nil, fmt.Errorf("modify_and_forward: held envelope is HTTP; expected http payload")
 		}
-		return applyHTTPModify(env, m, input.HTTP)
+		return applyHTTPModify(ctx, env, m, input.HTTP)
 	case *envelope.WSMessage:
 		if input.WS == nil {
 			return nil, fmt.Errorf("modify_and_forward: held envelope is WebSocket; expected ws payload")
@@ -244,7 +245,7 @@ func checkBase64EncodedSize(b64, field string) error {
 // entry and produces the HoldAction to send back through the queue. It
 // runs *after* stage-1 schema validation (mutual exclusion, etc.) and
 // *before* dispatch — see Decision R24.
-func resolveHoldQueueAction(entry *common.HeldEntry, input interceptInput, action string) (*common.HoldAction, error) {
+func resolveHoldQueueAction(ctx context.Context, entry *common.HeldEntry, input interceptInput, action string) (*common.HoldAction, error) {
 	switch action {
 	case "release":
 		return &common.HoldAction{Type: common.ActionRelease}, nil
@@ -265,7 +266,7 @@ func resolveHoldQueueAction(entry *common.HeldEntry, input interceptInput, actio
 			}
 			return &common.HoldAction{Type: common.ActionModifyAndForward, Modified: modified}, nil
 		}
-		modified, err := dispatchTypedModify(entry.Envelope, input, rawMode)
+		modified, err := dispatchTypedModify(ctx, entry.Envelope, input, rawMode)
 		if err != nil {
 			return nil, err
 		}
@@ -282,7 +283,7 @@ func resolveHoldQueueAction(entry *common.HeldEntry, input interceptInput, actio
 // the wire bytes via WireEncoderRegistry on Send; this preserves the
 // invariant that Raw always reflects either the wire-observed bytes or a
 // freshly encoded post-mutation snapshot, never a stale mix.
-func applyHTTPModify(env *envelope.Envelope, _ *envelope.HTTPMessage, params *httpMessageModify) (*envelope.Envelope, error) {
+func applyHTTPModify(ctx context.Context, env *envelope.Envelope, _ *envelope.HTTPMessage, params *httpMessageModify) (*envelope.Envelope, error) {
 	if params == nil {
 		// No-op modify; return a clone for safety so InterceptStep can
 		// not observe a shared pointer.
@@ -306,7 +307,7 @@ func applyHTTPModify(env *envelope.Envelope, _ *envelope.HTTPMessage, params *ht
 	if params.Trailers != nil {
 		hm.Trailers = headerKVsToKeyValues(params.Trailers)
 	}
-	if err := applyHTTPBodyOverrides(hm, params); err != nil {
+	if err := applyHTTPBodyOverrides(ctx, hm, params); err != nil {
 		return nil, err
 	}
 	clone.Raw = nil
@@ -342,7 +343,7 @@ func applyHTTPScalarOverrides(hm *envelope.HTTPMessage, params *httpMessageModif
 
 // applyHTTPBodyOverrides handles the body-replacement and body_patches
 // arms; body is applied first, then patches on top (Decision R12).
-func applyHTTPBodyOverrides(hm *envelope.HTTPMessage, params *httpMessageModify) error {
+func applyHTTPBodyOverrides(_ context.Context, hm *envelope.HTTPMessage, params *httpMessageModify) error {
 	if params.Body != nil {
 		body, err := decodeBodyEncoded(*params.Body, params.BodyEncoding, "body")
 		if err != nil {

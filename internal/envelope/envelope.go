@@ -223,6 +223,25 @@ func (e *Envelope) Clone() *Envelope {
 	return clone
 }
 
+// ReleaseBuffers releases the disk-backed buffer references e holds —
+// RawBuffer and, for an HTTPMessage, BodyBuffer — and clears both fields so
+// a second call is a no-op. It is the inverse of the Retains Clone takes:
+// an owner of a Clone that will not hand the envelope on to the session
+// backstop calls it exactly once when done with the clone.
+func (e *Envelope) ReleaseBuffers() {
+	if e == nil {
+		return
+	}
+	if e.RawBuffer != nil {
+		_ = e.RawBuffer.Release()
+		e.RawBuffer = nil
+	}
+	if m, ok := e.Message.(*HTTPMessage); ok && m != nil && m.BodyBuffer != nil {
+		_ = m.BodyBuffer.Release()
+		m.BodyBuffer = nil
+	}
+}
+
 // RawWins reports whether the producing Layer must write Raw verbatim
 // instead of serializing Message (RFC-001 §9.3 D4). True only when
 // RawAuthoritative is set AND Raw is non-empty, so an envelope whose Raw
