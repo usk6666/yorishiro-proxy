@@ -1105,6 +1105,13 @@ func (s *RecordStep) createStream(ctx context.Context, env *envelope.Envelope) {
 	if clientAddr := connector.ClientAddrFromContext(ctx); clientAddr != "" {
 		st.ConnInfo = &flow.ConnectionInfo{ClientAddr: clientAddr}
 	}
+	// USK-1317 (owner decision U3): a transparent TLS MITM Stream keeps the
+	// client's SNI. TargetHost is the original destination IP:port there,
+	// so the name the client asked for is otherwise visible only in the
+	// TLS snapshot. Only transparent connections carry a TransparentScope.
+	if env.Context.TLS != nil && env.Context.TLS.SNI != "" && connector.TransparentScopeFromContext(ctx) != nil {
+		st.Tags = map[string]string{"sni": env.Context.TLS.SNI}
+	}
 
 	st.Scheme = semanticScheme(env)
 	if st.Scheme == "" && isWireLevelOverlay(env) {

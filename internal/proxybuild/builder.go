@@ -598,7 +598,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	if transparent {
 		// USK-1316: a transparent listener routes every connection by its
 		// first bytes; the explicit-proxy handlers are not reachable.
-		configureTransparentListener(&flCfg, deps, wrapper, p, headRecorder, listenerName, logger)
+		configureTransparentListener(&flCfg, deps, wrapper, p, pH2, headRecorder, listenerName, logger)
 	}
 	wrapper.full = connector.NewFullListener(flCfg)
 

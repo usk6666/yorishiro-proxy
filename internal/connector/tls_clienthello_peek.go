@@ -169,5 +169,8 @@ func peekClientHelloSNIAndALPN(clientConn net.Conn) ClientHelloPeek {
 		ALPN:      alpnList,
 		ClientJA3: ja3,
 		ClientJA4: ja4,
+		// USK-1317: every extension this peek reads parsed cleanly, so a
+		// nil ALPN here means "none offered", not "could not be read".
+		ExtensionsParsed: sniErr == nil && alpnErr == nil,
 	}
 }

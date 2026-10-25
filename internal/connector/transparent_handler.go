@@ -30,8 +30,9 @@ const (
 	// TransparentRouteHTTP: the client spoke HTTP/1.x first; relayed
 	// through the L7 HTTP/1 path.
 	TransparentRouteHTTP TransparentRoute = "http"
-	// TransparentRouteTLS: the first byte was 0x16; passthrough with the
-	// ClientHello metadata recorded (no MITM).
+	// TransparentRouteTLS: the first byte was 0x16. An HTTP (or absent)
+	// ALPN offer is MITM'd (USK-1317); anything else is passed through
+	// with the ClientHello metadata recorded.
 	TransparentRouteTLS TransparentRoute = "tls"
 	// TransparentRouteServerFirst: the client sent nothing before the
 	// peek deadline; passthrough.
@@ -164,8 +165,9 @@ var transparentDenyResponse = []byte("HTTP/1.1 403 Forbidden\r\n" +
 // loop check → first-bytes peek (short deadline) → route scope gate
 // (original destination, SNI, first request Host; name binding) → one
 // upstream dial to the original destination → the route (L7 HTTP/1
-// session, or the metadata-only passthrough relay). A refused
-// connection never reaches the upstream. Construct with
+// session, TLS MITM session — USK-1317 —, or the metadata-only
+// passthrough relay). A refused connection never reaches the upstream.
+// Construct with
 // NewTransparentHandler.
 type TransparentHandler struct {
 	cfg    TransparentHandlerConfig
@@ -287,11 +289,15 @@ func (h *TransparentHandler) scopeOpaque(dst netip.AddrPort) transparentVerdict 
 }
 
 // scopeTLS is the TLS route's gate: the original destination as "https"
-// (opaque — passthrough carries no request path) and the SNI as a name
-// leg. A destination no allow rule admits needs an allowed SNI (bound by
-// DNS, see needBinding).
-func (h *TransparentHandler) scopeTLS(dst netip.AddrPort, sni string) transparentVerdict {
-	full, denyOK, reason := h.dstCheck("https", dst, true)
+// and the SNI as a name leg. A destination no allow rule admits needs an
+// allowed SNI (bound by DNS, see needBinding). opaque is true on a route
+// that never yields a request path (the passthrough relay, a
+// raw_passthrough_hosts MITM): a path-scoped allow does not admit it. A
+// MITM route reaching the Pipeline is admitted provisionally by a
+// path-scoped allow, the path being checked per request (USK-1317, as
+// CONNECT does).
+func (h *TransparentHandler) scopeTLS(dst netip.AddrPort, sni string, opaque bool) transparentVerdict {
+	full, denyOK, reason := h.dstCheck("https", dst, opaque)
 	if !denyOK {
 		return refuseScope(reason)
 	}
@@ -363,27 +369,6 @@ func nameHost(v string) string {
 		return h
 	}
 	return v
-}
-
-// handleTLS runs the TLS route: ClientHello peek, gate, passthrough.
-func (h *TransparentHandler) handleTLS(ctx context.Context, pc *PeekConn, dst netip.AddrPort, logger *slog.Logger) error {
-	hello := peekClientHelloSNIAndALPN(pc)
-	v := h.scopeTLS(dst, hello.SNI)
-	if v.allowed && v.needBinding {
-		v = h.bindNames(ctx, dst, []string{hello.SNI})
-	}
-	obs := h.newObservation(pc, dst, TransparentRouteTLS)
-	obs.SNI, obs.ALPN, obs.ClientJA3, obs.ClientJA4 = hello.SNI, hello.ALPN, hello.ClientJA3, hello.ClientJA4
-	if !v.allowed {
-		h.refuse(ctx, pc, dst, TransparentRouteTLS, v, hello.SNI, logger)
-		return nil
-	}
-	sni := hello.SNI
-	admit := func() (bool, string) {
-		r := h.scopeTLS(dst, sni)
-		return r.allowed, r.reason
-	}
-	return h.passthrough(ctx, pc, dst, obs, admit, logger)
 }
 
 // handleOpaque runs the server-first / opaque / h2c routes.
@@ -725,7 +710,8 @@ const (
 )
 
 // TransparentScope is the per-connection transparent admission context
-// the HTTP route carries on its ctx for the Pipeline's scope Steps
+// the HTTP and TLS MITM routes carry on their ctx for the Pipeline's
+// scope Steps
 // (decision U3 amended): on a transparent connection the dial target
 // (the original destination) is a deny-only leg when no allow rule
 // admits it, and every request's names must then be allow-listed AND

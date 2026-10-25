@@ -105,15 +105,19 @@ func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Res
 	// (USK-1081).
 	scheme := transportScopeScheme(env)
 	allowed, pathPending, _ := s.scope.CheckHost(scheme, host, port)
-	if !allowed && connector.TransparentScopeFromContext(ctx) != nil {
+	if ts := connector.TransparentScopeFromContext(ctx); !allowed && ts != nil {
 		// USK-1316 (decision U3, amended): on a transparent connection
 		// whose original destination no allow rule admits, the dial
 		// target is a deny-only leg and the request's names must admit
 		// it — which HTTPScopeStep checks (allow + DNS binding) on HTTP
 		// requests and, through the upgrade request, on WebSocket
-		// frames. Every other protocol fails closed, as for pathPending.
+		// frames. Every other protocol fails closed, as for pathPending,
+		// unless the connection's ClientHello SNI admitted it (below).
 		if ok, _ := s.scope.CheckDenyOnly(scheme, host, port, ""); ok {
 			allowed, pathPending = true, true
+			if !requestPathChecked(env.Protocol) && s.sniAdmits(ctx, ts, scheme, env.Context.TargetHost, port) {
+				pathPending = false
+			}
 		}
 	}
 	if !allowed {
@@ -123,6 +127,28 @@ func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Res
 		return targetScopeBlock(env)
 	}
 	return Result{}
+}
+
+// sniAdmits reports whether the ClientHello SNI that admitted a
+// transparent TLS MITM connection (TransparentScope.AdmittedBySNI, owner
+// decision U4 of USK-1317) still admits it: the SNI must pass the same
+// name leg the connection gate checked — an allow rule matches it and no
+// deny matches it, on the destination's port — and still resolve to the
+// original destination. It is consulted only for envelopes no request
+// path check covers (raw bytes, gRPC, gRPC-Web) on a connection whose
+// destination is not denied; HTTP and WebSocket envelopes keep the
+// per-request Host / :authority checks of HTTPScopeStep. Explicit-proxy
+// and tcp_forward connections carry no TransparentScope, so this never
+// applies to them.
+func (s *HostScopeStep) sniAdmits(ctx context.Context, ts *connector.TransparentScope, scheme, dialTarget string, port int) bool {
+	if ts.AdmittedBySNI == "" {
+		return false
+	}
+	authority := net.JoinHostPort(ts.AdmittedBySNI, strconv.Itoa(port))
+	if ok, _ := s.scope.CheckAuthority(scheme, authority, "", dialTarget); !ok {
+		return false
+	}
+	return ts.NamesBound(ctx, []string{ts.AdmittedBySNI})
 }
 
 // AdmitsRawRelay reports whether the Pipeline's HostScopeStep would let

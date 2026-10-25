@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -69,7 +70,7 @@ func DialUpstreamRaw(ctx context.Context, target string, opts DialRawOpts) (net.
 
 	rawConn, err := dialTCP(dialCtx, target, opts.UpstreamProxy, timeout)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, &upstreamTCPDialError{err: err}
 	}
 
 	if opts.TLSConfig == nil {
@@ -96,6 +97,23 @@ func DialUpstreamRaw(ctx context.Context, target string, opts DialRawOpts) (net.
 	)
 
 	return tlsConn, snap, nil
+}
+
+// upstreamTCPDialError marks a DialUpstreamRaw failure that happened
+// before any TLS byte was exchanged — the TCP connect, or the tunnel
+// through the upstream proxy (USK-1317: the transparent listener resets
+// the client on these, and records a TLS failure otherwise). Error()
+// is the wrapped error's message, unchanged.
+type upstreamTCPDialError struct{ err error }
+
+func (e *upstreamTCPDialError) Error() string { return e.err.Error() }
+func (e *upstreamTCPDialError) Unwrap() error { return e.err }
+
+// isUpstreamTCPDialError reports whether err carries an
+// upstreamTCPDialError.
+func isUpstreamTCPDialError(err error) bool {
+	var e *upstreamTCPDialError
+	return errors.As(err, &e)
 }
 
 // validateTarget enforces "host:port" form and rejects CRLF so that the
