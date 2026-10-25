@@ -44,6 +44,8 @@ func snapLine(env *envelope.Envelope) *envelope.Envelope {
 type lineExchange struct {
 	reqWire, respWire     string
 	mutateReq, mutateResp func(m *envelope.HTTPMessage)
+	// opts are applied to both Layers (e.g. WithMaxRawCaptureSize).
+	opts []Option
 }
 
 type lineResult struct {
@@ -93,9 +95,9 @@ func runLineExchange(t *testing.T, x lineExchange) lineResult {
 	defer upPeer.Close()
 	defer upSide.Close()
 
-	cl := New(clientSide, "usk-1148-client", envelope.Send)
+	cl := New(clientSide, "usk-1148-client", envelope.Send, x.opts...)
 	defer cl.Close()
-	ul := New(upSide, "usk-1148-up", envelope.Receive)
+	ul := New(upSide, "usk-1148-up", envelope.Receive, x.opts...)
 	defer ul.Close()
 
 	if _, err := clientPeer.Write([]byte(x.reqWire)); err != nil {

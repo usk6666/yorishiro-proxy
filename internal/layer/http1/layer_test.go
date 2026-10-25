@@ -749,6 +749,7 @@ func TestChannel_Send_ZeroCopyPath(t *testing.T) {
 				Proto:      "HTTP/1.1",
 				Headers:    parser.RawHeaders{{Name: "Host", Value: "example.com"}},
 				RawBytes:   rawBytes,
+				WireHead:   rawBytes,
 			},
 			origKV: []envelope.KeyValue{
 				{Name: "Host", Value: "example.com"},
@@ -815,6 +816,7 @@ func TestChannel_Send_HeaderPatchPath(t *testing.T) {
 					{Name: "X-Custom", Value: "original-with-ows", RawValue: "  original-with-ows "},
 				},
 				RawBytes: rawBytes,
+				WireHead: rawBytes,
 			},
 			origKV: []envelope.KeyValue{
 				{Name: "Host", Value: "example.com"},
@@ -1432,6 +1434,7 @@ func TestChannel_Send_BodyBufferUnchanged_ZeroCopy(t *testing.T) {
 					{Name: "Content-Length", Value: "5"},
 				},
 				RawBytes: rawBytes,
+				WireHead: rawBytes,
 			},
 			origKV: []envelope.KeyValue{
 				{Name: "Host", Value: "example.com"},
@@ -1505,6 +1508,7 @@ func TestChannel_Send_BodyChangedToBytes(t *testing.T) {
 					{Name: "Content-Length", Value: "5"},
 				},
 				RawBytes: rawBytes,
+				WireHead: rawBytes,
 			},
 			origKV: []envelope.KeyValue{
 				{Name: "Host", Value: "example.com"},
@@ -1573,6 +1577,7 @@ func TestChannel_Send_BodyNilBothNoBodyBytes(t *testing.T) {
 				Proto:      "HTTP/1.1",
 				Headers:    parser.RawHeaders{{Name: "Host", Value: "example.com"}},
 				RawBytes:   rawBytes,
+				WireHead:   rawBytes,
 			},
 			origKV: []envelope.KeyValue{
 				{Name: "Host", Value: "example.com"},

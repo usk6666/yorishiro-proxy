@@ -68,6 +68,11 @@ const (
 	// ended before the terminal zero-size chunk (USK-1229). Body and Raw
 	// hold exactly the bytes the wire carried; nothing is padded.
 	AnomalyTruncatedBody AnomalyType = "TruncatedBody"
+	// AnomalyRawHeaderTruncated indicates that the HTTP/1.x header section
+	// exceeded the raw-capture cap (max_raw_capture_size); the header part of
+	// Envelope.Raw is a prefix only. The wire was still sent the complete
+	// header section.
+	AnomalyRawHeaderTruncated AnomalyType = "RawHeaderTruncated"
 
 	// HTTP/2 specific anomalies.
 	H2DuplicatePseudoHeader    AnomalyType = "H2DuplicatePseudoHeader"
