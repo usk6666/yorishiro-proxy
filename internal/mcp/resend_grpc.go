@@ -38,6 +38,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -250,12 +251,20 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 	warnings := append(append([]string(nil), plan.warnings...),
 		s.collectResendGRPCUnknownFieldWarnings(ctx, &input, plan)...)
 
-	endEnv, recvData, recvStartMeta, err := s.runResendGRPC(rtCtx, plan, pipe, flow.OriginResend)
+	endEnv, recvData, recvStartMeta, responded, err := s.runResendGRPCDispatch(rtCtx, plan, pipe, flow.OriginResend)
+	// USK-1375: a plugin Drop / Respond on the Start envelope exits the
+	// pipeline before RecordStep opens the Stream and carries no
+	// blocked_by attribution, so nothing is recorded. Blank the ID rather
+	// than return one that names no Stream.
+	streamID := plan.streamID
+	if responded || errors.Is(err, errSendDroppedByPipeline) {
+		streamID = ""
+	}
 	// USK-789: resend bypasses session.RunSession so the proxy path's
 	// OnComplete-driven Stream finalisation never fires. Mirror the
 	// contract here so the new Stream transitions out of State="active"
-	// before the MCP result returns.
-	finalizeResendStream(ctx, s.flowStore.store, plan.streamID, input.Tag, err)
+	// before the MCP result returns. finalize no-ops on a blanked ID.
+	finalizeResendStream(ctx, s.flowStore.store, streamID, input.Tag, err)
 	if err != nil {
 		// USK-1056: warnings[] never ships on the failure path, so a dial
 		// the proxy upgraded to TLS on its own must explain itself through
@@ -264,7 +273,7 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 	}
 
 	duration := time.Since(start)
-	result := s.formatResendGRPCResult(plan.streamID, recvStartMeta, recvData, endEnv, input.Tag, duration)
+	result := s.formatResendGRPCResult(streamID, recvStartMeta, recvData, endEnv, input.Tag, duration)
 	result.Warnings = warnings
 	return nil, result, nil
 }

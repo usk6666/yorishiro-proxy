@@ -98,7 +98,7 @@ Tag stored on the new flow's `Tags` map. Useful for grouping resends.
 
 ## Result fields
 
-- `stream_id` — new Stream record holding the resend-time send + receive flows
+- `stream_id` — new Stream record holding the resend-time send + receive flows. Empty when nothing was recorded (a plugin answered the request before it was recorded).
 - `status_code` — HTTP response status
 - `headers` — ordered `[{name, value}]` list
 - `body` / `body_encoding` — response body, masked by SafetyFilter Output Filter when active

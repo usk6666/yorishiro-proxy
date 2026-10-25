@@ -456,7 +456,7 @@ func applyResendGRPCDialGroundTruth(ctx context.Context, input *resendGRPCInput,
 }
 
 // wrapResendGRPCRunError applies the tool's error prefix to a failure from
-// runResendGRPC, and — only when USK-1056 upgraded the dial to TLS from the
+// runResendGRPCDispatch, and — only when USK-1056 upgraded the dial to TLS from the
 // recorded transport observation — names that decision and the escape
 // hatch out of it.
 //
@@ -987,7 +987,7 @@ func (s *Server) buildResendGRPCPipeline(encoders *pipeline.WireEncoderRegistry)
 	steps := []pipeline.Step{
 		// USK-818: BudgetStep at position #1 — only the GRPCStartMessage
 		// Send counts (BudgetStep filters mid-stream Data/End). On Drop
-		// runResendGRPC writes a state="error" + blocked_by="budget"
+		// runResendGRPCDispatch writes a state="error" + blocked_by="budget"
 		// audit Stream.
 		pipeline.NewBudgetStep(s.misc.budgetManager),
 		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
@@ -1003,34 +1003,28 @@ func (s *Server) buildResendGRPCPipeline(encoders *pipeline.WireEncoderRegistry)
 	return pipeline.New(steps...)
 }
 
-// runResendGRPC dials, opens an HTTP/2 stream, wraps in the gRPC Layer,
-// runs each request envelope (Start → Data* → optional End) through the
-// resend pipeline + Channel.Send, then reads response envelopes until
+// runResendGRPCDispatch dials, opens an HTTP/2 stream, wraps in the gRPC
+// Layer, runs each request envelope (Start → Data* → optional End) through
+// the resend pipeline + Channel.Send, then reads response envelopes until
 // GRPCEnd OR Channel close OR ctx timeout. Each response envelope is
 // pinned to the resend StreamID + an incrementing receive Sequence and
 // run through the pipeline.
 //
-// Returns (endEnvelope, dataEnvelopes, startMetadata, error). endEnvelope
-// is nil when the stream terminated without a trailer HEADERS frame —
-// callers surface this in the result as "end omitted" and may inspect
-// the Channel's terminal Err() via the Layer.
+// endEnv is nil when the stream terminated without a trailer HEADERS
+// frame — callers surface this in the result as "end omitted" and may
+// inspect the Channel's terminal Err() via the Layer.
+//
+// responded is true when the Start envelope's pipeline pass returned
+// Respond (plugin custom response). The pipeline then stopped before
+// RecordStep saw the Start, so no Stream row exists for plan.streamID; an
+// unlabelled Start Drop returns errSendDroppedByPipeline for the same
+// reason. resend_grpc and fuzz_grpc use both to blank the returned
+// stream_id (USK-1371, USK-1375).
 //
 // origin is the caller's flow.Origin (flow.OriginResend from resend_grpc,
 // flow.OriginFuzz from fuzz_grpc). It stamps the budget audit Stream left
 // when BudgetStep drops the Start envelope, so it must match the
 // WithOrigin value of the caller's pipeline.
-func (s *Server) runResendGRPC(ctx context.Context, plan *resendGRPCPlan, p *pipeline.Pipeline, origin flow.Origin) (*envelope.Envelope, []*envelope.Envelope, []envelope.KeyValue, error) {
-	endEnv, recvData, recvStartMeta, _, err := s.runResendGRPCDispatch(ctx, plan, p, origin)
-	return endEnv, recvData, recvStartMeta, err
-}
-
-// runResendGRPCDispatch is runResendGRPC plus a responded report: true
-// when the Start envelope's pipeline pass returned Respond (plugin custom
-// response). The pipeline then stopped before RecordStep saw the Start,
-// so no Stream row exists for plan.streamID; an unlabelled Start Drop
-// returns errSendDroppedByPipeline for the same reason. fuzz_grpc uses
-// both to blank the variant's stream_id (USK-1371); resend_grpc keeps
-// its own behaviour through runResendGRPC.
 func (s *Server) runResendGRPCDispatch(ctx context.Context, plan *resendGRPCPlan, p *pipeline.Pipeline, origin flow.Origin) (endEnv *envelope.Envelope, recvData []*envelope.Envelope, recvStartMeta []envelope.KeyValue, responded bool, err error) {
 	if p == nil {
 		return nil, nil, nil, false, errors.New("resend pipeline is nil")
