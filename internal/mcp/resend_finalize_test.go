@@ -22,8 +22,12 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -219,5 +223,124 @@ func TestFinalizeResendStream_ZeroTimestampLeavesDuration(t *testing.T) {
 	}
 	if got.Duration != 42*time.Millisecond {
 		t.Errorf("Duration = %v, want 42ms preserved", got.Duration)
+	}
+}
+
+// TestFinalizeResendStream_ErrorRecordsErrorTag: a failed resend / fuzz
+// Stream keeps the bare error text in tags["error"], matching the live
+// path's OnComplete (USK-1350).
+func TestFinalizeResendStream_ErrorRecordsErrorTag(t *testing.T) {
+	tests := []struct {
+		name   string
+		runErr error
+	}{
+		{name: "generic", runErr: errors.New("dial tcp 127.0.0.1:1: connect: connection refused")},
+		{name: "wrapped_eof", runErr: fmt.Errorf("upstream receive: %w", io.EOF)},
+		{name: "stream_error", runErr: &layer.StreamError{Code: layer.ErrorRefused}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			id := seedActiveStream(t, store)
+
+			finalizeResendStream(context.Background(), store, id, tt.runErr)
+
+			got, err := store.GetStream(context.Background(), id)
+			if err != nil {
+				t.Fatalf("GetStream: %v", err)
+			}
+			if got.State != "error" {
+				t.Errorf("State = %q, want error", got.State)
+			}
+			if got.Tags["error"] != tt.runErr.Error() {
+				t.Errorf("Tags[\"error\"] = %q, want %q", got.Tags["error"], tt.runErr.Error())
+			}
+		})
+	}
+}
+
+// TestFinalizeResendStream_SuccessNoErrorTag: a successful finalize must
+// not write tags["error"].
+func TestFinalizeResendStream_SuccessNoErrorTag(t *testing.T) {
+	store := newTestStore(t)
+	id := seedActiveStream(t, store)
+
+	finalizeResendStream(context.Background(), store, id, nil)
+
+	got, err := store.GetStream(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if v, ok := got.Tags["error"]; ok {
+		t.Errorf("Tags[\"error\"] = %q present on success; want absent", v)
+	}
+}
+
+// TestFinalizeResendStream_ErrorPreservesPriorTags: the error tag is
+// merged (AppendTags), so tags written earlier by RecordStep survive.
+func TestFinalizeResendStream_ErrorPreservesPriorTags(t *testing.T) {
+	store := newTestStore(t)
+	id := uuid.NewString()
+	st := &flow.Stream{
+		ID:       id,
+		Protocol: "http",
+		State:    "active",
+		Origin:   flow.OriginResend,
+		Tags:     map[string]string{"records_truncated": "true"},
+	}
+	if err := store.SaveStream(context.Background(), st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	finalizeResendStream(context.Background(), store, id, errors.New("boom"))
+
+	got, err := store.GetStream(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.Tags["records_truncated"] != "true" {
+		t.Errorf("Tags[\"records_truncated\"] = %q, want %q preserved (tags=%v)", got.Tags["records_truncated"], "true", got.Tags)
+	}
+	if got.Tags["error"] != "boom" {
+		t.Errorf("Tags[\"error\"] = %q, want %q (tags=%v)", got.Tags["error"], "boom", got.Tags)
+	}
+}
+
+// TestFinalizeResendStream_ErrorTagCapped: an oversized error message is
+// capped exactly like the live path (flow.TruncateErrorTag), including a
+// cut that lands mid-rune.
+func TestFinalizeResendStream_ErrorTagCapped(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+	}{
+		{name: "ascii", msg: strings.Repeat("a", flow.ErrorTagMaxLen+512)},
+		{name: "multibyte", msg: "x" + strings.Repeat("あ", (flow.ErrorTagMaxLen+512)/3)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			id := seedActiveStream(t, store)
+
+			finalizeResendStream(context.Background(), store, id, errors.New(tt.msg))
+
+			got, err := store.GetStream(context.Background(), id)
+			if err != nil {
+				t.Fatalf("GetStream: %v", err)
+			}
+			tag := got.Tags["error"]
+			if len(tag) > flow.ErrorTagMaxLen {
+				t.Errorf("len(Tags[\"error\"]) = %d, want <= %d", len(tag), flow.ErrorTagMaxLen)
+			}
+			if !strings.HasSuffix(tag, "...[truncated]") {
+				t.Errorf("Tags[\"error\"] lacks the ...[truncated] suffix (len=%d)", len(tag))
+			}
+			if !utf8.ValidString(tag) {
+				t.Errorf("Tags[\"error\"] is not valid UTF-8")
+			}
+			if want := flow.TruncateErrorTag(tt.msg); tag != want {
+				t.Errorf("Tags[\"error\"] differs from flow.TruncateErrorTag(msg) (len %d vs %d)", len(tag), len(want))
+			}
+		})
 	}
 }
