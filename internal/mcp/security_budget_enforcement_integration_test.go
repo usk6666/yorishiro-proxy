@@ -39,6 +39,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
@@ -265,4 +266,284 @@ func TestBudget_FuzzHTTP_EnforcesAfterMaxTotalRequests(t *testing.T) {
 	if got := bm.RequestCount(); got != int64(maxRequests+1) {
 		t.Errorf("RequestCount() after fuzz_http = %d, want %d", got, maxRequests+1)
 	}
+}
+
+// setupBudgetFuzzSession is setupBudgetEnforcementSession plus the
+// options the fuzz_ws / fuzz_grpc / fuzz_raw and resend_grpc dispatch
+// paths need: a FuzzStore (fuzz_jobs / fuzz_results persistence) and an
+// InsecureSkipVerify TLS transport (the gRPC test upstreams use a
+// throwaway self-signed CA).
+func setupBudgetFuzzSession(t *testing.T, bm *connector.BudgetManager) (*gomcp.ClientSession, flow.Store) {
+	t.Helper()
+	store := newTestStore(t)
+	ctx := context.Background()
+	fs, ok := store.(flow.FuzzStore)
+	if !ok {
+		t.Fatal("test store does not implement flow.FuzzStore")
+	}
+	srv := newServer(ctx, nil, store, nil,
+		WithBudgetManager(bm),
+		WithFuzzStore(fs),
+		WithTLSTransport(&transport.StandardTransport{InsecureSkipVerify: true}),
+	)
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := srv.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "budget-fuzz", Version: "v0.0.1"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+	return cs, store
+}
+
+// newBudgetOneManager returns a BudgetManager whose policy allows exactly
+// one request; the second is counted-and-blocked.
+func newBudgetOneManager() *connector.BudgetManager {
+	bm := connector.NewBudgetManager()
+	bm.SetPolicyBudget(connector.BudgetConfig{MaxTotalRequests: 1})
+	return bm
+}
+
+// requireSingleBudgetAuditStream asserts the store holds exactly one
+// blocked_by="budget" Stream, in State="error", stamped with wantOrigin,
+// and returns it.
+func requireSingleBudgetAuditStream(t *testing.T, store flow.Store, wantOrigin flow.Origin) *flow.Stream {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	streams, err := store.ListStreams(ctx, flow.StreamListOptions{BlockedBy: "budget"})
+	if err != nil {
+		t.Fatalf("ListStreams(blocked_by=budget): %v", err)
+	}
+	if len(streams) != 1 {
+		t.Fatalf("blocked_by=budget streams: got %d, want exactly 1", len(streams))
+	}
+	st := streams[0]
+	if st.State != "error" {
+		t.Errorf("audit stream State = %q, want %q", st.State, "error")
+	}
+	if st.Origin != wantOrigin {
+		t.Errorf("audit stream Origin = %q, want %q", st.Origin, wantOrigin)
+	}
+	return st
+}
+
+// assertFuzzOriginStreamCount asserts ListStreams{Origin: fuzz} returns
+// want rows — i.e. the budget-blocked trial is attributable to the fuzz
+// campaign alongside the trial that went through.
+func assertFuzzOriginStreamCount(t *testing.T, store flow.Store, want int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	streams, err := store.ListStreams(ctx, flow.StreamListOptions{Origin: flow.OriginFuzz})
+	if err != nil {
+		t.Fatalf("ListStreams(origin=fuzz): %v", err)
+	}
+	if len(streams) != want {
+		t.Errorf("origin=fuzz streams: got %d, want %d", len(streams), want)
+	}
+}
+
+// assertBudgetBlockedSecondVariant checks the per-variant outcome shared
+// by the fuzz tests: variant 0 within budget, variant 1 budget-blocked,
+// two requests counted.
+func assertBudgetBlockedSecondVariant(t *testing.T, bm *connector.BudgetManager, errs []string) {
+	t.Helper()
+	if len(errs) != 2 {
+		t.Fatalf("len(Variants) = %d, want 2", len(errs))
+	}
+	if errs[0] != "" {
+		t.Errorf("variants[0].Error = %q, want empty (within budget)", errs[0])
+	}
+	if !strings.Contains(errs[1], "budget exhausted") {
+		t.Errorf("variants[1].Error = %q, want substring %q", errs[1], "budget exhausted")
+	}
+	if got := bm.RequestCount(); got != 2 {
+		t.Errorf("RequestCount() = %d, want 2", got)
+	}
+}
+
+// TestBudget_FuzzWS_AuditStreamStampedOriginFuzz: a fuzz_ws trial that
+// overruns the budget must leave its audit Stream attributed to the fuzz
+// campaign, not to resend.
+func TestBudget_FuzzWS_AuditStreamStampedOriginFuzz(t *testing.T) {
+	bm := newBudgetOneManager()
+	cs, store := setupBudgetFuzzSession(t, bm)
+	bm.Start(nil)
+	defer bm.Stop()
+	addr, cleanup := newWebSocketEchoServer(t)
+	defer cleanup()
+
+	result := callFuzzWS(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "ws",
+		"path":        "/echo",
+		"opcode":      "text",
+		"positions": []map[string]any{
+			{"path": "payload", "payloads": []string{"v1", "v2"}},
+		},
+		"timeout_ms": 5000,
+	})
+	errs := make([]string, 0, len(result.Variants))
+	for _, v := range result.Variants {
+		errs = append(errs, v.Error)
+	}
+	assertBudgetBlockedSecondVariant(t, bm, errs)
+
+	st := requireSingleBudgetAuditStream(t, store, flow.OriginFuzz)
+	if st.ID != result.Variants[1].StreamID {
+		t.Errorf("audit stream ID = %q, want variants[1].StreamID %q", st.ID, result.Variants[1].StreamID)
+	}
+	assertFuzzOriginStreamCount(t, store, 2)
+}
+
+// TestBudget_FuzzGRPC_AuditStreamStampedOriginFuzz is the fuzz_grpc
+// counterpart of TestBudget_FuzzWS_AuditStreamStampedOriginFuzz.
+func TestBudget_FuzzGRPC_AuditStreamStampedOriginFuzz(t *testing.T) {
+	bm := newBudgetOneManager()
+	cs, store := setupBudgetFuzzSession(t, bm)
+	bm.Start(nil)
+	defer bm.Stop()
+	upstream := &fuzzGRPCEchoServer{}
+	addr, shutdown := startFuzzGRPCUpstream(t, upstream)
+	defer shutdown()
+
+	result := callFuzzGRPC(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "https",
+		"service":     fuzzGRPCServiceName,
+		"method":      fuzzGRPCMethodUnary,
+		"messages": []map[string]any{
+			{"payload": "seed"},
+		},
+		"positions": []map[string]any{
+			{"path": "messages[0].payload", "payloads": []string{"v1", "v2"}},
+		},
+		"timeout_ms": 10000,
+	})
+	errs := make([]string, 0, len(result.Variants))
+	for _, v := range result.Variants {
+		errs = append(errs, v.Error)
+	}
+	assertBudgetBlockedSecondVariant(t, bm, errs)
+	if got := len(upstream.snapshot()); got != 1 {
+		t.Errorf("upstream observed %d requests, want 1 (second variant blocked)", got)
+	}
+
+	st := requireSingleBudgetAuditStream(t, store, flow.OriginFuzz)
+	if st.ID != result.Variants[1].StreamID {
+		t.Errorf("audit stream ID = %q, want variants[1].StreamID %q", st.ID, result.Variants[1].StreamID)
+	}
+	assertFuzzOriginStreamCount(t, store, 2)
+}
+
+// TestBudget_FuzzRaw_BlockedTrialLeavesAuditStream: a fuzz_raw trial
+// that overruns the budget must leave a blocked_by="budget" audit Stream
+// stamped origin=fuzz, under the variant row's StreamID.
+func TestBudget_FuzzRaw_BlockedTrialLeavesAuditStream(t *testing.T) {
+	bm := newBudgetOneManager()
+	cs, store := setupBudgetFuzzSession(t, bm)
+	bm.Start(nil)
+	defer bm.Stop()
+	addr, getRecv := startFuzzRawTCPServer(t)
+
+	result := callFuzzRaw(t, cs, map[string]any{
+		"target_addr": addr,
+		"positions": []map[string]any{
+			{"path": "payload", "payloads": []string{"raw-1", "raw-2"}},
+		},
+		"timeout_ms": 5000,
+	})
+	errs := make([]string, 0, len(result.Variants))
+	for _, v := range result.Variants {
+		errs = append(errs, v.Error)
+	}
+	assertBudgetBlockedSecondVariant(t, bm, errs)
+
+	st := requireSingleBudgetAuditStream(t, store, flow.OriginFuzz)
+	if st.ID != result.Variants[1].StreamID {
+		t.Errorf("audit stream ID = %q, want variants[1].StreamID %q", st.ID, result.Variants[1].StreamID)
+	}
+
+	// Exactly one upstream connection: the blocked trial never dialed.
+	// waitForCaptures returns once the first connection's capture lands;
+	// both trials have finished by now, so a second dial would already
+	// be accepted and only its capture could still be pending.
+	waitForCaptures(getRecv, 1, 3*time.Second)
+	time.Sleep(300 * time.Millisecond)
+	if got := len(getRecv()); got != 1 {
+		t.Errorf("upstream connections = %d, want 1 (second variant blocked)", got)
+	}
+}
+
+// TestBudget_ResendWS_AuditStreamStaysOriginResend is the regression
+// guard for the shared runResendWS seam: resend_ws keeps origin=resend.
+func TestBudget_ResendWS_AuditStreamStaysOriginResend(t *testing.T) {
+	bm := newBudgetOneManager()
+	cs, store := setupBudgetFuzzSession(t, bm)
+	bm.Start(nil)
+	defer bm.Stop()
+	addr, cleanup := newWebSocketEchoServer(t)
+	defer cleanup()
+
+	args := map[string]any{
+		"target_addr": addr,
+		"scheme":      "ws",
+		"path":        "/echo",
+		"opcode":      "text",
+		"payload":     "hello",
+		"timeout_ms":  5000,
+	}
+	if res := callResendWS(t, cs, args); res.IsError {
+		t.Fatalf("first resend_ws: tool error within budget: %s", extractTextContent(res))
+	}
+	over := callResendWS(t, cs, args)
+	if !over.IsError {
+		t.Fatal("second resend_ws: expected budget tool error; got success")
+	}
+	if msg := extractTextContent(over); !strings.Contains(msg, "budget") {
+		t.Errorf("second resend_ws error = %q, want substring %q", msg, "budget")
+	}
+	requireSingleBudgetAuditStream(t, store, flow.OriginResend)
+}
+
+// TestBudget_ResendGRPC_AuditStreamStaysOriginResend is the regression
+// guard for the shared runResendGRPC seam: resend_grpc keeps
+// origin=resend.
+func TestBudget_ResendGRPC_AuditStreamStaysOriginResend(t *testing.T) {
+	bm := newBudgetOneManager()
+	cs, store := setupBudgetFuzzSession(t, bm)
+	bm.Start(nil)
+	defer bm.Stop()
+	upstream := &resendGRPCEchoServer{}
+	addr, shutdown := startResendGRPCUpstream(t, upstream)
+	defer shutdown()
+
+	args := map[string]any{
+		"target_addr": addr,
+		"scheme":      "https",
+		"service":     resendGRPCServiceName,
+		"method":      resendGRPCMethodUnary,
+		"messages": []map[string]any{
+			{"payload": "ping"},
+		},
+		"timeout_ms": 10000,
+	}
+	if res := callResendGRPC(t, cs, args); res.IsError {
+		t.Fatalf("first resend_grpc: tool error within budget: %s", extractTextContent(res))
+	}
+	over := callResendGRPC(t, cs, args)
+	if !over.IsError {
+		t.Fatal("second resend_grpc: expected budget tool error; got success")
+	}
+	if msg := extractTextContent(over); !strings.Contains(msg, "budget") {
+		t.Errorf("second resend_grpc error = %q, want substring %q", msg, "budget")
+	}
+	requireSingleBudgetAuditStream(t, store, flow.OriginResend)
 }
