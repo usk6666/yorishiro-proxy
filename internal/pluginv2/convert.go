@@ -261,9 +261,12 @@ func buildHTTPDict(d *MessageDict, m *envelope.HTTPMessage) error {
 			// Plugin authored a new body; the original BodyBuffer no
 			// longer represents the wire payload. Drop the reference
 			// from the new Message so downstream consumers do not
-			// double-count or read stale spilled bytes. (The original
-			// BodyBuffer still belongs to the original Message and is
-			// released by its owner.)
+			// double-count or read stale spilled bytes. The builder must
+			// not release the original BodyBuffer: its result can still
+			// be discarded (a later read error, a rejected outcome). The
+			// Pipeline plugin dispatcher releases the Layer reference
+			// once the substituted envelope is actually returned
+			// (pipeline.releaseDroppedBody).
 			out.BodyBuffer = nil
 			out.BodyStream = nil
 		} else {

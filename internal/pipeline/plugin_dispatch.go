@@ -220,7 +220,37 @@ func (d *pluginDispatcher) dispatch(ctx context.Context, env *envelope.Envelope,
 	if current == env {
 		return Result{}
 	}
+	releaseDroppedBody(env, current)
 	return Result{Envelope: current}
+}
+
+// releaseDroppedBody applies the session's substituted-envelope rule
+// (session.runPipelineTracked, "Substituted envelopes") to the plugin
+// chain's substitute. The substitute aliases the input and holds no
+// references of its own: while it still points at the input's
+// HTTPMessage.BodyBuffer, the session backstop releases the Layer
+// reference. When a hook replaced the body (pluginv2 drops BodyBuffer from
+// the new Message) nothing else would, so it is released here.
+//
+// Called once per dispatch, on the CONTINUE return only: a DROP / RESPOND
+// keeps the input envelope, which still points at the buffer, and the
+// backstop releases it as usual. The input's field is cleared so a later
+// Step that ends the chain cannot hand the backstop a stale pointer. The
+// Pipeline snapshot holds its own reference, so the original variant is
+// still recorded from the spilled body.
+//
+// Only BodyBuffer is released: the backstop owns the input's RawBuffer
+// reference regardless of the returned envelope.
+func releaseDroppedBody(in, out *envelope.Envelope) {
+	im, _ := in.Message.(*envelope.HTTPMessage)
+	if im == nil || im.BodyBuffer == nil {
+		return
+	}
+	if om, ok := out.Message.(*envelope.HTTPMessage); ok && om != nil && om.BodyBuffer == im.BodyBuffer {
+		return
+	}
+	_ = im.BodyBuffer.Release()
+	im.BodyBuffer = nil
 }
 
 // applyMutation produces the envelope to feed to the next hook (or
@@ -242,6 +272,8 @@ func (d *pluginDispatcher) dispatch(ctx context.Context, env *envelope.Envelope,
 //   - MessageOnly: the Message is now the last writer, so the raw-wins
 //     marker of an earlier hook is cleared; regenerateRaw then sets
 //     Encoded on success or clears it on fail-soft / partial / error.
+//     On success Raw is the complete re-encoded message, so RawBuffer is
+//     dropped (without release) for the same reason as RawOnly / Both.
 //
 // RawOnly / Both are first checked against the route's RawWinsPolicy
 // (WireEncoderRegistry.RawWinsSupported). When the destination Layer
@@ -289,7 +321,17 @@ func (d *pluginDispatcher) applyMessageOnly(ctx context.Context, env *envelope.E
 	next := *env
 	next.Message = msg
 	next.RawAuthoritative = false
-	next.Raw = d.regenerateRaw(ctx, &next, env.Raw)
+	raw, encoded := d.regenerateRaw(ctx, &next, env.Raw)
+	next.Raw = raw
+	if encoded {
+		// Raw is now the encoder's complete message, body included. A
+		// disk-spilled RawBuffer holds the input's wire body and must not
+		// be stitched after it by WireBytes, or the recorded modified
+		// variant carries the old body after the new message. Not
+		// released: the session backstop owns the input's RawBuffer
+		// reference regardless of the returned envelope.
+		next.RawBuffer = nil
+	}
 	return &next
 }
 
@@ -326,8 +368,9 @@ func (d *pluginDispatcher) warnRawRefused(ctx context.Context, env *envelope.Env
 }
 
 // regenerateRaw consults the registered WireEncoder for env.Protocol and
-// returns the new Raw bytes when the encoder succeeds. Mirrors RecordStep's
-// applyWireEncode policy (USK-666 fail-soft contract):
+// returns the new Raw bytes when the encoder succeeds; encoded reports
+// whether raw is encoder output. Mirrors RecordStep's applyWireEncode
+// policy (USK-666 fail-soft contract):
 //
 //   - encoder returns (non-nil, nil)                → use new bytes
 //   - encoder returns (nil, nil)         (fail-soft) → keep originalRaw + Debug
@@ -335,13 +378,13 @@ func (d *pluginDispatcher) warnRawRefused(ctx context.Context, env *envelope.Env
 //     (UQ-C: wire-fidelity beats partial output for the live wire path)
 //   - encoder returns (any, other error)            → keep originalRaw + Warn
 //   - no encoder registered for env.Protocol        → keep originalRaw + Debug
-func (d *pluginDispatcher) regenerateRaw(ctx context.Context, env *envelope.Envelope, originalRaw []byte) []byte {
+func (d *pluginDispatcher) regenerateRaw(ctx context.Context, env *envelope.Envelope, originalRaw []byte) (raw []byte, encoded bool) {
 	if d.encoders == nil {
 		clearWireEncoded(ctx)
 		d.logger.DebugContext(ctx, "plugin: no wire encoder registry; preserving original raw",
 			slog.String("protocol", string(env.Protocol)),
 		)
-		return originalRaw
+		return originalRaw, false
 	}
 	enc, ok := d.encoders.Lookup(env.Protocol)
 	if !ok {
@@ -349,7 +392,7 @@ func (d *pluginDispatcher) regenerateRaw(ctx context.Context, env *envelope.Enve
 		d.logger.DebugContext(ctx, "plugin: no wire encoder for protocol; preserving original raw",
 			slog.String("protocol", string(env.Protocol)),
 		)
-		return originalRaw
+		return originalRaw, false
 	}
 	bytesOut, err := enc(env)
 	switch {
@@ -358,20 +401,20 @@ func (d *pluginDispatcher) regenerateRaw(ctx context.Context, env *envelope.Enve
 			// env.Raw is now the encoder's output for the current Message.
 			// RecordStep can skip its own applyWireEncode call (USK-684).
 			markWireEncoded(ctx)
-			return bytesOut
+			return bytesOut, true
 		}
 		clearWireEncoded(ctx)
 		d.logger.DebugContext(ctx, "plugin: wire encoder returned nil bytes (fail-soft); preserving original raw",
 			slog.String("protocol", string(env.Protocol)),
 		)
-		return originalRaw
+		return originalRaw, false
 	default:
 		clearWireEncoded(ctx)
 		d.logger.WarnContext(ctx, "plugin: wire encoder failed; preserving original raw",
 			slog.String("protocol", string(env.Protocol)),
 			slog.String("error", err.Error()),
 		)
-		return originalRaw
+		return originalRaw, false
 	}
 }
 
