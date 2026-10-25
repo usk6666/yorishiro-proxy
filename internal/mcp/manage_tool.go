@@ -43,13 +43,15 @@ type manageParams struct {
 	// flows, use protocol="ws"; combine with scheme="https" for
 	// WS-over-TLS only. Mirrors the query tool's filter.scheme axis.
 	Scheme string `json:"scheme,omitempty" jsonschema:"scheme filter for delete_flows — wire-observed handshake transport (http, https, tcp). For WebSocket flows use protocol=\"ws\"; combine with scheme=\"https\" for WS-over-TLS only. Mirrors query tool filter.scheme semantics."`
-	// HTTPVersion filters delete_flows by an associated Flow's
-	// http_version. Canonical lowercased values: http/1.0, http/1.1,
-	// h2, h2c. Use a pointer so callers can request a literal
-	// empty-string filter (matches pre-USK-788 rows that lack a
-	// recorded version) by sending "" explicitly. Omit the key to
-	// disable the predicate. Mirrors query tool filter semantics.
-	HTTPVersion *string `json:"http_version,omitempty" jsonschema:"http_version filter for delete_flows; matches Flow.http_version (canonical values: http/1.0, http/1.1, h2, h2c). Empty-string explicit value matches pre-USK-788 rows."`
+	// HTTPVersion filters delete_flows by the stream's head HTTP
+	// version (the value query resource=flows shows as http_version).
+	// Canonical lowercased values: http/1.0, http/1.1, h2, h2c. Use a
+	// pointer so callers can request a literal empty-string filter
+	// (streams with no HTTP version: non-HTTP protocols, rows recorded
+	// before the field existed, streams with no recorded flows) by
+	// sending "" explicitly. Omit the key to disable the predicate.
+	// Mirrors query tool filter semantics.
+	HTTPVersion *string `json:"http_version,omitempty" jsonschema:"http_version filter for delete_flows (canonical values: http/1.0, http/1.1, h2, h2c); matches the stream's head HTTP version (the value query shows as flows[].http_version). Empty-string explicit value matches streams with no HTTP version: non-HTTP protocols (gRPC, gRPC-Web, raw, tls-handshake), rows recorded before the field existed, and streams with no recorded flows."`
 
 	// export_flows parameters
 	Format        string        `json:"format,omitempty" jsonschema:"export format: jsonl (default) or har (HTTP Archive 1.2)"`
@@ -77,12 +79,12 @@ type exportFilter struct {
 	// WS-over-TLS only. Mirrors the query tool's filter.scheme axis.
 	// Use scheme=https to export HTTPS flows regardless of HTTP version.
 	Scheme string `json:"scheme,omitempty" jsonschema:"scheme filter — wire-observed handshake transport (http, https, tcp). For WebSocket flows use protocol=\"ws\"; combine with scheme=\"https\" for WS-over-TLS only. Mirrors query tool filter.scheme semantics."`
-	// HTTPVersion matches Flow.http_version via an EXISTS subquery on
-	// the flows table. Canonical lowercased values: http/1.0,
-	// http/1.1, h2, h2c. Pointer so an explicit empty string can
-	// request the pre-USK-788 (unknown-version) bucket; omitting the
-	// key disables the predicate.
-	HTTPVersion *string `json:"http_version,omitempty" jsonschema:"http_version filter; matches Flow.http_version (canonical values: http/1.0, http/1.1, h2, h2c). Empty-string explicit value matches pre-USK-788 rows."`
+	// HTTPVersion matches the stream's head HTTP version (the value
+	// query resource=flows shows as http_version). Canonical lowercased
+	// values: http/1.0, http/1.1, h2, h2c. Pointer so an explicit empty
+	// string can request streams with no HTTP version; omitting the key
+	// disables the predicate.
+	HTTPVersion *string `json:"http_version,omitempty" jsonschema:"http_version filter (canonical values: http/1.0, http/1.1, h2, h2c); matches the stream's head HTTP version (the value query shows as flows[].http_version). Empty-string explicit value matches streams with no HTTP version: non-HTTP protocols (gRPC, gRPC-Web, raw, tls-handshake), rows recorded before the field existed, and streams with no recorded flows."`
 	URLPattern  string  `json:"url_pattern,omitempty"`
 	TimeAfter   string  `json:"time_after,omitempty"`
 	TimeBefore  string  `json:"time_before,omitempty"`
@@ -339,7 +341,8 @@ func exportFilterIsZero(f *exportFilter) bool {
 // validateManageDeleteFilter validates the delete_flows filter values
 // against the canonical MCP enum sets so callers get the same error
 // messages as the query tool. http_version uses a pointer with the
-// non-nil empty-string sentinel meaning "match pre-USK-788 rows", so
+// non-nil empty-string sentinel meaning "match streams with no head
+// HTTP version", so
 // only non-empty pointer values are checked against the enum.
 func validateManageDeleteFilter(params manageParams) error {
 	if err := validateEnum("protocol", params.Protocol, validFilterProtocols); err != nil {

@@ -219,13 +219,16 @@ type queryFilter struct {
 	// To isolate WebSocket flows: use filter.protocol="ws" (any transport) or
 	// combine protocol="ws" with scheme="https" for WS-over-TLS only.
 	Scheme string `json:"scheme,omitempty" jsonschema:"Stream.Scheme filter — wire-observed handshake transport (http, https, tcp). For WebSocket flows use protocol=\"ws\"; combine with scheme=\"https\" for WS-over-TLS only."`
-	// HTTPVersion filters flows that have at least one Flow row with
-	// the matching http_version value (USK-788/USK-792). Canonical
-	// lowercased values: "http/1.0", "http/1.1", "h2", "h2c". Mirrors
-	// the manage tool's filter.http_version axis. Use a pointer so
-	// callers may explicitly pass "" to match pre-USK-788 rows; omit
-	// the key entirely to disable the predicate.
-	HTTPVersion *string `json:"http_version,omitempty" jsonschema:"http_version filter (http/1.0, http/1.1, h2, h2c). Empty-string explicit value matches pre-USK-788 rows."`
+	// HTTPVersion filters flows by the stream's head HTTP version — the
+	// value each entry shows as http_version (resolveHTTPVersion over the
+	// head pair; the SQL in flow.streamHeadHTTPVersionExpr mirrors it).
+	// Canonical lowercased values: "http/1.0", "http/1.1", "h2", "h2c".
+	// Mirrors the manage tool's filter.http_version axis. Use a pointer
+	// so callers may explicitly pass "" to match streams with no HTTP
+	// version (non-HTTP protocols, rows recorded before the field
+	// existed, streams with no recorded flows); omit the key entirely to
+	// disable the predicate.
+	HTTPVersion *string `json:"http_version,omitempty" jsonschema:"http_version filter (http/1.0, http/1.1, h2, h2c); matches the stream's head HTTP version (the value shown as flows[].http_version). Empty-string explicit value matches streams with no HTTP version: non-HTTP protocols (gRPC, gRPC-Web, raw, tls-handshake), rows recorded before the field existed, and streams with no recorded flows."`
 	// Method filters flows by HTTP method (e.g. "GET", "POST").
 	Method string `json:"method,omitempty" jsonschema:"HTTP method filter (e.g. GET, POST)"`
 	// URLPattern filters flows by URL using a substring search pattern.
@@ -324,7 +327,7 @@ func validateSchemeFilter(value string) error {
 // validFilterHTTPVersions lists valid values for filter.http_version.
 // Mirrors the canonical lowercased values stamped on Flow.HTTPVersion
 // by USK-788. The empty string is a separately-meaningful sentinel
-// (pre-USK-788 rows) and is accepted by the filter when sent as an
+// (streams with no head HTTP version) and is accepted by the filter when sent as an
 // explicit empty value, but it is not enumerated here because
 // validateEnum treats "" as "filter not applied".
 var validFilterHTTPVersions = []string{"http/1.0", "http/1.1", "h2", "h2c"}

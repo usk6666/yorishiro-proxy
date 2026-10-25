@@ -28,11 +28,12 @@ type ExportFilter struct {
 	// Mirrors the query MCP tool's filter.scheme axis (USK-792) so
 	// analysts can pick HTTPS-only flows for archival.
 	Scheme string
-	// HTTPVersion filters streams whose flows include at least one row
-	// with this http_version value (USK-788/USK-792). Canonical
-	// lowercased values: "http/1.0", "http/1.1", "h2", "h2c". Nil means
-	// the predicate is omitted; the non-nil empty string matches
-	// streams whose flows have an empty http_version (pre-USK-788).
+	// HTTPVersion filters streams by their head HTTP version (see
+	// StreamListOptions.HTTPVersion). Canonical lowercased values:
+	// "http/1.0", "http/1.1", "h2", "h2c". Nil means the predicate is
+	// omitted; the non-nil empty string matches streams with no HTTP
+	// version (non-HTTP protocols, rows recorded before the field
+	// existed, streams with no flows).
 	HTTPVersion *string
 	// URLPattern filters by URL substring match.
 	URLPattern string
