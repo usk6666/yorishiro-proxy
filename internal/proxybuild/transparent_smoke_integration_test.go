@@ -488,6 +488,10 @@ func TestTransparent_ServerFirst_BannerRelayed_Smoke(t *testing.T) {
 type tlsHello struct {
 	serverName string
 	protos     []string
+	// curves is the supported_groups offer, wire order. It tells a uTLS
+	// parrot from Go's standard crypto/tls: the Firefox profile offers the
+	// ffdhe groups (256, 257), which crypto/tls never does.
+	curves []tls.CurveID
 }
 
 // capturingTLSUpstream is a TLS server with its own CA that records every
@@ -512,7 +516,11 @@ func newCapturingTLSUpstream(t *testing.T, nextProtos []string, handle func(*tls
 		NextProtos: nextProtos,
 		GetConfigForClient: func(h *tls.ClientHelloInfo) (*tls.Config, error) {
 			u.mu.Lock()
-			u.hellos = append(u.hellos, tlsHello{serverName: h.ServerName, protos: append([]string(nil), h.SupportedProtos...)})
+			u.hellos = append(u.hellos, tlsHello{
+				serverName: h.ServerName,
+				protos:     append([]string(nil), h.SupportedProtos...),
+				curves:     append([]tls.CurveID(nil), h.SupportedCurves...),
+			})
 			u.mu.Unlock()
 			return nil, nil
 		},

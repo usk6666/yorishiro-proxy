@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	gohttp "net/http"
@@ -409,41 +410,50 @@ func TestTransparent_TLS_PassthroughListBySNI(t *testing.T) {
 	waitStream(t, p.store, 2, isMITMHTTPSStream)
 }
 
+// explicitProxy turns the transparent harness into a plain explicit
+// proxy listener (CONNECT / SOCKS5).
+func explicitProxy(d *proxybuild.Deps) { d.TransparentMode = ""; d.OriginalDstResolver = nil }
+
+// explicitTunnel opens a tunnel to target on c through the explicit proxy.
+type explicitTunnel struct {
+	name   string
+	tunnel func(t *testing.T, c net.Conn, target netip.AddrPort)
+}
+
+// explicitTunnels are the CONNECT and SOCKS5 tunnel openers.
+var explicitTunnels = []explicitTunnel{
+	{"CONNECT", func(t *testing.T, c net.Conn, target netip.AddrPort) {
+		_, _ = io.WriteString(c, "CONNECT "+target.String()+" HTTP/1.1\r\nHost: "+target.String()+"\r\n\r\n")
+		resp, err := gohttp.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("CONNECT: %v %v", resp, err)
+		}
+	}},
+	{"SOCKS5", func(t *testing.T, c net.Conn, target netip.AddrPort) {
+		_, _ = c.Write([]byte{0x05, 0x01, 0x00})
+		reply := make([]byte, 2)
+		if _, err := io.ReadFull(c, reply); err != nil || reply[1] != 0x00 {
+			t.Fatalf("SOCKS5 method: %x %v", reply, err)
+		}
+		req := append([]byte{0x05, 0x01, 0x00, 0x01}, target.Addr().AsSlice()...)
+		req = binary.BigEndian.AppendUint16(req, target.Port())
+		_, _ = c.Write(req)
+		rep := make([]byte, 10)
+		if _, err := io.ReadFull(c, rep); err != nil || rep[1] != 0x00 {
+			t.Fatalf("SOCKS5 connect: %x %v", rep, err)
+		}
+	}},
+}
+
 // T12 (guard): CONNECT and SOCKS5 with a no-ALPN inner ClientHello keep
 // the legacy path — the upstream is offered [h2 http/1.1] and the
 // exchange is recorded as HTTP/1.
 func TestTransparent_TLS_ExplicitProxyNoALPNUnchanged(t *testing.T) {
-	explicit := func(d *proxybuild.Deps) { d.TransparentMode = ""; d.OriginalDstResolver = nil }
-	for _, tc := range []struct {
-		name   string
-		tunnel func(t *testing.T, c net.Conn, target netip.AddrPort)
-	}{
-		{"CONNECT", func(t *testing.T, c net.Conn, target netip.AddrPort) {
-			_, _ = io.WriteString(c, "CONNECT "+target.String()+" HTTP/1.1\r\nHost: "+target.String()+"\r\n\r\n")
-			resp, err := gohttp.ReadResponse(bufio.NewReader(c), nil)
-			if err != nil || resp.StatusCode != 200 {
-				t.Fatalf("CONNECT: %v %v", resp, err)
-			}
-		}},
-		{"SOCKS5", func(t *testing.T, c net.Conn, target netip.AddrPort) {
-			_, _ = c.Write([]byte{0x05, 0x01, 0x00})
-			reply := make([]byte, 2)
-			if _, err := io.ReadFull(c, reply); err != nil || reply[1] != 0x00 {
-				t.Fatalf("SOCKS5 method: %x %v", reply, err)
-			}
-			req := append([]byte{0x05, 0x01, 0x00, 0x01}, target.Addr().AsSlice()...)
-			req = binary.BigEndian.AppendUint16(req, target.Port())
-			_, _ = c.Write(req)
-			rep := make([]byte, 10)
-			if _, err := io.ReadFull(c, rep); err != nil || rep[1] != 0x00 {
-				t.Fatalf("SOCKS5 connect: %x %v", rep, err)
-			}
-		}},
-	} {
+	for _, tc := range explicitTunnels {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := transparentCtx(t)
 			up := newCapturingTLSUpstream(t, []string{"h2", "http/1.1"}, serveHTTPS)
-			p := startTransparentProxy(t, ctx, up.addr(), explicit)
+			p := startTransparentProxy(t, ctx, up.addr(), explicitProxy)
 			c := p.dial(t)
 			tc.tunnel(t, c, up.addr())
 			tlc := tls.Client(c, &tls.Config{ServerName: "legacy.example", InsecureSkipVerify: true}) //nolint:gosec // test
@@ -631,5 +641,149 @@ func TestTransparent_TLS_NoALPNRawRelay_NarrowedToPathOnlyCutByReconcile(t *test
 	scope.ReplacePolicyRules([]connector.TargetRule{{Hostname: "127.0.0.1", PathPrefix: "/api/"}}, nil, connector.PolicyOrigin{})
 	if n := live.Reconcile("test"); n != 1 {
 		t.Errorf("Reconcile after narrowing to a path-only allow revoked %d connections, want 1", n)
+	}
+}
+
+// serveOnceThenClose answers exactly one keep-alive HTTP/1.1 request (no
+// Connection: close), then closes the connection and signals on closed —
+// an upstream closing its idle keep-alive connection.
+func serveOnceThenClose(closed chan<- struct{}) func(*tls.Conn) {
+	return func(tc *tls.Conn) {
+		req, err := gohttp.ReadRequest(bufio.NewReader(tc))
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, req.Body)
+		body := httpsAnswer(req)
+		fmt.Fprintf(tc, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+		_ = tc.Close()
+		select {
+		case closed <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// keepAliveAcrossUpstreamClose sends two requests on one client
+// connection; the upstream (serveOnceThenClose) closes its connection
+// after the first, so the second forces the proxy to redial upstream.
+func keepAliveAcrossUpstreamClose(t *testing.T, tc net.Conn, host string, closed <-chan struct{}) {
+	t.Helper()
+	br := bufio.NewReader(tc)
+	if resp, body := httpsGet(t, tc, br, "/first", host, false); resp.StatusCode != 200 || !strings.Contains(body, "path=/first") {
+		t.Fatalf("first response %d %q", resp.StatusCode, body)
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream did not close its first connection")
+	}
+	// Let the upstream FIN reach the proxy's idle upstream connection.
+	time.Sleep(50 * time.Millisecond)
+	if resp, body := httpsGet(t, tc, br, "/second", host, true); resp.StatusCode != 200 || !strings.Contains(body, "path=/second") {
+		t.Fatalf("second response %d %q", resp.StatusCode, body)
+	}
+}
+
+// hasFFDHE reports whether a supported_groups offer carries the ffdhe
+// groups the uTLS Firefox profile sends (256, 257) and Go's standard
+// crypto/tls never does.
+func hasFFDHE(curves []tls.CurveID) bool {
+	for _, c := range curves {
+		if c == 256 || c == 257 {
+			return true
+		}
+	}
+	return false
+}
+
+// T17 (USK-1378): a transparent no-ALPN HTTP/1 connection whose upstream
+// closes mid keep-alive is redialed with the first dial's shape — no ALPN
+// extension and Go's standard crypto/tls, even with tls_fingerprint
+// firefox — not an http/1.1 offer under the uTLS profile.
+func TestTransparent_TLS_NoALPN_H1Redial_KeepsNoALPNStandardTLS(t *testing.T) {
+	ctx := transparentCtx(t)
+	closed := make(chan struct{}, 2)
+	up := newCapturingTLSUpstream(t, []string{"h2", "http/1.1"}, serveOnceThenClose(closed))
+	p := startTransparentProxy(t, ctx, up.addr(), withFirefoxFingerprint)
+	tc := mitmTLS(t, p, "noalpn.example", nil)
+	keepAliveAcrossUpstreamClose(t, tc, "noalpn.example", closed)
+
+	hellos := up.seenHellos()
+	if len(hellos) != 2 {
+		t.Fatalf("upstream saw %d ClientHellos, want 2 (first dial + redial): %+v", len(hellos), hellos)
+	}
+	for i, h := range hellos {
+		if len(h.protos) != 0 {
+			t.Errorf("ClientHello %d ALPN = %v, want no ALPN offer", i, h.protos)
+		}
+		if hasFFDHE(h.curves) {
+			t.Errorf("ClientHello %d supported_groups = %v, want Go standard TLS (no ffdhe), not the firefox profile", i, h.curves)
+		}
+		if h.serverName != "noalpn.example" {
+			t.Errorf("ClientHello %d SNI = %q, want noalpn.example", i, h.serverName)
+		}
+	}
+}
+
+// T18 (USK-1378 guard): CONNECT and SOCKS5 redials are unchanged — the
+// redialed upstream ClientHello offers [http/1.1] under the firefox
+// profile.
+func TestTransparent_TLS_ExplicitProxyH1Redial_OffersHTTP11WithProfile(t *testing.T) {
+	for _, tc := range explicitTunnels {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := transparentCtx(t)
+			closed := make(chan struct{}, 2)
+			up := newCapturingTLSUpstream(t, []string{"http/1.1"}, serveOnceThenClose(closed))
+			p := startTransparentProxy(t, ctx, up.addr(), func(d *proxybuild.Deps) {
+				explicitProxy(d)
+				withFirefoxFingerprint(d)
+			})
+			c := p.dial(t)
+			tc.tunnel(t, c, up.addr())
+			tlc := tls.Client(c, &tls.Config{ServerName: "legacy.example", InsecureSkipVerify: true}) //nolint:gosec // test
+			if err := tlc.Handshake(); err != nil {
+				t.Fatalf("inner handshake: %v", err)
+			}
+			keepAliveAcrossUpstreamClose(t, tlc, "legacy.example", closed)
+
+			hellos := up.seenHellos()
+			if len(hellos) != 2 {
+				t.Fatalf("upstream saw %d ClientHellos, want 2 (first dial + redial): %+v", len(hellos), hellos)
+			}
+			if got := strings.Join(hellos[1].protos, ","); got != "http/1.1" {
+				t.Errorf("redial ALPN = %q, want http/1.1", got)
+			}
+			for i, h := range hellos {
+				if !hasFFDHE(h.curves) {
+					t.Errorf("ClientHello %d supported_groups = %v, want the firefox profile (ffdhe groups)", i, h.curves)
+				}
+			}
+		})
+	}
+}
+
+// T19 (USK-1378 scope guard): a transparent connection whose client
+// offered [http/1.1] keeps today's redial — [http/1.1] under the firefox
+// profile.
+func TestTransparent_TLS_ALPNH1Redial_OffersHTTP11WithProfile(t *testing.T) {
+	ctx := transparentCtx(t)
+	closed := make(chan struct{}, 2)
+	up := newCapturingTLSUpstream(t, []string{"http/1.1"}, serveOnceThenClose(closed))
+	p := startTransparentProxy(t, ctx, up.addr(), withFirefoxFingerprint)
+	tc := mitmTLS(t, p, "alpn.example", []string{"http/1.1"})
+	keepAliveAcrossUpstreamClose(t, tc, "alpn.example", closed)
+
+	hellos := up.seenHellos()
+	if len(hellos) != 2 {
+		t.Fatalf("upstream saw %d ClientHellos, want 2 (first dial + redial): %+v", len(hellos), hellos)
+	}
+	for i, h := range hellos {
+		if got := strings.Join(h.protos, ","); got != "http/1.1" {
+			t.Errorf("ClientHello %d ALPN = %q, want http/1.1", i, got)
+		}
+		if !hasFFDHE(h.curves) {
+			t.Errorf("ClientHello %d supported_groups = %v, want the firefox profile (ffdhe groups)", i, h.curves)
+		}
 	}
 }
