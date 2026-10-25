@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // seedActiveStream inserts a fresh Stream row in State="active" so the
@@ -436,5 +438,65 @@ func TestFinalizeResendStream_EmptyUserTagWritesNoTagKey(t *testing.T) {
 				t.Errorf("Tags[\"records_truncated\"] = %q, want %q preserved (tags=%v)", got.Tags["records_truncated"], "true", got.Tags)
 			}
 		})
+	}
+}
+
+// TestFinalizeResendStream_CancelledCallerCtxStillFinalizes (USK-1370): an
+// MCP client that cancels a resend / fuzz call cancels the handler ctx the
+// finalize write receives. The terminal write — State, FailureReason,
+// Duration, tags["tag"], tags["error"] — must still land, as the live
+// path's OnComplete does under context.WithoutCancel.
+func TestFinalizeResendStream_CancelledCallerCtxStillFinalizes(t *testing.T) {
+	store := newTestStore(t)
+	id := seedActiveStreamAt(t, store, time.Now().Add(-time.Second), 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	finalizeResendStream(ctx, store, id, "usk-1370", fmt.Errorf("resend: %w", context.Canceled))
+
+	got, err := store.GetStream(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.State != "error" {
+		t.Errorf("State = %q, want error (finalize must survive caller cancellation)", got.State)
+	}
+	if got.Tags["tag"] != "usk-1370" {
+		t.Errorf("Tags[\"tag\"] = %q, want %q (tags=%v)", got.Tags["tag"], "usk-1370", got.Tags)
+	}
+	if got.Tags["error"] == "" {
+		t.Errorf("Tags[\"error\"] missing (tags=%v); want the error text", got.Tags)
+	}
+	if got.Duration < time.Second {
+		t.Errorf("Duration = %v, want >= 1s (StreamElapsed must also run detached)", got.Duration)
+	}
+}
+
+// TestFinalizeResendStream_ReturnsAfterStoreClose (USK-1370 criterion 2):
+// with cancellation detached, the terminal write must still be bounded.
+// After SQLiteStore.Close the writer goroutine is gone, so an enqueued
+// write's result never arrives; finalize must give up at its timeout
+// rather than block forever.
+func TestFinalizeResendStream_ReturnsAfterStoreClose(t *testing.T) {
+	// Not flowtest.NewStore: its cleanup Closes the store, and closing a
+	// SQLiteStore twice panics.
+	store, err := flow.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "s.db"), testutil.DiscardLogger())
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	id := seedActiveStream(t, store)
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		finalizeResendStreamWithin(context.Background(), 200*time.Millisecond, store, id, "", errors.New("boom"))
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("finalizeResendStream did not return within 15s after store Close; the terminal write is unbounded")
 	}
 }

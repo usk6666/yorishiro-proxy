@@ -53,10 +53,16 @@ package mcp
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
+
+// resendFinalizeTimeout bounds the terminal Stream write that
+// finalizeResendStream performs. Tests that need a shorter bound call
+// finalizeResendStreamWithin directly rather than mutating shared state.
+const resendFinalizeTimeout = 5 * time.Second
 
 // finalizeResendStream marks the Stream identified by streamID as
 // terminal in the flow store. Safe to call with a nil store (no-op),
@@ -76,11 +82,23 @@ import (
 // path does not run RunSession so the handler is responsible for the
 // equivalent terminal write.
 //
+// The terminal write is detached from ctx's cancellation (USK-1370): a
+// client that cancels the resend / fuzz call still gets its Stream
+// finalised, tags included. The write is bounded by
+// resendFinalizeTimeout instead, so it always returns. ctx's values are
+// kept (context.WithoutCancel) and ctx itself is used for logging.
+//
 // Logging: success path is slog.Debug (resend completion is a normal-flow
 // detail per CLAUDE.md log-level guidance); store write failures are
 // slog.Warn since the data is already on disk via RecordStep — only the
 // terminal state attribute is missing — and the proxy can continue.
 func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID, tag string, runErr error) {
+	finalizeResendStreamWithin(ctx, resendFinalizeTimeout, store, streamID, tag, runErr)
+}
+
+// finalizeResendStreamWithin is finalizeResendStream with the terminal
+// write bounded by timeout instead of resendFinalizeTimeout.
+func finalizeResendStreamWithin(ctx context.Context, timeout time.Duration, store flow.StreamWriter, streamID, tag string, runErr error) {
 	if store == nil || streamID == "" {
 		return
 	}
@@ -97,11 +115,21 @@ func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID
 	// flow.Store, which embeds StreamReader; a store without it — or a
 	// lookup miss — yields 0, the "do not update" sentinel, so the
 	// existing Duration is preserved.
+	//
+	// USK-1370: detach the terminal write from caller cancellation (the
+	// go-sdk cancels the handler ctx on notifications/cancelled), matching
+	// the live path's OnComplete under context.WithoutCancel, and bound it
+	// with timeout so it cannot block forever — e.g. after
+	// SQLiteStore.Close, whose enqueued write never gets a result. The
+	// same fctx covers the StreamElapsed read: a failed read yields
+	// Duration 0 ("do not update").
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
 	reader, _ := store.(flow.StreamReader)
 	update := flow.StreamUpdate{
 		State:         state,
 		FailureReason: failureReason,
-		Duration:      flow.StreamElapsed(ctx, reader, streamID),
+		Duration:      flow.StreamElapsed(fctx, reader, streamID),
 	}
 	// USK-1350: keep the error text on the Stream like the proxy path's
 	// OnComplete does, so `query flows` shows why the resend / fuzz
@@ -119,7 +147,7 @@ func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID
 			update.AppendTags["error"] = flow.TruncateErrorTag(runErr.Error())
 		}
 	}
-	if err := store.UpdateStream(ctx, streamID, update); err != nil {
+	if err := store.UpdateStream(fctx, streamID, update); err != nil {
 		slog.WarnContext(ctx, "resend: stream finalize update failed",
 			"stream_id", streamID,
 			"state", state,
