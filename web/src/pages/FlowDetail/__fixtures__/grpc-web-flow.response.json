@@ -1,0 +1,80 @@
+{
+  "conn_id": "conn-stream-grpc-web",
+  "duration_ms": 0,
+  "id": "stream-grpc-web",
+  "message_count": 3,
+  "message_preview": [
+    {
+      "body": "hpack-encoded-start",
+      "body_encoding": "text",
+      "direction": "send",
+      "id": "stream-grpc-web-0",
+      "metadata": {
+        "grpc_content_type": "application/grpc-web",
+        "grpc_event": "start",
+        "grpc_method": "Do",
+        "grpc_service": "pkg.Svc",
+        "protocol": "grpc-web"
+      },
+      "sequence": 0,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "url": "https://grpc.example.com/pkg.Svc/Do"
+    },
+    {
+      "body": "\b\u0001",
+      "body_decoded": "{\n  \"0001:0000:Varint\": 1\n}",
+      "body_decoded_encoding": "proto-schemaless-json",
+      "body_encoding": "text",
+      "body_encoding_applied": "proto-schemaless",
+      "direction": "send",
+      "id": "stream-grpc-web-1",
+      "metadata": {
+        "grpc_compressed": "false",
+        "grpc_end_stream": "true",
+        "grpc_event": "data",
+        "grpc_method": "Do",
+        "grpc_service": "pkg.Svc",
+        "grpc_wire_length": "2",
+        "protocol": "grpc-web"
+      },
+      "sequence": 1,
+      "timestamp": "2026-01-01T00:00:00Z"
+    },
+    {
+      "body": "hpack-encoded-trailers",
+      "body_encoding": "text",
+      "direction": "receive",
+      "id": "stream-grpc-web-2",
+      "metadata": {
+        "grpc_event": "end",
+        "grpc_status": "0",
+        "protocol": "grpc-web"
+      },
+      "sequence": 2,
+      "timestamp": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "method": "",
+  "protocol": "grpc-web",
+  "protocol_summary": {
+    "grpc_status": "0",
+    "grpc_status_name": "OK",
+    "method": "Do",
+    "service": "pkg.Svc"
+  },
+  "raw_request": "aHBhY2stZW5jb2RlZC1zdGFydA==",
+  "raw_response": "aHBhY2stZW5jb2RlZC10cmFpbGVycw==",
+  "request_body": "",
+  "request_body_encoding": "text",
+  "request_body_truncated": false,
+  "request_headers": {},
+  "response_body": "",
+  "response_body_encoding": "text",
+  "response_body_truncated": false,
+  "response_headers": {},
+  "response_status_code": 0,
+  "scheme": "https",
+  "state": "complete",
+  "timestamp": "2026-01-01T00:00:00Z",
+  "url": "https://grpc.example.com/pkg.Svc/Do"
+}

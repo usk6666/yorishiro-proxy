@@ -11,7 +11,6 @@ function makeFlow(
     id: "test-id",
     conn_id: "conn-1",
     protocol: "http",
-    flow_type: "unary",
     state: "complete",
     method: "GET",
     url: "http://example.com/",

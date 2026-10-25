@@ -217,17 +217,18 @@ export function protocolVariant(
 }
 
 /**
- * Whether a flow uses one of the streaming flow_types that produces a per-message
- * timeline (WebSocket, gRPC server/client/bidi streaming, SSE).
- *
- * Mirrors FlowDetailPage's local helper but accepts a partial flow shape so it
- * can be unit tested without constructing a full FlowDetailResult.
+ * Whether FlowDetail needs the per-message `query resource=messages` call
+ * for this flow. Decided by protocol family alone: a single HTTP exchange
+ * is rendered entirely from the flow response, while every other family
+ * (ws, grpc, grpc-web, sse, raw, tls-handshake) renders a message
+ * timeline. The server has no unary/streaming classification — a MITM
+ * proxy cannot know RPC cardinality without the proto schema.
  */
-export function isStreamingFlow(
-  flow: Pick<FlowDetailResult, "flow_type"> | null | undefined,
+export function needsMessagesQuery(
+  flow: Pick<FlowDetailResult, "protocol"> | null | undefined,
 ): boolean {
   if (!flow) return false;
-  return (flow.flow_type ?? "") !== "unary";
+  return pickFlowDetailKind(flow.protocol) !== "http";
 }
 
 /**

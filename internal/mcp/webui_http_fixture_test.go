@@ -496,3 +496,30 @@ func TestQueryFlows_AllProtocolsMatchesWebUIFixture(t *testing.T) {
 		"scheme":       validFilterSchemes,
 	})
 }
+
+// TestQueryFlow_StreamingProtocolsMatchWebUIFixtures pins the query
+// resource=flow response for one stream of every non-HTTP canonical
+// protocol. The WebUI decides whether FlowDetail needs the messages
+// query from `protocol` alone: the server has no unary/streaming
+// classification (a MITM proxy cannot know RPC cardinality), so the
+// response must not carry the dropped flow_type key either.
+func TestQueryFlow_StreamingProtocolsMatchWebUIFixtures(t *testing.T) {
+	store := newTestStore(t)
+	r := newWebUIFixtureRecorder(t, store)
+	recordAllProtocolStreams(t, r)
+	cs := setupQueryTestSession(t, store)
+
+	for _, proto := range []string{"ws", "grpc", "grpc-web", "sse", "raw", "tls-handshake"} {
+		t.Run(proto, func(t *testing.T) {
+			got := queryJSON(t, cs, map[string]any{"resource": "flow", "id": "stream-" + proto})
+			if got["protocol"] != proto {
+				t.Fatalf("protocol = %v, want %s", got["protocol"], proto)
+			}
+			if v, ok := got["flow_type"]; ok {
+				t.Fatalf("response carries flow_type = %v; the server has no unary/streaming field", v)
+			}
+			normalizeWebUIFixture(got)
+			checkWebUIFixture(t, filepath.Join(webUIFlowDetailFixtureDir, proto+"-flow.response.json"), got)
+		})
+	}
+}
