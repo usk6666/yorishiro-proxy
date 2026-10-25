@@ -295,7 +295,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4 # TEMP negative control
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
@@ -306,8 +306,6 @@ jobs:
       - name: Vet + test depsec
         working-directory: tools/depsec
         run: |
-          echo "TEMP negative control ${{ github.nonexistent_ctx.foo }}"
-          exit 1
           test -z "$(gofmt -l .)" || (echo "not gofmt-clean:" && gofmt -l . && exit 1)
           go vet ./...
           go test -race ./...
