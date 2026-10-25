@@ -394,6 +394,22 @@ func TestRateLimitDenial_Tags(t *testing.T) {
 			t.Errorf("rate_limit_effective_rps = %q, want %q", tags["rate_limit_effective_rps"], "5.5")
 		}
 	})
+
+	t.Run("fractional rps is not rounded away", func(t *testing.T) {
+		for _, tc := range []struct {
+			rps  float64
+			want string
+		}{
+			{0.001, "0.001"},
+			{0.04, "0.04"},
+			{0.25, "0.25"},
+		} {
+			d := &RateLimitDenial{LimitType: "global", EffectiveRPS: tc.rps}
+			if got := d.Tags()["rate_limit_effective_rps"]; got != tc.want {
+				t.Errorf("EffectiveRPS %v: rate_limit_effective_rps = %q, want %q", tc.rps, got, tc.want)
+			}
+		}
+	})
 }
 
 func TestRateLimiter_Wait_NoLimitsFastPath(t *testing.T) {

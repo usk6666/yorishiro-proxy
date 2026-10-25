@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -28,8 +29,19 @@ func (d *RateLimitDenial) Tags() map[string]string {
 	}
 	return map[string]string{
 		"rate_limit_type":          d.LimitType,
-		"rate_limit_effective_rps": fmt.Sprintf("%.1f", d.EffectiveRPS),
+		"rate_limit_effective_rps": formatRPSTag(d.EffectiveRPS),
 	}
+}
+
+// formatRPSTag renders rps losslessly (shortest round-trip decimal), keeping a
+// trailing ".0" on whole numbers so 10 → "10.0", 5.5 → "5.5", 0.001 → "0.001".
+// A fixed-precision verb would record any limit below 0.05 rps as "0.0".
+func formatRPSTag(rps float64) string {
+	s := strconv.FormatFloat(rps, 'f', -1, 64)
+	if !strings.ContainsAny(s, ".NI") {
+		s += ".0"
+	}
+	return s
 }
 
 // RateLimitConfig holds the rate limit settings for the TargetScope.

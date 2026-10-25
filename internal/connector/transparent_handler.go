@@ -64,14 +64,14 @@ type TransparentObservation struct {
 }
 
 // TransparentBlock describes a transparent connection refused before any
-// upstream contact (TargetScope deny, name not bound) or whose upstream
-// dial failed.
+// upstream contact (TargetScope deny, name not bound, rate limit) or whose
+// upstream dial failed.
 type TransparentBlock struct {
 	RemoteAddr  string
 	OriginalDst string
 	Route       TransparentRoute
-	// BlockedBy is "target_scope" for a scope refusal, empty for a dial
-	// failure.
+	// BlockedBy is "target_scope" for a scope refusal, "rate_limit" for a
+	// rate-limit refusal, empty for a dial failure.
 	BlockedBy string
 	// FailureReason is the audit classification (e.g. "target_scope",
 	// ReasonNameNotBound, "transparent_dial_failed").
@@ -87,6 +87,9 @@ type TransparentBlock struct {
 	// Error is the underlying error of a TLS MITM failure
 	// (client_tls_error / upstream_tls_error), if any.
 	Error string
+	// Tags are extra audit tags (e.g. RateLimitDenial.Tags of a
+	// rate-limit refusal), if any.
+	Tags map[string]string
 }
 
 // TransparentObserver persists transparent audit records. Calls are
@@ -129,6 +132,11 @@ type TransparentHandlerConfig struct {
 	// returned to the pool by the handler). Nil closes the stack.
 	OnStack      OnStackFunc
 	OnHTTP2Stack OnHTTP2StackFunc
+	// RateLimiter applies the Policy / Agent rate limits per connection at
+	// admission, after the scope gate, keyed by the original-destination
+	// IP (USK-1374). Nil (or no limits configured) admits every
+	// connection.
+	RateLimiter *RateLimiter
 	// Logger; nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -146,6 +154,10 @@ const (
 	TransparentFailureScope = "target_scope"
 	// TransparentFailureDial is the FailureReason of an upstream dial failure.
 	TransparentFailureDial = "transparent_dial_failed"
+	// TransparentBlockedByRateLimit is the BlockedBy / FailureReason of a
+	// rate-limit refusal (USK-1374). It mirrors pipeline.BlockedByRateLimit
+	// (connector cannot import pipeline).
+	TransparentBlockedByRateLimit = "rate_limit"
 	// transparentVia is the LiveConn.Via / audit "via" label.
 	transparentVia = "transparent"
 )
@@ -378,6 +390,9 @@ func (h *TransparentHandler) handleOpaque(ctx context.Context, pc *PeekConn, dst
 		h.refuse(ctx, pc, dst, route, v, "", logger)
 		return nil
 	}
+	if h.rateLimited(ctx, pc, dst, route, "", ClientHelloPeek{}, logger) {
+		return nil
+	}
 	admit := func() (bool, string) {
 		r := h.scopeOpaque(dst)
 		return r.allowed, r.reason
@@ -416,6 +431,9 @@ func (h *TransparentHandler) handleHTTP(ctx context.Context, pc *PeekConn, dst n
 	}
 	if !v.allowed {
 		h.refuse(ctx, pc, dst, TransparentRouteHTTP, v, strings.Join(head.names(), ","), logger)
+		return nil
+	}
+	if h.rateLimited(ctx, pc, dst, TransparentRouteHTTP, strings.Join(head.names(), ","), ClientHelloPeek{}, logger) {
 		return nil
 	}
 	admit := func() (bool, string) {
@@ -686,11 +704,7 @@ func (h *TransparentHandler) refuse(ctx context.Context, pc *PeekConn, dst netip
 	logger.Info("transparent target blocked by scope",
 		"route", string(route), "name", name, "failure", v.failure, "reason", v.reason)
 	if route == TransparentRouteHTTP {
-		_ = pc.SetDeadline(time.Now().Add(tcpForwardDenyDrainTimeout))
-		if _, err := pc.Write(transparentDenyResponse); err == nil {
-			_ = pc.CloseWrite()
-			_, _ = io.CopyN(io.Discard, pc, tcpForwardDenyDrainLimit)
-		}
+		writeTransparentRefusal(pc, transparentDenyResponse)
 	}
 	if h.cfg.Observer != nil {
 		h.cfg.Observer.OnBlocked(context.WithoutCancel(ctx), TransparentBlock{
@@ -702,6 +716,64 @@ func (h *TransparentHandler) refuse(ctx context.Context, pc *PeekConn, dst netip
 			Reason:        v.reason,
 			Name:          name,
 		})
+	}
+}
+
+// rateLimited runs the rate-limit gate of an admitted connection (USK-1374)
+// — after the scope verdict, before LiveConns registration and the dial,
+// so a scope refusal consumes no token and a refused connection never
+// reaches the upstream. It is evaluated once per connection, keyed by the
+// original-destination IP (the transparent dial target). Over the limit,
+// the HTTP route gets the CONNECT / forward gate's 429; every other route
+// — TLS included, refused before any TLS byte is written — is reset with
+// no byte. The refusal is recorded (BlockedBy rate_limit) and true is
+// returned. name is the SNI / Host the connection carried, if any; hello
+// supplies a TLS route's fingerprints.
+func (h *TransparentHandler) rateLimited(ctx context.Context, pc *PeekConn, dst netip.AddrPort, route TransparentRoute, name string, hello ClientHelloPeek, logger *slog.Logger) bool {
+	if h.cfg.RateLimiter == nil {
+		return false
+	}
+	denial := h.cfg.RateLimiter.Check(dst.Addr().String())
+	if denial == nil {
+		return false
+	}
+	logger.Info("transparent target blocked by rate limit",
+		"route", string(route), "name", name,
+		"limit_type", denial.LimitType, "effective_rps", denial.EffectiveRPS)
+	if route == TransparentRouteHTTP {
+		writeTransparentRefusal(pc, transparentRateLimitResponse)
+	} else if tc, ok := pc.Conn.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0)
+	}
+	if h.cfg.Observer != nil {
+		h.cfg.Observer.OnBlocked(context.WithoutCancel(ctx), TransparentBlock{
+			RemoteAddr:    netAddrString(pc.RemoteAddr()),
+			OriginalDst:   dst.String(),
+			Route:         route,
+			BlockedBy:     TransparentBlockedByRateLimit,
+			FailureReason: TransparentBlockedByRateLimit,
+			Reason:        denial.LimitType + " limit " + strconv.FormatFloat(denial.EffectiveRPS, 'g', -1, 64) + " rps",
+			Name:          name,
+			ClientJA3:     hello.ClientJA3,
+			ClientJA4:     hello.ClientJA4,
+			Tags:          denial.Tags(),
+		})
+	}
+	return true
+}
+
+// transparentRateLimitResponse answers a rate-limited plain-HTTP
+// transparent connection with the CONNECT / forward gate's exact bytes.
+var transparentRateLimitResponse = forwardErrorResponse(429, "Too Many Requests", connectRateLimitDenyDetail)
+
+// writeTransparentRefusal writes a canned refusal response on the HTTP
+// route, half-closes and drains the client's unread request bytes so the
+// close is a FIN that does not discard the response.
+func writeTransparentRefusal(pc *PeekConn, resp []byte) {
+	_ = pc.SetDeadline(time.Now().Add(tcpForwardDenyDrainTimeout))
+	if _, err := pc.Write(resp); err == nil {
+		_ = pc.CloseWrite()
+		_, _ = io.CopyN(io.Discard, pc, tcpForwardDenyDrainLimit)
 	}
 }
 

@@ -6,10 +6,11 @@ package pipeline
 // so audit Streams written from session-side recording line up with what
 // the operator can filter on.
 //
-// "rate_limit" is reserved for a future RateLimitStep. The session-side
-// recorder already accepts it; adding a Step that emits
-// `Result{Action: Drop, BlockedBy: BlockedByRateLimit}` is sufficient to
-// participate in the audit pipeline.
+// "rate_limit" is not emitted by any Pipeline Step today: the transparent
+// listener's connection-refusal recorder writes it (like "capacity"). The
+// session-side recorder also accepts it, so a future RateLimitStep that
+// emits `Result{Action: Drop, BlockedBy: BlockedByRateLimit}` participates
+// in the audit pipeline without further wiring.
 const (
 	// BlockedByTargetScope attributes a Drop to a TargetScope deny rule.
 	// Emitted by HostScopeStep (connection-level host check) and
@@ -36,9 +37,13 @@ const (
 	// instead of vanishing from both the queue and the flow store.
 	BlockedByInterceptCancelled = "intercept_cancelled"
 
-	// BlockedByRateLimit is reserved for a future RateLimitStep; no
-	// Pipeline Step emits it today. The session-side recorder accepts
-	// the label so future Issues only need to add the Step.
+	// BlockedByRateLimit attributes an audit Stream to a connection the
+	// transparent listener refused because a Policy / Agent rate limit
+	// was exceeded (USK-1374). No Pipeline Step emits it: the connection
+	// is refused at admission, before any Layer or Pipeline exists, and
+	// the proxybuild transparent recorder writes it directly
+	// (connector.TransparentBlockedByRateLimit mirrors this value). The
+	// session-side recorder also accepts it for a future RateLimitStep.
 	BlockedByRateLimit = "rate_limit"
 
 	// BlockedByBudget attributes a Drop to a BudgetManager exhaustion

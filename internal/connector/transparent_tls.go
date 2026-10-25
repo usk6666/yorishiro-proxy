@@ -103,6 +103,12 @@ func (h *TransparentHandler) handleTLS(ctx context.Context, pc *PeekConn, dst ne
 		h.refuse(ctx, pc, dst, TransparentRouteTLS, v, hello.SNI, logger)
 		return nil
 	}
+	// The rate-limit gate is shared by both TLS classes and runs before
+	// any TLS byte is written: a refused connection is reset (no 429 —
+	// answering inside TLS would need a client-only handshake).
+	if h.rateLimited(ctx, pc, dst, TransparentRouteTLS, hello.SNI, hello, logger) {
+		return nil
+	}
 	sni := hello.SNI
 	admit := func() (bool, string) {
 		r := h.scopeTLS(dst, sni, opaque)

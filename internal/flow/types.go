@@ -86,8 +86,9 @@ type Stream struct {
 	// Empty string means the request was not blocked. The canonical
 	// vocabulary lives in internal/pipeline/blocked_by.go: "target_scope",
 	// "safety_filter", "intercept_drop", "intercept_cancelled",
-	// "rate_limit" (reserved), "budget", and "capacity" (written by the
-	// connection-rejection recorder rather than a Pipeline Step).
+	// "rate_limit", "budget", and "capacity" ("rate_limit" and "capacity"
+	// are written by connection-refusal recorders rather than a Pipeline
+	// Step).
 	BlockedBy string
 	// Origin classifies how the Stream came into existence (USK-785).
 	// OriginProxy for live MITM-recorded traffic, OriginResend for streams
@@ -246,8 +247,9 @@ type StreamUpdate struct {
 	// (USK-782 mid-stream Drop path). Canonical values mirror
 	// Stream.BlockedBy — see internal/pipeline/blocked_by.go for the
 	// Pipeline-emitted set ("target_scope", "safety_filter",
-	// "intercept_drop", "intercept_cancelled", "rate_limit"). Only applied
-	// when non-empty.
+	// "intercept_drop", "intercept_cancelled"; "rate_limit" is accepted
+	// for a future RateLimitStep — today only the transparent refusal
+	// recorder writes it, via SaveStream). Only applied when non-empty.
 	BlockedBy string
 	// Duration sets the stream duration.
 	Duration time.Duration
