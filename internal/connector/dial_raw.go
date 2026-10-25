@@ -99,9 +99,10 @@ func DialUpstreamRaw(ctx context.Context, target string, opts DialRawOpts) (net.
 	return tlsConn, snap, nil
 }
 
-// upstreamTCPDialError marks a DialUpstreamRaw failure that happened
-// before any TLS byte was exchanged — the TCP connect, or the tunnel
-// through the upstream proxy (USK-1317: the transparent listener resets
+// upstreamTCPDialError marks an upstream dial failure that happened
+// before any TLS byte was exchanged — the TCP connect, the tunnel
+// through the upstream proxy, or the upstream-proxy rotation resolver
+// failing closed before the dial (USK-1317: the transparent listener resets
 // the client on these, and records a TLS failure otherwise). Error()
 // is the wrapped error's message, unchanged.
 type upstreamTCPDialError struct{ err error }

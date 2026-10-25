@@ -113,13 +113,23 @@ func (h *TransparentHandler) handleTLS(ctx context.Context, pc *PeekConn, dst ne
 		obs.SNI, obs.ALPN, obs.ClientJA3, obs.ClientJA4 = hello.SNI, hello.ALPN, hello.ClientJA3, hello.ClientJA4
 		return h.passthrough(ctx, pc, dst, obs, admit, logger)
 	}
-	return h.mitmTLS(ctx, pc, dst, ut, hello, class, admit, nameAdmitted, logger)
+	// A MITM route admitted provisionally (opaque=false) may still resolve
+	// to the raw relay (no-ALPN, non-HTTP bytes); the strict variant lets
+	// LiveConns re-evaluate it as such once it does, as CONNECT does.
+	var admitOpaque LiveConnAdmitFunc
+	if !opaque {
+		admitOpaque = func() (bool, string) {
+			r := h.scopeTLS(dst, sni, true)
+			return r.allowed, r.reason
+		}
+	}
+	return h.mitmTLS(ctx, pc, dst, ut, hello, class, admit, admitOpaque, nameAdmitted, logger)
 }
 
 // mitmTLS registers the admitted connection, builds the MITM stack
 // (dialing the original destination once) and runs its session.
-func (h *TransparentHandler) mitmTLS(ctx context.Context, pc *PeekConn, dst netip.AddrPort, ut UpstreamTarget, hello ClientHelloPeek, class transparentTLSClass, admit LiveConnAdmitFunc, nameAdmitted bool, logger *slog.Logger) error {
-	ctx, release, ok := h.register(ctx, dst, admit, logger)
+func (h *TransparentHandler) mitmTLS(ctx context.Context, pc *PeekConn, dst netip.AddrPort, ut UpstreamTarget, hello ClientHelloPeek, class transparentTLSClass, admit, admitOpaque LiveConnAdmitFunc, nameAdmitted bool, logger *slog.Logger) error {
+	ctx, release, ok := h.register(ctx, dst, admit, admitOpaque, logger)
 	defer release()
 	if !ok {
 		h.refuse(ctx, pc, dst, TransparentRouteTLS, refuseScope("policy changed during admission"), hello.SNI, logger)
@@ -197,10 +207,10 @@ func (h *TransparentHandler) trackOwnDials(ctx context.Context) (context.Context
 }
 
 // mitmFailed handles a failed MITM stack build. A failure before any TLS
-// byte reached the upstream (TCP connect, upstream-proxy tunnel) resets
-// the client like every transparent dial failure; a TLS failure on either
-// side is recorded with the ClientHello's SNI and fingerprints (owner
-// decision U2).
+// byte reached the upstream (TCP connect, upstream-proxy tunnel or
+// rotation) resets the client like every transparent dial failure; a
+// TLS failure on either side is recorded with the ClientHello's SNI and
+// fingerprints (owner decision U2).
 func (h *TransparentHandler) mitmFailed(ctx context.Context, pc *PeekConn, dst netip.AddrPort, hello ClientHelloPeek, err error, logger *slog.Logger) {
 	clientSide := errors.Is(err, ErrClientTLSMITMHandshake)
 	if !clientSide && isUpstreamTCPDialError(err) {
@@ -236,7 +246,9 @@ func (h *TransparentHandler) mitmFailed(ctx context.Context, pc *PeekConn, dst n
 // offer the client did not send (MITM Principle 1) — unlike
 // BuildConnectionStack's legacy path, which offers [h2 http/1.1]
 // upstream and is what CONNECT / SOCKS5 keep using. The upstream is
-// dialed first, offered no ALPN; the client MITM advertises none; then
+// dialed first with standard crypto/tls (never the tls_fingerprint uTLS
+// profile, whose ClientHello carries its own ALPN offer) and offered no
+// ALPN; the client MITM advertises none; then
 // the client's first decrypted bytes, peeked within peekTimeout, pick the
 // route: an HTTP/1.x request → http1, anything else (including a silent
 // client — a server-first protocol inside TLS) → bytechunk. No h2 pool,
@@ -267,8 +279,13 @@ func buildTransparentNoALPNStack(
 	}
 	connID := uuid.New().String()
 
-	upstreamConn, upstreamSnap, err := dialUpstreamWithALPN(ctx, ut.Dial, host,
-		nil, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
+	// Standard crypto/tls, not the configured uTLS profile: a uTLS
+	// profile's ClientHello carries its own ALPN offer (Firefox:
+	// [h2 http/1.1]), which tlslayer replaces only with a non-empty offer.
+	// Offering nothing therefore needs a ClientHello without the ALPN
+	// extension — at the cost of tls_fingerprint on this leg only.
+	upstreamConn, upstreamSnap, err := dialUpstreamTLS(ctx, ut.Dial, host,
+		nil, "", hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
 	if err != nil {
 		return nil, nil, nil, err
 	}

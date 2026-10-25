@@ -429,7 +429,7 @@ func (h *TransparentHandler) handleHTTP(ctx context.Context, pc *PeekConn, dst n
 		r := h.scopeHTTPNames(dst, head)
 		return r.allowed, r.reason
 	}
-	ctx, release, ok := h.register(ctx, dst, admit, logger)
+	ctx, release, ok := h.register(ctx, dst, admit, nil, logger)
 	defer release()
 	if !ok {
 		h.refuse(ctx, pc, dst, TransparentRouteHTTP, refuseScope("policy changed during admission"), "", logger)
@@ -473,7 +473,7 @@ func (h *TransparentHandler) newObservation(pc *PeekConn, dst netip.AddrPort, ro
 
 // passthrough registers, dials and relays a metadata-only passthrough.
 func (h *TransparentHandler) passthrough(ctx context.Context, pc *PeekConn, dst netip.AddrPort, obs TransparentObservation, admit LiveConnAdmitFunc, logger *slog.Logger) error {
-	ctx, release, ok := h.register(ctx, dst, admit, logger)
+	ctx, release, ok := h.register(ctx, dst, admit, nil, logger)
 	defer release()
 	if !ok {
 		h.refuse(ctx, pc, dst, obs.Route, refuseScope("policy changed during admission"), obs.SNI, logger)
@@ -570,16 +570,20 @@ func (h *TransparentHandler) lateSNIAllowed(dst netip.AddrPort, sni string) (boo
 
 // register tracks the admitted connection in the live-connection
 // registry so a policy change that no longer admits it closes it.
-func (h *TransparentHandler) register(ctx context.Context, dst netip.AddrPort, admit LiveConnAdmitFunc, logger *slog.Logger) (context.Context, func(), bool) {
+// admitOpaque is the strict check of a gate that admitted a path-scoped
+// allow provisionally (LiveConn.AdmitOpaque); nil when admit is already
+// strict.
+func (h *TransparentHandler) register(ctx context.Context, dst netip.AddrPort, admit, admitOpaque LiveConnAdmitFunc, logger *slog.Logger) (context.Context, func(), bool) {
 	if h.cfg.LiveConns == nil {
 		return ctx, func() {}, true
 	}
 	rctx, release, err := h.cfg.LiveConns.Register(ctx, LiveConn{
-		ConnID:   ConnIDFromContext(ctx),
-		Listener: ListenerNameFromContext(ctx),
-		Via:      transparentVia,
-		Target:   dst.String(),
-		Admit:    admit,
+		ConnID:      ConnIDFromContext(ctx),
+		Listener:    ListenerNameFromContext(ctx),
+		Via:         transparentVia,
+		Target:      dst.String(),
+		Admit:       admit,
+		AdmitOpaque: admitOpaque,
 	})
 	if err != nil {
 		logger.Info("transparent target blocked by scope (policy changed during admission)", "error", err)
