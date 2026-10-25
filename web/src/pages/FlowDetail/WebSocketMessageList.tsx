@@ -151,6 +151,35 @@ function parseCloseFrame(body: string, encoding: string): { code: number; reason
 }
 
 // ---------------------------------------------------------------------------
+// Frame classification (recorded Metadata keys)
+// ---------------------------------------------------------------------------
+
+/** Close frame status as recorded by the proxy. */
+export interface WSCloseInfo {
+  /** Close status code; null when the frame carried none (recorded as "0"). */
+  code: number | null;
+  /** Human-readable description of code ("no status code" when null). */
+  codeDescription: string;
+  /** Close reason; "" when the frame carried none. */
+  reason: string;
+}
+
+/** Display classification for one message row of a WS stream. */
+export interface WSFrameInfo {
+  /** WS opcode from metadata.ws_opcode; null for non-frame rows. */
+  opcode: number | null;
+  /** Badge label (Text / Binary / Close / ... / HTTP / ?). */
+  label: string;
+  /** Close status; non-null only for Close frames. */
+  close: WSCloseInfo | null;
+}
+
+/** Classify a message entry of a WS stream for display. */
+export function wsFrameInfo(_msg: MessageEntry): WSFrameInfo {
+  return { opcode: null, label: "", close: null };
+}
+
+// ---------------------------------------------------------------------------
 // Body / Size Helpers
 // ---------------------------------------------------------------------------
 
@@ -428,7 +457,7 @@ export function WebSocketMessageList({
 // Detail Sub-Component
 // ---------------------------------------------------------------------------
 
-interface WebSocketMessageDetailProps {
+export interface WebSocketMessageDetailProps {
   message: MessageEntry;
   binaryMode: BinaryDisplayMode;
   onBinaryModeChange: (mode: BinaryDisplayMode) => void;
@@ -437,7 +466,7 @@ interface WebSocketMessageDetailProps {
   onClose: () => void;
 }
 
-function WebSocketMessageDetail({
+export function WebSocketMessageDetail({
   message,
   binaryMode,
   onBinaryModeChange,
