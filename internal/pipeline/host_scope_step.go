@@ -103,7 +103,19 @@ func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Res
 	// because matchTargetRule is AND logic: a rule carrying a Schemes
 	// condition silently stops matching when the scheme is blank
 	// (USK-1081).
-	allowed, pathPending, _ := s.scope.CheckHost(transportScopeScheme(env), host, port)
+	scheme := transportScopeScheme(env)
+	allowed, pathPending, _ := s.scope.CheckHost(scheme, host, port)
+	if !allowed && connector.TransparentScopeFromContext(ctx) != nil {
+		// USK-1316 (decision U3, amended): on a transparent connection
+		// whose original destination no allow rule admits, the dial
+		// target is a deny-only leg and the request's names must admit
+		// it — which HTTPScopeStep checks (allow + DNS binding) on HTTP
+		// requests and, through the upgrade request, on WebSocket
+		// frames. Every other protocol fails closed, as for pathPending.
+		if ok, _ := s.scope.CheckDenyOnly(scheme, host, port, ""); ok {
+			allowed, pathPending = true, true
+		}
+	}
 	if !allowed {
 		return targetScopeBlock(env)
 	}

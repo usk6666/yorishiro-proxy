@@ -295,6 +295,11 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 	ctx = ContextWithListenerName(ctx, fl.name)
 	ctx = ContextWithLogger(ctx, connLogger)
 
+	if fl.originalDst != nil && fl.onTransparent != nil {
+		fl.handleTransparentConn(ctx, conn, pc, connLogger, connStart)
+		return
+	}
+
 	// Bound protocol detection by the peek deadline (Slowloris protection).
 	peekTimeout := time.Duration(fl.peekTimeoutNs.Load())
 	if peekTimeout > 0 {
@@ -339,6 +344,33 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 	if connLogger.Enabled(ctx, slog.LevelDebug) {
 		connLogger.Debug("connection closed",
 			"protocol", kind.String(),
+			"duration_ms", time.Since(connStart).Milliseconds(),
+		)
+	}
+}
+
+// handleTransparentConn is handleConn for a transparent listener
+// (USK-1316): no protocol detection and no peek deadline (the transparent
+// handler peeks with its own short deadline and treats silence as a
+// server-first protocol). The original destination is resolved on the raw
+// conn before a byte is read; an unusable one closes the connection with
+// a Warn and the handler is not called.
+func (fl *FullListener) handleTransparentConn(ctx context.Context, conn net.Conn, pc *PeekConn, connLogger *slog.Logger, connStart time.Time) {
+	dst, err := resolveTransparentDst(fl.originalDst, conn)
+	if err != nil {
+		connLogger.Warn("transparent connection rejected: no usable original destination",
+			"local_addr", netAddrString(conn.LocalAddr()),
+			"reason", err.Error())
+		return
+	}
+	ctx = ContextWithOriginalDst(ctx, dst)
+	if err := fl.onTransparent(ctx, pc); err != nil && !errors.Is(err, context.Canceled) {
+		connLogger.Debug("transparent handler ended with error", "original_dst", dst.String(), "error", err)
+	}
+	if connLogger.Enabled(ctx, slog.LevelDebug) {
+		connLogger.Debug("connection closed",
+			"protocol", "transparent",
+			"original_dst", dst.String(),
 			"duration_ms", time.Since(connStart).Milliseconds(),
 		)
 	}

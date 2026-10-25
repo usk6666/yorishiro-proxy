@@ -524,7 +524,7 @@ func assembleAndRunMCPServer(
 	manager, err := assembleLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine, sseInterceptEngine,
 		httpTransformEngine, sseTransformEngine, passthrough, targetScope, liveConns, rateLimiter, budgetManager, safetyEngine, perProtoSafety, hostTLSRegistry,
-		socks5Negotiator, recordScope, logger)
+		socks5Negotiator, recordScope, LiveManagerOptions{OriginalDstResolver: hooks.OriginalDstResolver, NameResolver: hooks.NameResolver}, logger)
 	if err != nil {
 		return err
 	}

@@ -140,6 +140,18 @@ Timeout in milliseconds for receiving a client's request head: each HTTP/1.x req
 - Default: `60000` (60 seconds)
 - Range: 100-600000
 
+### transparent_mode (string, optional)
+Listener mode.
+- `none` (default when nothing is configured): the explicit proxy (CONNECT / SOCKS5 / plain-HTTP forward).
+- `redirect`: a transparent egress gateway. The listener accepts TCP connections an nftables / iptables `REDIRECT` rule diverted to it and relays each one to its **original destination** (`getsockopt SO_ORIGINAL_DST` / `IP6T_SO_ORIGINAL_DST`). Linux only; elsewhere `proxy_start` fails. See "Transparent mode (egress gateway)" below.
+- Omitted: inherits the config-file `transparent_mode`.
+- Cannot be combined with `tcp_forwards` or `socks5_auth: "password"`.
+
+### transparent_peek_timeout_ms (integer, optional)
+Transparent mode only: how long the listener waits for the client's first bytes before treating the connection as server-first (SMTP / FTP / MySQL banner) and relaying it.
+- Default: `1000`
+- Range: 100-600000
+
 ### auto_transform (array of transform rules, optional)
 Auto-transform rules for automatic request/response modification at startup. Same format as the `configure` tool's auto_transform rules.
 - If omitted, no auto-transform rules are active
@@ -175,6 +187,62 @@ Example:
   }
 }
 ```
+
+## Transparent mode (egress gateway)
+
+`transparent_mode: "redirect"` makes the listener the egress gateway of the Worker hosts an agent operates, so all of their TCP traffic is audited. nftables decides at SYN time, before any byte is known, so **all TCP** is redirected and the proxy routes each connection by its first bytes:
+
+| First client bytes (within `transparent_peek_timeout_ms`) | Route | Recorded |
+|---|---|---|
+| A complete HTTP/1.x request line start (`GET `, `POST `, ...) | L7 HTTP/1 (full Pipeline: scope, safety, plugins, intercept, transform) | Full flows incl. raw bytes. Upstream = original destination, never the `Host` header. |
+| `0x16` (TLS ClientHello) | Passthrough (no MITM in this release) | Metadata: SNI, ALPN offers (wire order), JA3, JA4 |
+| Nothing (server speaks first) | Passthrough | Metadata; if the client's first byte after the deadline is `0x16`, SNI / ALPN / JA3 / JA4 are recorded with `route: late_tls` |
+| HTTP/2 prior-knowledge preface | Passthrough (`route: h2c`) | Metadata |
+| Anything else | Passthrough (`route: opaque`) | Metadata |
+
+Each client connection gets exactly one upstream connection to its original destination, dialled only after the route and the scope decision; through an `upstream_proxy` the proxy sends `CONNECT <original-dst-ip>:<port>`.
+
+**Passthrough records no payload bytes** — one Stream per connection (`protocol` `raw` or `tls-handshake`, `tags.transparent: "passthrough"`, `tags.route`, `tags.target` = original destination) with one metadata flow (`bytes_client_to_upstream`, `bytes_upstream_to_client`, `sni`, `alpn_offers`, `client_ja3`, `client_ja4`, `outcome`). Use a packet capture for the bytes. The Pipeline and the plugin payload hooks do **not** run on passthrough connections; only `connection.on_connect` / `on_disconnect` fire. STARTTLS and TLS that starts after the peek deadline are relayed without decryption.
+
+**Rejected connections**: a connection whose original destination cannot be read (no conntrack entry) or is the listener's own address (a client that dialled the proxy directly) is closed with a Warn log, and so is the proxy's own upstream dial when it is REDIRECTed back (`transparent loop`). Raise `max_connections` (up to 100000) for a gateway; the default 512 applies.
+
+### Target scope on a transparent listener
+
+`target_scope` is checked at three points: the original destination (when the route is known, before any upstream contact), the TLS SNI (after the ClientHello, before the dial), and every HTTP request's `Host` / absolute-form authority. Deny rules on any of them always block (HTTP gets a `403`, other routes are closed; the refusal is recorded with `blocked_by: "target_scope"`). Allow rules:
+
+- An allow rule matching the original destination's IP admits the connection; SNI / `Host` are then deny-only.
+- Otherwise a **name** may admit it: the SNI (TLS) or every request's `Host` (HTTP) must match an allow rule **and** resolve, via the proxy host's DNS, to the original destination IP (`failure_reason` `name_not_bound_to_original_dst` / `name_resolution_failed` when not). The Worker controls SNI / `Host`; the DNS binding stops it from naming an allowed host to reach an arbitrary IP. Wildcard rules work because the observed name is resolved. Run the proxy host on the same DNS server the Worker is allowed to use — CDN, geo or round-robin answers can otherwise differ and deny; IP allow rules avoid that. With an `upstream_proxy` the binding still uses the proxy host's resolver. A failed lookup denies.
+- Routes without a name (server-first, opaque, h2c, late TLS) need an IP allow.
+
+### nftables conventions (operator example)
+
+```
+table inet gw {
+  chain prerouting {
+    type nat hook prerouting priority dstnat;
+    iifname "wg-workers" meta l4proto tcp redirect to :8080
+  }
+  chain output {
+    type nat hook output priority -100;
+    # Only needed if locally generated traffic is redirected too: the
+    # proxy's own traffic (UID or cgroup) must never be redirected back
+    # to it (loop prevention).
+    meta skuid "yorishiro" return
+    meta l4proto tcp redirect to :8080
+  }
+  chain forward {
+    type filter hook forward priority 0; policy accept;
+    iifname "wg-workers" udp dport 53 ip daddr 10.0.0.53 accept   # the Worker's DNS server only
+    iifname "wg-workers" udp dport 123 ip daddr 10.0.0.123 accept # the Worker's NTP server only
+    iifname "wg-workers" meta l4proto udp reject                  # REJECT: QUIC falls back to TCP fast
+  }
+}
+```
+
+- Redirect **all** TCP from the Worker-side interface in PREROUTING; exclude the proxy's own traffic by UID / cgroup.
+- Drop UDP by default and allow only the specific DNS (UDP 53) / NTP (UDP 123) servers the Worker uses — arbitrary-destination 53 / 123 is a DNS-tunnel style escape. QUIC is an audit gap; `REJECT` (rather than DROP) makes clients fall back to TCP quickly.
+- TCP ACLs can be enforced both in nftables and with `target_scope`.
+- **Port scans**: the proxy's kernel answers every REDIRECTed SYN with a SYN-ACK, so closed ports look open; this cannot be changed from user space. Run port scans from a dedicated Runner whose traffic is recorded by packet capture only.
 
 ## Common Misuse: proxy_start as a partial-update tool
 

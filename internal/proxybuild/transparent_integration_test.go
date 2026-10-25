@@ -798,6 +798,27 @@ func TestTransparent_UpstreamProxyConnectsToOriginalDst(t *testing.T) {
 	}
 }
 
+// T23 (IPv6): the CONNECT target of an IPv6 original destination is the
+// bracketed [ip]:port.
+func TestTransparent_UpstreamProxyConnectsToOriginalDst_IPv6(t *testing.T) {
+	ctx := transparentCtx(t)
+	up := newRawHTTPUpstreamOn(t, "tcp6", "[::1]:0")
+	cp := newConnectProxy(t)
+	p := startTransparentProxy(t, ctx, up.addr(), func(d *proxybuild.Deps) {
+		d.BuildConfig.UpstreamProxy = &url.URL{Scheme: "http", Host: cp.addr().String()}
+	})
+	resp, _, _ := transparentExchange(t, p.addr, "GET /p6 HTTP/1.1\r\nHost: named.invalid\r\nConnection: close\r\n\r\n")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	want := "CONNECT [::1]:" + fmt.Sprint(up.addr().Port()) + " HTTP/1.1"
+	if len(cp.lines) != 1 || cp.lines[0] != want {
+		t.Errorf("CONNECT lines %q, want %q", cp.lines, want)
+	}
+}
+
 // T24: connection.on_connect fires on a transparent connection, and the
 // HTTP route dispatches (http, on_request).
 func TestTransparent_PluginHooks(t *testing.T) {

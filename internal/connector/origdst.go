@@ -63,9 +63,34 @@ var ErrOriginalDstInvalid = errors.New("original destination is not a dialable a
 // becomes the IPv4 address), must be a specified address with a non-zero
 // port, and must differ from conn's own local address.
 func resolveTransparentDst(r OriginalDstResolver, conn net.Conn) (netip.AddrPort, error) {
-	_ = r
-	_ = conn
-	return netip.AddrPort{}, fmt.Errorf("connector: original dst: %w", errors.New("not implemented"))
+	dst, err := r.OriginalDst(conn)
+	if err != nil {
+		return netip.AddrPort{}, fmt.Errorf("connector: original dst: %w", err)
+	}
+	dst = netip.AddrPortFrom(dst.Addr().Unmap(), dst.Port())
+	if !dst.IsValid() || dst.Addr().IsUnspecified() || dst.Port() == 0 {
+		return netip.AddrPort{}, fmt.Errorf("connector: original dst %v: %w", dst, ErrOriginalDstInvalid)
+	}
+	if local, ok := addrPortOf(conn.LocalAddr()); ok && local == netip.AddrPortFrom(dst.Addr().WithZone(""), dst.Port()) {
+		return netip.AddrPort{}, fmt.Errorf("connector: original dst %v: %w", dst, ErrOriginalDstSelf)
+	}
+	return dst, nil
+}
+
+// addrPortOf returns a's unmapped AddrPort.
+func addrPortOf(a net.Addr) (netip.AddrPort, bool) {
+	if a == nil {
+		return netip.AddrPort{}, false
+	}
+	if ta, ok := a.(*net.TCPAddr); ok {
+		ap := ta.AddrPort()
+		return netip.AddrPortFrom(ap.Addr().Unmap().WithZone(""), ap.Port()), ap.IsValid()
+	}
+	ap, err := netip.ParseAddrPort(a.String())
+	if err != nil {
+		return netip.AddrPort{}, false
+	}
+	return netip.AddrPortFrom(ap.Addr().Unmap().WithZone(""), ap.Port()), true
 }
 
 type originalDstCtxKey struct{}

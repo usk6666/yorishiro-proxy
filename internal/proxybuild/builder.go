@@ -400,6 +400,10 @@ type Stack struct {
 	// so a policy change that no longer admits the target closes them
 	// (USK-1161). May be nil (no tracking).
 	LiveConns *connector.LiveConns
+
+	// TransparentMode is "redirect" for a transparent listener, empty
+	// otherwise (USK-1316).
+	TransparentMode string
 }
 
 // BuildLiveStack assembles a per-listener Stack from deps. Validates
@@ -411,6 +415,10 @@ type Stack struct {
 // (or directly stack.Listener.Start) to begin accepting connections.
 func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	if err := validateDeps(deps); err != nil {
+		return nil, err
+	}
+	transparent, err := transparentEnabled(deps)
+	if err != nil {
 		return nil, err
 	}
 
@@ -587,6 +595,11 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		// the h2c entry point has no Linear issue today and TCP forward
 		// orchestration belongs to USK-711.
 	}
+	if transparent {
+		// USK-1316: a transparent listener routes every connection by its
+		// first bytes; the explicit-proxy handlers are not reachable.
+		configureTransparentListener(&flCfg, deps, wrapper, p, headRecorder, listenerName, logger)
+	}
 	wrapper.full = connector.NewFullListener(flCfg)
 
 	return &Stack{
@@ -602,6 +615,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		requestHeadRecorder:   headRecorder,
 		Scope:                 deps.Scope,
 		LiveConns:             deps.LiveConns,
+		TransparentMode:       transparentModeOf(transparent),
 	}, nil
 }
 

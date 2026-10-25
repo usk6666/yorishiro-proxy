@@ -64,20 +64,20 @@ func NewHTTPScopeStep(scope *connector.TargetScope) *HTTPScopeStep {
 
 // Process checks Send-direction HTTPMessage envelopes against the
 // TargetScope. Returns Drop if the target is blocked, Continue otherwise.
-func (s *HTTPScopeStep) Process(_ context.Context, env *envelope.Envelope) Result {
+func (s *HTTPScopeStep) Process(ctx context.Context, env *envelope.Envelope) Result {
 	if env.Direction != envelope.Send {
 		return Result{}
 	}
 
 	switch msg := env.Message.(type) {
 	case *envelope.HTTPMessage:
-		return s.processHTTP(env, msg)
+		return s.processHTTP(ctx, env, msg)
 	default:
 		return Result{}
 	}
 }
 
-func (s *HTTPScopeStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMessage) Result {
+func (s *HTTPScopeStep) processHTTP(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) Result {
 	if s.scope == nil || !s.scope.HasRules() {
 		return Result{}
 	}
@@ -94,7 +94,11 @@ func (s *HTTPScopeStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMe
 	dialTarget := env.Context.TargetHost
 	allowed := s.checkNameLeg(scheme, msg.Authority, path, dialTarget)
 	if allowed && dialTarget != "" {
-		allowed = s.checkHostPort(scheme, dialTarget, path)
+		if ts := connector.TransparentScopeFromContext(ctx); ts != nil {
+			allowed = s.checkTransparentDial(ctx, ts, scheme, dialTarget, path, msg, env)
+		} else {
+			allowed = s.checkHostPort(scheme, dialTarget, path)
+		}
 	}
 	if allowed {
 		allowed = s.checkHostHeaders(scheme, msg.Headers, path, dialTarget)
@@ -124,6 +128,35 @@ func (s *HTTPScopeStep) checkHostPort(scheme, hostPort, path string) bool {
 	host, port := splitScopeHostPort(scheme, hostPort)
 	allowed, _ := s.scope.CheckTarget(scheme, host, port, path)
 	return allowed
+}
+
+// checkTransparentDial is the dial-target check of a transparent
+// connection (USK-1316, decision U3 amended; ts on ctx). When an allow
+// rule admits the original destination (with the request path) it is
+// the ordinary check, and the names stay deny-only legs. Otherwise the
+// destination must not be denied, and every name the request carries —
+// the authority, each Host value, the absolute-form authority — must
+// resolve to it by DNS: the name legs (checked by the caller) then had
+// to match an allow rule, and the binding stops a client from writing an
+// allowed name to reach an arbitrary IP. Explicit-proxy, CONNECT and
+// tcp_forward connections carry no TransparentScope and never get here.
+func (s *HTTPScopeStep) checkTransparentDial(ctx context.Context, ts *connector.TransparentScope, scheme, dialTarget, path string, msg *envelope.HTTPMessage, env *envelope.Envelope) bool {
+	if s.checkHostPort(scheme, dialTarget, path) {
+		return true
+	}
+	host, port := splitScopeHostPort(scheme, dialTarget)
+	if ok, _ := s.scope.CheckDenyOnly(scheme, host, port, path); !ok {
+		return false
+	}
+	var names []string
+	if msg.Authority != "" {
+		names = append(names, msg.Authority)
+	}
+	names = append(names, envelope.HostHeaderValues(msg.Headers)...)
+	if env.Context.AbsoluteFormAuthority != "" {
+		names = append(names, env.Context.AbsoluteFormAuthority)
+	}
+	return ts.NamesBound(ctx, names)
 }
 
 // checkNameLeg checks the request authority as a name leg against the
