@@ -12,8 +12,10 @@ package mcp
 // loopback port that was bound and immediately closed.
 
 import (
+	"bufio"
 	"context"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 )
 
 // closedLoopbackAddr returns a 127.0.0.1 address with nothing listening,
@@ -522,30 +525,103 @@ func TestResendTools_Success_NoErrorTag(t *testing.T) {
 	}
 }
 
-// TestResendHTTP_UpstreamClosesWithoutResponse_RecordsEOFErrorTag pins
-// the io.EOF decision: an upstream that reads the request and closes
-// without answering is a genuine pre-response failure. The tool reports
-// IsError, so the Stream is State="error" with the EOF in tags["error"]
-// — the live path's "io.EOF → complete" carve-out deliberately does not
-// apply to resend/fuzz (USK-1350).
-func TestResendHTTP_UpstreamClosesWithoutResponse_RecordsEOFErrorTag(t *testing.T) {
-	cs, store, _, _ := setupResendHTTPSession(t)
-	addr := startReadThenCloseServer(t)
-
-	res := callResendHTTP(t, cs, map[string]any{
-		"method":    "GET",
-		"scheme":    "http",
-		"authority": addr,
-		"path":      "/",
-		"headers": []map[string]any{
-			{"name": "Host", "value": addr},
-		},
-		"timeout_ms": 5000,
-	})
-	if !res.IsError {
-		t.Fatalf("expected no-response close to surface as IsError, got success")
+// startWSUpgradeThenCloseServer completes the WebSocket upgrade, reads
+// one client frame, and closes the connection without replying, so the
+// resend_ws receive loop sees a bare io.EOF.
+func startWSUpgradeThenCloseServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
 	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+				r := bufio.NewReader(c)
+				if _, err := http.ReadRequest(r); err != nil {
+					return
+				}
+				resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+					"Upgrade: websocket\r\n" +
+					"Connection: Upgrade\r\n" +
+					"Sec-WebSocket-Accept: dummy-accept-key\r\n" +
+					"\r\n"
+				if _, err := c.Write([]byte(resp)); err != nil {
+					return
+				}
+				_, _ = ws.ReadFrame(r)
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
 
-	st := getStream(t, store, findOriginStream(t, store, flow.OriginResend).ID)
-	assertErrorTagged(t, st, "EOF")
+// TestResendTools_UpstreamClosesWithoutResponse_RecordsErrorTag pins the
+// io.EOF decision (USK-1350): an upstream that takes the request and
+// closes without answering is a genuine pre-response failure. The tool
+// reports IsError, so the Stream is State="error" with the cause in
+// tags["error"] — the live path's "io.EOF → complete" carve-out
+// deliberately does not apply to resend / fuzz.
+//
+// resend_ws is the case where a bare io.EOF reaches finalizeResendStream
+// (wrapped as "upstream receive: EOF"). resend_http's HTTP/1.x layer
+// already reclassifies the same close as an aborted StreamError, which
+// is pinned alongside it.
+func TestResendTools_UpstreamClosesWithoutResponse_RecordsErrorTag(t *testing.T) {
+	tests := []struct {
+		name       string
+		wantSubstr string
+		run        func(t *testing.T) (*gomcp.CallToolResult, flow.Store)
+	}{
+		{
+			name:       "resend_ws_eof",
+			wantSubstr: "EOF",
+			run: func(t *testing.T) (*gomcp.CallToolResult, flow.Store) {
+				cs, store, _, _ := setupResendWSSession(t)
+				addr := startWSUpgradeThenCloseServer(t)
+				seedID := seedResendWSFlow(t, store, addr, false)
+				return callResendWS(t, cs, map[string]any{
+					"flow_id":    seedID,
+					"opcode":     "text",
+					"payload":    "x",
+					"timeout_ms": 5000,
+				}), store
+			},
+		},
+		{
+			name:       "resend_http_aborted",
+			wantSubstr: "closed the connection before sending a response",
+			run: func(t *testing.T) (*gomcp.CallToolResult, flow.Store) {
+				cs, store, _, _ := setupResendHTTPSession(t)
+				addr := startReadThenCloseServer(t)
+				return callResendHTTP(t, cs, map[string]any{
+					"method":    "GET",
+					"scheme":    "http",
+					"authority": addr,
+					"path":      "/",
+					"headers": []map[string]any{
+						{"name": "Host", "value": addr},
+					},
+					"timeout_ms": 5000,
+				}), store
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, store := tt.run(t)
+			if !res.IsError {
+				t.Fatalf("expected no-response close to surface as IsError, got success")
+			}
+			st := getStream(t, store, findOriginStream(t, store, flow.OriginResend).ID)
+			assertErrorTagged(t, st, tt.wantSubstr)
+		})
+	}
 }
