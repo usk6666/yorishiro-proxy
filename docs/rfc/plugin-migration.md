@@ -206,6 +206,8 @@ the position-application primitives (`Iterator`, `FuzzCase`, `Position`,
 fuzz MCP tools via `internal/job/fuzz_http_source.go` (USK-677..USK-680:
 `fuzz_http` / `fuzz_ws` / `fuzz_grpc` / `fuzz_raw`).
 
+> Follow-up: the kept `iterator.go` / `position.go` and `internal/job/fuzz_*_source.go` were later found unreachable from production and deleted in USK-1351.
+
 | Path | Action | Notes |
 |---|---|---|
 | `internal/fuzzer/control.go` + `_test.go` | delete file | Async concurrency limiter for the legacy engine. |
