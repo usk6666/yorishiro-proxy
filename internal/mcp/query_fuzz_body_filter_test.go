@@ -445,3 +445,44 @@ func TestQuery_FuzzResults_BodyContains_PlainCounts(t *testing.T) {
 		})
 	}
 }
+
+// TestQuery_FuzzResults_BodyContains_WithStatusCode checks that the SQL
+// status_code predicate still narrows the candidate list before the Go-side
+// body filter runs: three gzip bodies carry the needle (two 200, one 500),
+// so status_code=200 must yield exactly the two 200s.
+func TestQuery_FuzzResults_BodyContains_WithStatusCode(t *testing.T) {
+	store := newTestFuzzStore(t)
+	cs := setupFuzzQueryTestSession(t, store, store)
+	job := seedFuzzJob(t, store, "completed", "test")
+
+	seedGzipFuzzResult(t, store, job.ID, 0, 200, true)
+	seedGzipFuzzResult(t, store, job.ID, 1, 500, true)
+	seedGzipFuzzResult(t, store, job.ID, 2, 200, true)
+	seedGzipFuzzResult(t, store, job.ID, 3, 200, false)
+
+	result := callQueryRaw(t, cs, map[string]any{
+		"resource": "fuzz_results",
+		"fuzz_id":  job.ID,
+		"filter":   map[string]any{"body_contains": fuzzBodyNeedle, "status_code": 200},
+	})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+	var out queryFuzzResultsResult
+	unmarshalQueryResultRaw(t, result, &out)
+
+	if out.Count != 2 || out.Total != 2 {
+		t.Fatalf("count=%d total=%d, want 2/2 (results=%+v)", out.Count, out.Total, out.Results)
+	}
+	if out.Summary == nil || out.Summary.TotalResults != 2 {
+		t.Errorf("summary.total_results = %+v, want 2", out.Summary)
+	}
+	for i, want := range []int{0, 2} {
+		if out.Results[i].IndexNum != want {
+			t.Errorf("results[%d].index = %d, want %d", i, out.Results[i].IndexNum, want)
+		}
+		if out.Results[i].StatusCode != 200 {
+			t.Errorf("results[%d].status_code = %d, want 200", i, out.Results[i].StatusCode)
+		}
+	}
+}

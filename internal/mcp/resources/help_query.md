@@ -340,6 +340,10 @@ Requires: `fuzz_id` (fuzz job ID). Supports `filter.status_code`, `filter.body_c
 
 `filter.body_contains` searches every receive flow of the result's stream, raw and Content-Encoding-decoded (gzip / deflate / br / zstd), so a payload reflected in a compressed response is found. When it is set, `total`, `summary`, and `outliers_only` are all computed over the body-matched results.
 
+The match runs against the recorded bytes (raw and decoded) **before** Output Filter masking, so a `body_contains` hit can confirm content that `query` output shows masked; the masking applies only to returned data, not to the filter predicate.
+
+Cost: with `body_contains`, every candidate's receive bodies are read and decoded (up to 16 MiB each) on every call, including each page of a paginated listing. Narrow the candidate set with `filter.status_code` where possible.
+
 The `summary` includes:
 - **total_results**: Total number of matching results.
 - **statistics**: Aggregate statistics with `status_code_distribution` (map of status code to count), `body_length` and `timing_ms` distributions (each with `min`, `max`, `median`, `stddev`).
