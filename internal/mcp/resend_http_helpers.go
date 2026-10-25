@@ -1085,21 +1085,6 @@ func receiveResendHTTPResponse(ctx context.Context, ch layer.Channel, p *pipelin
 	}
 }
 
-// applyResendHTTPTag persists the user-supplied tag on the new Stream row
-// after the pipeline-driven RecordStep has created it. RecordStep does not
-// observe the tag (resend is the only path that surfaces it today), so this
-// post-pipeline UpdateStream is the cleanest place to set it.
-func (s *Server) applyResendHTTPTag(ctx context.Context, streamID, tag string) {
-	update := flow.StreamUpdate{Tags: map[string]string{"tag": tag}}
-	if err := s.flowStore.store.UpdateStream(ctx, streamID, update); err != nil {
-		slog.WarnContext(ctx, "resend_http: tag update failed",
-			"stream_id", streamID,
-			"tag", tag,
-			"error", err,
-		)
-	}
-}
-
 // formatResendHTTPResult turns the response envelope into the wire-shape MCP
 // result. SafetyFilter output masking is applied to body and headers before
 // they leave the proxy boundary; the unmasked variant is already on disk via

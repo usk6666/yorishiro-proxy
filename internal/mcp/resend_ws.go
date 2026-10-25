@@ -180,10 +180,6 @@ func (s *Server) handleResendWS(ctx context.Context, _ *gomcp.CallToolRequest, i
 		return nil, nil, fmt.Errorf("resend_ws: %w", err)
 	}
 
-	if input.Tag != "" && s.flowStore.store != nil {
-		s.applyResendWSTag(ctx, sendEnv.StreamID, input.Tag)
-	}
-
 	duration := time.Since(start)
 	return nil, s.formatResendWSResult(sendEnv.StreamID, respEnv, input.Tag, duration), nil
 }

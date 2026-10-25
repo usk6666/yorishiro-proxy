@@ -201,10 +201,6 @@ func (s *Server) handleResendHTTP(ctx context.Context, _ *gomcp.CallToolRequest,
 		return nil, nil, fmt.Errorf("resend_http: %w", err)
 	}
 
-	if input.Tag != "" && s.flowStore.store != nil {
-		s.applyResendHTTPTag(ctx, env.StreamID, input.Tag)
-	}
-
 	duration := time.Since(start)
 	return nil, s.formatResendHTTPResult(env.StreamID, respEnv, input.Tag, duration), nil
 }

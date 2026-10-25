@@ -261,10 +261,6 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 		return nil, nil, wrapResendGRPCRunError(plan, err)
 	}
 
-	if input.Tag != "" && s.flowStore.store != nil {
-		s.applyResendGRPCTag(ctx, plan.streamID, input.Tag)
-	}
-
 	duration := time.Since(start)
 	result := s.formatResendGRPCResult(plan.streamID, recvStartMeta, recvData, endEnv, input.Tag, duration)
 	result.Warnings = warnings

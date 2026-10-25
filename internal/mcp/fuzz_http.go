@@ -206,8 +206,7 @@ func (s *Server) handleFuzzHTTP(ctx context.Context, _ *gomcp.CallToolRequest, i
 	// Use a fresh background context so a caller-side cancel landing
 	// AFTER plan-build but BEFORE the first variant cannot prevent the
 	// row from being created — the finalize UPDATE below relies on this
-	// row existing. Mirrors applyResendHTTPTag's precedent for store
-	// writes that must not be cancelled by the request context.
+	// row existing.
 	s.saveFuzzHTTPJob(context.Background(), fuzzID, &input, plan)
 
 	rows, completed, stopReason, runErr := s.runFuzzHTTPVariants(ctx, plan, timeout, input.StopOn5xx, input.Tag, fuzzID, input.UpstreamProxy, input.PreMacro, input.PostMacro)

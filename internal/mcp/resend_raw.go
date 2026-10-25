@@ -181,10 +181,6 @@ func (s *Server) handleResendRaw(ctx context.Context, _ *gomcp.CallToolRequest, 
 		return nil, nil, fmt.Errorf("resend_raw: %w", err)
 	}
 
-	if input.Tag != "" && s.flowStore.store != nil {
-		s.applyResendRawTag(ctx, plan.streamID, input.Tag)
-	}
-
 	duration := time.Since(start)
 	return nil, s.formatResendRawResult(plan.streamID, respBytes, chunks, truncated, input.Tag, duration), nil
 }

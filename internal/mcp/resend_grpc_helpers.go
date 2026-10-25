@@ -1296,19 +1296,6 @@ func dialResendGRPCUpstream(ctx context.Context, transport httputilpkg.TLSTransp
 	return conn, nil
 }
 
-// applyResendGRPCTag persists the user-supplied tag on the new Stream
-// row after the pipeline-driven RecordStep has created it.
-func (s *Server) applyResendGRPCTag(ctx context.Context, streamID, tag string) {
-	update := flow.StreamUpdate{Tags: map[string]string{"tag": tag}}
-	if err := s.flowStore.store.UpdateStream(ctx, streamID, update); err != nil {
-		slog.WarnContext(ctx, "resend_grpc: tag update failed",
-			"stream_id", streamID,
-			"tag", tag,
-			"error", err,
-		)
-	}
-}
-
 // formatResendGRPCResult turns the collected response envelopes into
 // the wire-shape MCP result. SafetyFilter output masking is applied to
 // each Data payload (body-target rules) and to the start metadata and

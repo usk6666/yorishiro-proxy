@@ -19,6 +19,10 @@
 //     tags["error"] = flow.TruncateErrorTag(err.Error()) merged via
 //     AppendTags so tags written earlier (RecordStep etc.) survive
 //     (USK-1350; same text and 1 KiB cap as the proxy path)
+//   - tag != "" → tags["tag"] = tag on both paths, merged via the same
+//     AppendTags write (USK-1362), so a failed attempt carries the
+//     user's tag next to tags["error"] and earlier tags survive. An
+//     empty tag writes no "tag" key.
 //
 // session.ClassifyError extracts the *layer.StreamError code when the
 // failure carries one (typed RST_STREAM-class errors); other failure
@@ -60,6 +64,10 @@ import (
 // a different code path (StreamUpdate is partial-update so non-State
 // fields stay intact; State just overwrites).
 //
+// tag is the user-supplied resend / fuzz `tag` argument, merged into
+// Stream.Tags["tag"] (never replacing other keys) on success and error
+// alike; pass "" when the caller supplied none.
+//
 // Callers should invoke this exactly once per runResend* invocation —
 // both on the success path and on every error path — so the Stream
 // transitions out of State="active" before the MCP handler returns its
@@ -73,7 +81,6 @@ import (
 // slog.Warn since the data is already on disk via RecordStep — only the
 // terminal state attribute is missing — and the proxy can continue.
 func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID, tag string, runErr error) {
-	_ = tag // TODO(USK-1362): scaffold — not yet applied
 	if store == nil || streamID == "" {
 		return
 	}
@@ -98,11 +105,18 @@ func finalizeResendStream(ctx context.Context, store flow.StreamWriter, streamID
 	}
 	// USK-1350: keep the error text on the Stream like the proxy path's
 	// OnComplete does, so `query flows` shows why the resend / fuzz
-	// Stream failed. AppendTags merges rather than replaces, preserving
-	// tags RecordStep and friends wrote earlier.
-	if runErr != nil {
-		update.AppendTags = map[string]string{
-			"error": flow.TruncateErrorTag(runErr.Error()),
+	// Stream failed. USK-1362: the user's tag rides the same write, on
+	// success and failure alike, so failed attempts stay selectable via
+	// `query flows filter.tag`. AppendTags merges rather than replaces,
+	// preserving tags RecordStep and friends wrote earlier and keeping
+	// tags["error"] and tags["tag"] side by side.
+	if tag != "" || runErr != nil {
+		update.AppendTags = make(map[string]string, 2)
+		if tag != "" {
+			update.AppendTags["tag"] = tag
+		}
+		if runErr != nil {
+			update.AppendTags["error"] = flow.TruncateErrorTag(runErr.Error())
 		}
 	}
 	if err := store.UpdateStream(ctx, streamID, update); err != nil {

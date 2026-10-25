@@ -1266,9 +1266,9 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	// session.RunSession so the proxy-path's OnComplete-driven Stream
 	// finalisation never fires. Without this, the per-variant Stream
 	// created by RecordStep stays pinned at State="active" forever.
-	// Use the parent ctx (not rtCtx) so the terminal UPDATE lands even
-	// when the per-variant request timeout expired — matches the
-	// applyResendHTTPTag precedent below.
+	// Use the parent ctx (not rtCtx) so the terminal UPDATE — State,
+	// Duration, and the user tag (USK-1362) — lands even when the
+	// per-variant request timeout expired, on success and error alike.
 	finalizeResendStream(ctx, s.flowStore.store, variantEnv.StreamID, tag, err)
 	if err != nil {
 		return row, 0, err
@@ -1276,12 +1276,6 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	if respMsg, ok := respEnv.Message.(*envelope.HTTPMessage); ok {
 		row.StatusCode = respMsg.Status
 		row.BodySize = len(respMsg.Body)
-	}
-	// Tag persistence uses the parent ctx (not the per-variant rtCtx) so
-	// the tag write is not bound to the variant's request timeout —
-	// matches resend_http.go behaviour.
-	if tag != "" && s.flowStore.store != nil {
-		s.applyResendHTTPTag(ctx, variantEnv.StreamID, tag)
 	}
 	return row, row.StatusCode, nil
 }
