@@ -43,11 +43,13 @@ func NewTransformStep(
 }
 
 // WithScopeRecheck wires the scope Steps that are re-run against an HTTP
-// request a Transform rule modified (USK-1167). TransformStep runs after
-// the head-of-pipeline scope check, and a rule such as set_header Host can
-// rewrite the very field a virtual-host server routes on, so a modified
-// request is re-checked exactly as an intercept release is (recheckScope):
-// a block is the same synthetic 403 with BlockedBy=target_scope. Pass the
+// request (USK-1167), or a Send gRPC / gRPC-Web Start (USK-1376), that a
+// Transform rule modified. TransformStep runs after the head-of-pipeline
+// scope check, and a rule such as set_header Host (set_metadata host on
+// gRPC) can rewrite the very field a virtual-host server routes on, so a
+// modified request is re-checked exactly as an intercept release is
+// (recheckScope): a block is the same target_scope Result — a synthetic
+// 403 for HTTP, grpc-status 7 for native gRPC, Drop for gRPC-Web. Pass the
 // same instances the Pipeline runs at its head. Either Step may be nil;
 // without this option a transformed request is not re-checked. Returns the
 // receiver for fluent construction.
@@ -139,7 +141,14 @@ func (s *TransformStep) processGRPCStart(ctx context.Context, env *envelope.Enve
 	if s.grpc == nil {
 		return Result{}
 	}
-	s.grpc.TransformStart(ctx, env, msg)
+	// USK-1376: a rule can rewrite the Host metadata the scope judges
+	// (set_metadata host); re-judge the Start about to be forwarded, as
+	// processHTTP does.
+	if s.grpc.TransformStart(ctx, env, msg) && env.Direction == envelope.Send {
+		if r := recheckScope(ctx, s.hostScope, s.httpScope, env); r.Action != Continue {
+			return r
+		}
+	}
 	return Result{}
 }
 

@@ -98,9 +98,10 @@ func (s *InterceptStep) WithScopeRecheck(host *HostScopeStep, http *HTTPScopeSte
 
 // recheckScope re-runs the scope Steps, in Pipeline order (HostScopeStep
 // then HTTPScopeStep), against env and returns the first non-Continue
-// Result verbatim — Respond with a synthetic 403 and
-// BlockedBy=target_scope for an HTTP request, Drop with
-// BlockedBy=target_scope otherwise. It returns the zero Result when both
+// Result verbatim — targetScopeBlock's Result with BlockedBy=target_scope:
+// Respond with a synthetic 403 for an HTTP request, Respond with
+// grpc-status 7 for a Send native gRPC Start / Data, Drop otherwise
+// (gRPC-Web, WebSocket, raw). It returns the zero Result when both
 // allow env or are nil. Both Steps are Send-only, so a Receive envelope
 // always passes.
 //
@@ -130,7 +131,7 @@ func recheckScope(ctx context.Context, host *HostScopeStep, httpStep *HTTPScopeS
 //
 // The block log carries the denied target of the forward envelope
 // (connection TargetHost, plus scheme / authority / path for an HTTP
-// request). The recorded flow holds the original held envelope, so for a
+// request or a gRPC Start). The recorded flow holds the original held envelope, so for a
 // modify_and_forward that rewrote the target this log line is the only
 // trace of the attempted out-of-scope target. The query string, headers
 // and body are deliberately not logged.
@@ -145,12 +146,21 @@ func (s *InterceptStep) recheckReleaseScope(ctx context.Context, held, forward *
 			slog.String("action", r.Action.String()),
 			slog.String("target_host", forward.Context.TargetHost),
 		}
-		if m, ok := forward.Message.(*envelope.HTTPMessage); ok {
+		switch m := forward.Message.(type) {
+		case *envelope.HTTPMessage:
 			attrs = append(attrs,
 				slog.String("scheme", m.Scheme),
 				slog.String("authority", m.Authority),
 				slog.String("path", m.Path),
 			)
+		case *envelope.GRPCStartMessage:
+			if m != nil {
+				attrs = append(attrs,
+					slog.String("scheme", m.Scheme),
+					slog.String("authority", m.Authority),
+					slog.String("path", envelope.GRPCStartWirePath(m)),
+				)
+			}
 		}
 		s.logger.InfoContext(ctx, "intercept: release blocked by target scope re-check", attrs...)
 	}
