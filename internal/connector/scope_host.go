@@ -24,6 +24,10 @@ const numericHostReason = "blocked: host ends in a number but is not a valid IPv
 // or unspecified dial host case (see unspecifiedOrEmptyHost).
 const unspecifiedHostReason = "blocked: empty or unspecified host (0.0.0.0 / ::) dials the proxy host; use an explicit address such as 127.0.0.1"
 
+// legacyIPv4Reason is CheckTarget's reason for the fail-closed
+// non-canonical IPv4 dial host case (see legacyIPv4Spelling).
+const legacyIPv4Reason = "blocked: non-canonical IPv4 spelling (integer, hex, octal or short form) is read as an address by some resolvers and looked up in DNS by others; use the dotted-decimal address such as 127.0.0.1"
+
 // canonicalScopeHost returns the form in which TargetScope compares a rule
 // hostname with a target hostname (matchHostname, hostnameCoveredBy,
 // targetRuleEqual). The steps, in order:
@@ -241,4 +245,10 @@ func isDigits(s string, base uint64) bool {
 		}
 	}
 	return true
+}
+
+// legacyIPv4Spelling reports whether host is an IPv4 address written in a
+// form other than canonical dotted-quad decimal. Scaffolding for USK-1273.
+func legacyIPv4Spelling(host string) bool {
+	return false
 }

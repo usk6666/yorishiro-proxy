@@ -118,6 +118,63 @@ func TestTCPForwardScopeCheck_UnspecifiedTargetFailsClosed(t *testing.T) {
 	}
 }
 
+// TestTCPForwardScopeCheck_LegacyIPv4TargetFailsClosed (USK-1273): a
+// forward target spelled as a legacy IPv4 form is refused with rules even
+// when an allow names the folded address (Go's pure resolver may send the
+// name to DNS); open mode admits it.
+func TestTCPForwardScopeCheck_LegacyIPv4TargetFailsClosed(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules([]connector.TargetRule{{Hostname: "127.0.0.1"}}, nil)
+	for _, target := range []string{"0x7f.0.0.1:4444", "2130706433:4444", "127.1:4444", "0177.0.0.1:4444"} {
+		for _, protocol := range []string{"", "raw", "http"} {
+			if ok, _ := tcpForwardScopeCheck(scope, target, false, protocol); ok {
+				t.Errorf("target %q (protocol %q) admitted under allow 127.0.0.1, want denied", target, protocol)
+			}
+			if ok, reason := tcpForwardScopeCheck(connector.NewTargetScope(), target, false, protocol); !ok {
+				t.Errorf("target %q (protocol %q) denied in open mode: %s", target, protocol, reason)
+			}
+		}
+	}
+	if ok, reason := tcpForwardScopeCheck(scope, "127.0.0.1:4444", false, "raw"); !ok {
+		t.Errorf("dotted target denied under allow 127.0.0.1: %s", reason)
+	}
+}
+
+// TestStartTCPForwards_LegacyIPv4TargetRejected (USK-1273) is the Manager
+// seam: a forward whose target is a legacy IPv4 spelling is refused at
+// start under allow 127.0.0.1 and binds nothing.
+func TestStartTCPForwards_LegacyIPv4TargetRejected(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules([]connector.TargetRule{{Hostname: "127.0.0.1"}}, nil)
+	mgr := newScopedTestManager(t, scope)
+	if err := mgr.Start(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.StopAll(context.Background())
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	_, port, _ := net.SplitHostPort(l.Addr().String())
+	_ = l.Close()
+
+	startErr := mgr.StartTCPForwards(ctx, TCPForwardParams{
+		Forwards: map[string]*config.ForwardConfig{
+			port: {Target: "0x7f.0.0.1:4444", Protocol: "raw"},
+		},
+	})
+	if !errors.Is(startErr, ErrTCPForwardTargetBlocked) {
+		t.Fatalf("StartTCPForwards error = %v, want ErrTCPForwardTargetBlocked", startErr)
+	}
+	if addrs := mgr.TCPForwardAddrs(); len(addrs) != 0 {
+		t.Errorf("TCPForwardAddrs = %v after rejected start, want none", addrs)
+	}
+}
+
 // TestStartTCPForwards_DeniedTargetRejected is test-plan 1 at the Manager
 // seam: StartTCPForwards refuses a forward whose target the scope denies,
 // with ErrTCPForwardTargetBlocked naming the port, and binds nothing.
