@@ -30,8 +30,9 @@ const (
 	// TransparentRouteHTTP: the client spoke HTTP/1.x first; relayed
 	// through the L7 HTTP/1 path.
 	TransparentRouteHTTP TransparentRoute = "http"
-	// TransparentRouteTLS: the first byte was 0x16; passthrough with the
-	// ClientHello metadata recorded (no MITM).
+	// TransparentRouteTLS: the first byte was 0x16. An HTTP (or absent)
+	// ALPN offer is MITM'd (USK-1317); anything else is passed through
+	// with the ClientHello metadata recorded.
 	TransparentRouteTLS TransparentRoute = "tls"
 	// TransparentRouteServerFirst: the client sent nothing before the
 	// peek deadline; passthrough.
@@ -79,6 +80,13 @@ type TransparentBlock struct {
 	Reason string
 	// Name is the SNI / Host the decision looked at, if any.
 	Name string
+	// ClientJA3 / ClientJA4 are the ClientHello fingerprints of a TLS
+	// route connection (USK-1317), if any.
+	ClientJA3 string
+	ClientJA4 string
+	// Error is the underlying error of a TLS MITM failure
+	// (client_tls_error / upstream_tls_error), if any.
+	Error string
 }
 
 // TransparentObserver persists transparent audit records. Calls are
@@ -111,6 +119,16 @@ type TransparentHandlerConfig struct {
 	// OnHTTPStack runs the L7 session on the assembled [http1 → http1]
 	// stack of the HTTP route; it owns the stack and must close it.
 	OnHTTPStack func(ctx context.Context, stack *ConnectionStack, target string)
+	// PassthroughList names the TLS hosts relayed without MITM, matched
+	// against the ClientHello SNI (USK-1317). Nil passes nothing through
+	// by name.
+	PassthroughList *PassthroughList
+	// OnStack / OnHTTP2Stack run the session of a TLS MITM route stack
+	// (USK-1317), with the CONNECT handler's contract: OnStack owns a
+	// non-h2 stack, OnHTTP2Stack an h2 one (the pooled upstream Layer is
+	// returned to the pool by the handler). Nil closes the stack.
+	OnStack      OnStackFunc
+	OnHTTP2Stack OnHTTP2StackFunc
 	// Logger; nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -147,8 +165,9 @@ var transparentDenyResponse = []byte("HTTP/1.1 403 Forbidden\r\n" +
 // loop check → first-bytes peek (short deadline) → route scope gate
 // (original destination, SNI, first request Host; name binding) → one
 // upstream dial to the original destination → the route (L7 HTTP/1
-// session, or the metadata-only passthrough relay). A refused
-// connection never reaches the upstream. Construct with
+// session, TLS MITM session — USK-1317 —, or the metadata-only
+// passthrough relay). A refused connection never reaches the upstream.
+// Construct with
 // NewTransparentHandler.
 type TransparentHandler struct {
 	cfg    TransparentHandlerConfig
@@ -270,11 +289,15 @@ func (h *TransparentHandler) scopeOpaque(dst netip.AddrPort) transparentVerdict 
 }
 
 // scopeTLS is the TLS route's gate: the original destination as "https"
-// (opaque — passthrough carries no request path) and the SNI as a name
-// leg. A destination no allow rule admits needs an allowed SNI (bound by
-// DNS, see needBinding).
-func (h *TransparentHandler) scopeTLS(dst netip.AddrPort, sni string) transparentVerdict {
-	full, denyOK, reason := h.dstCheck("https", dst, true)
+// and the SNI as a name leg. A destination no allow rule admits needs an
+// allowed SNI (bound by DNS, see needBinding). opaque is true on a route
+// that never yields a request path (the passthrough relay, a
+// raw_passthrough_hosts MITM): a path-scoped allow does not admit it. A
+// MITM route reaching the Pipeline is admitted provisionally by a
+// path-scoped allow, the path being checked per request (USK-1317, as
+// CONNECT does).
+func (h *TransparentHandler) scopeTLS(dst netip.AddrPort, sni string, opaque bool) transparentVerdict {
+	full, denyOK, reason := h.dstCheck("https", dst, opaque)
 	if !denyOK {
 		return refuseScope(reason)
 	}
@@ -348,27 +371,6 @@ func nameHost(v string) string {
 	return v
 }
 
-// handleTLS runs the TLS route: ClientHello peek, gate, passthrough.
-func (h *TransparentHandler) handleTLS(ctx context.Context, pc *PeekConn, dst netip.AddrPort, logger *slog.Logger) error {
-	hello := peekClientHelloSNIAndALPN(pc)
-	v := h.scopeTLS(dst, hello.SNI)
-	if v.allowed && v.needBinding {
-		v = h.bindNames(ctx, dst, []string{hello.SNI})
-	}
-	obs := h.newObservation(pc, dst, TransparentRouteTLS)
-	obs.SNI, obs.ALPN, obs.ClientJA3, obs.ClientJA4 = hello.SNI, hello.ALPN, hello.ClientJA3, hello.ClientJA4
-	if !v.allowed {
-		h.refuse(ctx, pc, dst, TransparentRouteTLS, v, hello.SNI, logger)
-		return nil
-	}
-	sni := hello.SNI
-	admit := func() (bool, string) {
-		r := h.scopeTLS(dst, sni)
-		return r.allowed, r.reason
-	}
-	return h.passthrough(ctx, pc, dst, obs, admit, logger)
-}
-
 // handleOpaque runs the server-first / opaque / h2c routes.
 func (h *TransparentHandler) handleOpaque(ctx context.Context, pc *PeekConn, dst netip.AddrPort, route TransparentRoute, logger *slog.Logger) error {
 	v := h.scopeOpaque(dst)
@@ -427,7 +429,7 @@ func (h *TransparentHandler) handleHTTP(ctx context.Context, pc *PeekConn, dst n
 		r := h.scopeHTTPNames(dst, head)
 		return r.allowed, r.reason
 	}
-	ctx, release, ok := h.register(ctx, dst, admit, logger)
+	ctx, release, ok := h.register(ctx, dst, admit, nil, logger)
 	defer release()
 	if !ok {
 		h.refuse(ctx, pc, dst, TransparentRouteHTTP, refuseScope("policy changed during admission"), "", logger)
@@ -471,7 +473,7 @@ func (h *TransparentHandler) newObservation(pc *PeekConn, dst netip.AddrPort, ro
 
 // passthrough registers, dials and relays a metadata-only passthrough.
 func (h *TransparentHandler) passthrough(ctx context.Context, pc *PeekConn, dst netip.AddrPort, obs TransparentObservation, admit LiveConnAdmitFunc, logger *slog.Logger) error {
-	ctx, release, ok := h.register(ctx, dst, admit, logger)
+	ctx, release, ok := h.register(ctx, dst, admit, nil, logger)
 	defer release()
 	if !ok {
 		h.refuse(ctx, pc, dst, obs.Route, refuseScope("policy changed during admission"), obs.SNI, logger)
@@ -568,16 +570,20 @@ func (h *TransparentHandler) lateSNIAllowed(dst netip.AddrPort, sni string) (boo
 
 // register tracks the admitted connection in the live-connection
 // registry so a policy change that no longer admits it closes it.
-func (h *TransparentHandler) register(ctx context.Context, dst netip.AddrPort, admit LiveConnAdmitFunc, logger *slog.Logger) (context.Context, func(), bool) {
+// admitOpaque is the strict check of a gate that admitted a path-scoped
+// allow provisionally (LiveConn.AdmitOpaque); nil when admit is already
+// strict.
+func (h *TransparentHandler) register(ctx context.Context, dst netip.AddrPort, admit, admitOpaque LiveConnAdmitFunc, logger *slog.Logger) (context.Context, func(), bool) {
 	if h.cfg.LiveConns == nil {
 		return ctx, func() {}, true
 	}
 	rctx, release, err := h.cfg.LiveConns.Register(ctx, LiveConn{
-		ConnID:   ConnIDFromContext(ctx),
-		Listener: ListenerNameFromContext(ctx),
-		Via:      transparentVia,
-		Target:   dst.String(),
-		Admit:    admit,
+		ConnID:      ConnIDFromContext(ctx),
+		Listener:    ListenerNameFromContext(ctx),
+		Via:         transparentVia,
+		Target:      dst.String(),
+		Admit:       admit,
+		AdmitOpaque: admitOpaque,
 	})
 	if err != nil {
 		logger.Info("transparent target blocked by scope (policy changed during admission)", "error", err)
@@ -708,7 +714,8 @@ const (
 )
 
 // TransparentScope is the per-connection transparent admission context
-// the HTTP route carries on its ctx for the Pipeline's scope Steps
+// the HTTP and TLS MITM routes carry on their ctx for the Pipeline's
+// scope Steps
 // (decision U3 amended): on a transparent connection the dial target
 // (the original destination) is a deny-only leg when no allow rule
 // admits it, and every request's names must then be allow-listed AND
@@ -716,6 +723,13 @@ const (
 type TransparentScope struct {
 	Dst    netip.AddrPort
 	Binder *NameBindingCache
+	// AdmittedBySNI is the ClientHello SNI that admitted a TLS MITM
+	// connection whose original destination no allow rule admits
+	// (USK-1317, owner decision U4): set only when the SNI matched an
+	// allow rule, no deny matched the destination or the SNI, and the SNI
+	// was bound to the destination by DNS. Empty on every other
+	// connection.
+	AdmittedBySNI string
 }
 
 type transparentScopeKey struct{}

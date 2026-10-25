@@ -122,7 +122,7 @@ type proxyStartInput struct {
 	// explicit proxy, "redirect" accepts connections an nftables REDIRECT
 	// rule diverted to the listener and routes every TCP connection to
 	// its original destination by its first bytes (Linux only).
-	TransparentMode string `json:"transparent_mode,omitempty" jsonschema:"listener mode: none (explicit proxy, default) or redirect (transparent egress gateway: accept nftables-REDIRECTed TCP and relay each connection to its original destination; plain HTTP via the L7 pipeline, TLS and everything else as metadata-only passthrough; Linux only). Incompatible with tcp_forwards and socks5_auth=password. Full reference: call docs(topic=\"proxy_start\")"`
+	TransparentMode string `json:"transparent_mode,omitempty" jsonschema:"listener mode: none (explicit proxy, default) or redirect (transparent egress gateway: accept nftables-REDIRECTed TCP and relay each connection to its original destination; plain HTTP via the L7 pipeline; TLS offering ALPN h2 / http/1.1 or no ALPN is MITM'd under its SNI (HTTP on any port decrypted; needs the proxy CA on the client); TLS with other ALPN values and everything else as metadata-only passthrough; Linux only). Incompatible with tcp_forwards and socks5_auth=password. Full reference: call docs(topic=\"proxy_start\")"`
 
 	// TransparentPeekTimeoutMs is how long a transparent listener waits
 	// for the client's first bytes before treating the connection as

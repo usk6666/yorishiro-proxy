@@ -53,9 +53,11 @@ func transparentModeOf(transparent bool) string {
 
 // configureTransparentListener turns flCfg into a transparent listener:
 // the original-destination resolver plus the transparent handler wrapped
-// with the connection.on_connect / on_disconnect hooks. The HTTP route
-// runs the listener's non-h2 Pipeline p.
-func configureTransparentListener(flCfg *connector.FullListenerConfig, deps Deps, wrapper *Listener, p *pipeline.Pipeline, headRecorder requestHeadRecorder, listenerName string, logger *slog.Logger) {
+// with the connection.on_connect / on_disconnect hooks. The plain-HTTP
+// route runs the listener's non-h2 Pipeline p; the TLS MITM route
+// (USK-1317) runs the CONNECT handler's session callbacks — p for HTTP/1
+// and raw stacks, pH2 for h2 stacks.
+func configureTransparentListener(flCfg *connector.FullListenerConfig, deps Deps, wrapper *Listener, p, pH2 *pipeline.Pipeline, headRecorder requestHeadRecorder, listenerName string, logger *slog.Logger) {
 	resolver := deps.OriginalDstResolver
 	if resolver == nil {
 		resolver = connector.PlatformOriginalDstResolver()
@@ -68,7 +70,12 @@ func configureTransparentListener(flCfg *connector.FullListenerConfig, deps Deps
 		PeekTimeout: deps.TransparentPeekTimeout,
 		Observer:    newTransparentRecorder(deps.FlowStore, listenerName, logger, deps.RecordScope),
 		OnHTTPStack: buildOnTransparentHTTPStack(p, deps, headRecorder, listenerName, logger),
-		Logger:      logger,
+		// USK-1317: TLS MITM route. The TLS passthrough list is matched
+		// against the ClientHello SNI.
+		PassthroughList: deps.PassthroughList,
+		OnStack:         buildOnStack(p, deps, headRecorder, logger),
+		OnHTTP2Stack:    buildOnHTTP2Stack(pH2, deps, logger),
+		Logger:          logger,
 	})
 	flCfg.OriginalDst = resolver
 	flCfg.OnTransparent = wrapper.wrapHandler(handler.Handle)
@@ -115,8 +122,10 @@ func buildOnTransparentHTTPStack(p *pipeline.Pipeline, deps Deps, headRecorder r
 // Stream per passthrough connection created active at OnStart, finalised
 // at OnComplete together with one metadata-only Flow (passthroughMetadata
 // keys plus route, alpn_offers and original_dst). No payload byte is
-// ever recorded. Refusals and dial failures get a self-contained error
-// Stream. RecordScope is honoured like the passthrough recorder does.
+// ever recorded. Refusals, dial failures and TLS MITM handshake failures
+// (client_tls_error / upstream_tls_error, USK-1317) get a self-contained
+// error Stream. RecordScope is honoured like the passthrough recorder
+// does. MITM'd connections are recorded by the Pipeline's RecordStep.
 type transparentRecorder struct {
 	store        flow.Writer
 	listenerName string
@@ -247,8 +256,10 @@ func (r *transparentRecorder) OnComplete(_ context.Context, obs connector.Transp
 }
 
 // OnBlocked implements connector.TransparentObserver: a refused
-// connection (BlockedBy target_scope) or a failed upstream dial. No
-// upstream socket exists, so ServerAddr stays empty.
+// connection (BlockedBy target_scope), a failed upstream dial, or a
+// failed TLS MITM handshake (USK-1317: the SNI as "name", the error as
+// "error", the client's JA3 / JA4 on ConnInfo). No upstream socket was
+// handed to a Layer, so ServerAddr stays empty.
 func (r *transparentRecorder) OnBlocked(ctx context.Context, b connector.TransparentBlock) {
 	streamID := uuid.New().String()
 	obs := connector.PassthroughObservation{RemoteAddr: b.RemoteAddr, TargetHost: hostOfAddr(b.OriginalDst)}
@@ -270,6 +281,9 @@ func (r *transparentRecorder) OnBlocked(ctx context.Context, b connector.Transpa
 	if b.Name != "" {
 		tags["name"] = b.Name
 	}
+	if b.Error != "" {
+		tags["error"] = b.Error
+	}
 	st := &flow.Stream{
 		ID:            streamID,
 		ConnID:        connector.ConnIDFromContext(ctx),
@@ -280,9 +294,13 @@ func (r *transparentRecorder) OnBlocked(ctx context.Context, b connector.Transpa
 		BlockedBy:     b.BlockedBy,
 		Timestamp:     time.Now(),
 		Origin:        flow.OriginProxy,
-		ConnInfo:      &flow.ConnectionInfo{ClientAddr: b.RemoteAddr},
-		ListenerName:  r.listenerName,
-		Tags:          tags,
+		ConnInfo: &flow.ConnectionInfo{
+			ClientAddr:   b.RemoteAddr,
+			TLSClientJA3: b.ClientJA3,
+			TLSClientJA4: b.ClientJA4,
+		},
+		ListenerName: r.listenerName,
+		Tags:         tags,
 	}
 	saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

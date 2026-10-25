@@ -29,7 +29,7 @@ Both Policy Layer and Agent Layer `target_scope` rules apply to **all** proxy tr
 |---|---|---|
 | Transparent MITM (HTTP CONNECT tunnel, plain HTTP forward proxy, SOCKS5 tunnel) | Applied | Applied |
 | TCP forward (`tcp_forwards`, every `protocol`) | Applied (at `proxy_start` and at every accept, before the target is contacted; see [`tcp_forwards` gate](#tcp_forwards-gate)) | Applied |
-| Transparent listener (`proxy_start` `transparent_mode: "redirect"`) | Applied (original destination, SNI and every request's `Host`, before the target is contacted; a name may admit an IP that is not allow-listed only if it resolves to it; on an IP-allowed destination name denies are best-effort for traffic not recognised as HTTP / TLS — see `docs(topic="proxy_start")`, "Target scope on a transparent listener") | Applied |
+| Transparent listener (`proxy_start` `transparent_mode: "redirect"`) | Applied (original destination, SNI and every request's `Host` / `:authority`, before the target is contacted — on TLS MITM connections too; a name may admit an IP that is not allow-listed only if it resolves to it, and an admitting SNI also admits the connection's non-HTTP traffic; on an IP-allowed destination name denies are best-effort for traffic not recognised as HTTP / TLS — see `docs(topic="proxy_start")`, "Target scope on a transparent listener") | Applied |
 | MCP tool-initiated requests (`resend_http`, `resend_ws`, `resend_grpc`, `resend_raw`, `fuzz_http`, `fuzz_ws`, `fuzz_grpc`, `fuzz_raw`, `macro`) | Applied | Applied |
 | Intercepted traffic released from a hold (`intercept` `release` / `modify_and_forward`, timeout auto-release) | Applied | Applied |
 

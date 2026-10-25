@@ -727,6 +727,16 @@ type ClientHelloPeek struct {
 	// unimplemented (deferred).
 	ClientJA3 string
 	ClientJA4 string
+
+	// ExtensionsParsed reports that the ClientHello's extensions block —
+	// including its server_name and ALPN extensions, when present — was
+	// parsed without error (USK-1317). It disambiguates the four cases
+	// that all leave ALPN nil: no ALPN extension (or an empty list) is
+	// ExtensionsParsed with ALPN nil; a peek failure, an oversized or
+	// split ClientHello, or a malformed extension is !ExtensionsParsed.
+	// Only the transparent listener reads it; BuildConnectionStack does
+	// not, so the CONNECT / SOCKS5 paths are unchanged.
+	ExtensionsParsed bool
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given upstream
@@ -1724,6 +1734,25 @@ func dialUpstreamWithALPN(
 	rootCAsConfig *tls.Config,
 	cfg *BuildConfig,
 ) (net.Conn, *envelope.TLSSnapshot, error) {
+	return dialUpstreamTLS(ctx, target, host, offerALPN, cfg.EffectiveUTLSProfile(),
+		insecureSkip, clientCert, rootCAsConfig, cfg)
+}
+
+// dialUpstreamTLS is dialUpstreamWithALPN with an explicit uTLS profile
+// ("" = standard crypto/tls). The transparent no-ALPN MITM leg passes ""
+// so that no ALPN extension at all reaches the upstream: a uTLS profile
+// carries its own ALPN offer, which tlslayer replaces only when offerALPN
+// is non-empty (USK-1317 review F-1).
+func dialUpstreamTLS(
+	ctx context.Context,
+	target, host string,
+	offerALPN []string,
+	utlsProfile string,
+	insecureSkip bool,
+	clientCert *tls.Certificate,
+	rootCAsConfig *tls.Config,
+	cfg *BuildConfig,
+) (net.Conn, *envelope.TLSSnapshot, error) {
 	upstreamTLSCfg := &tls.Config{
 		ServerName: host,
 	}
@@ -1737,12 +1766,13 @@ func dialUpstreamWithALPN(
 		// back to a direct dial — silent bypass = privacy regression.
 		slog.WarnContext(ctx, "connector: upstream proxy rotation failed; failing closed",
 			"target", target, "error", proxyErr)
-		return nil, nil, fmt.Errorf("connector: upstream dial for %s: upstream proxy rotation: %w", target, proxyErr)
+		// Marked as a pre-TLS dial failure: no byte reached the upstream.
+		return nil, nil, &upstreamTCPDialError{err: fmt.Errorf("connector: upstream dial for %s: upstream proxy rotation: %w", target, proxyErr)}
 	}
 	conn, snap, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,
 		InsecureSkipVerify: insecureSkip,
-		UTLSProfile:        cfg.EffectiveUTLSProfile(),
+		UTLSProfile:        utlsProfile,
 		ClientCert:         clientCert,
 		OfferALPN:          offerALPN,
 		UpstreamProxy:      upstreamProxy,
@@ -2163,7 +2193,7 @@ func buildRawPassthroughStack(
 		clientTLSConn.Close()
 		slog.WarnContext(ctx, "connector: upstream proxy rotation failed (raw passthrough); failing closed",
 			"target", target, "error", proxyErr)
-		return nil, nil, nil, fmt.Errorf("connector: upstream dial for %s: upstream proxy rotation: %w", target, proxyErr)
+		return nil, nil, nil, &upstreamTCPDialError{err: fmt.Errorf("connector: upstream dial for %s: upstream proxy rotation: %w", target, proxyErr)}
 	}
 	upstreamConn, upstreamSnap, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,

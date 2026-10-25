@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +25,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
+	"golang.org/x/net/http2"
 )
 
 // USK-1316: a transparent (REDIRECT) listener routes every TCP connection
@@ -228,6 +230,7 @@ func (f *fakeNameResolver) LookupNetIP(_ context.Context, _, host string) ([]net
 // transparentProxy is a started transparent listener.
 type transparentProxy struct {
 	stack *proxybuild.Stack
+	ca    *cert.CA
 	store *usk1181Store
 	logs  *testutil.CaptureLogger
 	names *fakeNameResolver
@@ -243,7 +246,7 @@ func startTransparentProxy(t *testing.T, ctx context.Context, origDst netip.Addr
 		t.Fatalf("CA.Generate: %v", err)
 	}
 	logs, logger := testutil.NewCaptureLogger()
-	p := &transparentProxy{store: &usk1181Store{}, logs: logs, names: newFakeNameResolver(nil)}
+	p := &transparentProxy{ca: ca, store: &usk1181Store{}, logs: logs, names: newFakeNameResolver(nil)}
 	deps := proxybuild.Deps{
 		Logger:       logger,
 		ListenerName: transparentListenerName,
@@ -289,6 +292,13 @@ func startTransparentProxy(t *testing.T, ctx context.Context, origDst netip.Addr
 	p.stack = stack
 	p.addr = stack.Listener.Addr()
 	return p
+}
+
+// roots is a pool trusting only the proxy's MITM CA.
+func (p *transparentProxy) roots() *x509.CertPool {
+	pool := x509.NewCertPool()
+	pool.AddCert(p.ca.Certificate())
+	return pool
 }
 
 func (p *transparentProxy) dial(t *testing.T) net.Conn {
@@ -470,38 +480,213 @@ func TestTransparent_ServerFirst_BannerRelayed_Smoke(t *testing.T) {
 	}
 }
 
-// T11 (smoke): a 0x16 connection is passed through unmodified — the
-// client sees the upstream's own certificate — and SNI, the ALPN offer
-// list in wire order, JA3 and JA4 are recorded.
+// tlsHello is what a fixture TLS upstream saw in one ClientHello.
+type tlsHello struct {
+	serverName string
+	protos     []string
+}
+
+// capturingTLSUpstream is a TLS server with its own CA that records every
+// ClientHello's SNI and ALPN offer list (verbatim, wire order) and runs
+// handle on each handshaken connection (USK-1317).
+type capturingTLSUpstream struct {
+	*tcpTestServer
+	ca     *x509.Certificate
+	mu     sync.Mutex
+	hellos []tlsHello
+}
+
+func newCapturingTLSUpstream(t *testing.T, nextProtos []string, handle func(*tls.Conn)) *capturingTLSUpstream {
+	t.Helper()
+	ca := &cert.CA{}
+	if err := ca.Generate(); err != nil {
+		t.Fatalf("upstream CA: %v", err)
+	}
+	iss := cert.NewIssuer(ca)
+	u := &capturingTLSUpstream{ca: ca.Certificate()}
+	cfg := &tls.Config{
+		NextProtos: nextProtos,
+		GetConfigForClient: func(h *tls.ClientHelloInfo) (*tls.Config, error) {
+			u.mu.Lock()
+			u.hellos = append(u.hellos, tlsHello{serverName: h.ServerName, protos: append([]string(nil), h.SupportedProtos...)})
+			u.mu.Unlock()
+			return nil, nil
+		},
+		GetCertificate: func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			name := h.ServerName
+			if name == "" {
+				name = "upstream.test"
+			}
+			return iss.GetCertificate(name)
+		},
+	}
+	u.tcpTestServer = newTCPTestServer(t, "tcp4", "127.0.0.1:0", func(c net.Conn) {
+		tc := tls.Server(c, cfg)
+		if err := tc.Handshake(); err != nil {
+			return
+		}
+		handle(tc)
+	})
+	return u
+}
+
+func (u *capturingTLSUpstream) seenHellos() []tlsHello {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]tlsHello(nil), u.hellos...)
+}
+
+// issuedByUpstream reports whether leaf was issued by the upstream's own CA.
+func (u *capturingTLSUpstream) issuedByUpstream(leaf *x509.Certificate) bool {
+	return leaf.CheckSignatureFrom(u.ca) == nil
+}
+
+// httpsAnswer is the body serveHTTPS answers every request with.
+func httpsAnswer(r *gohttp.Request) string {
+	return fmt.Sprintf("tls host=%s path=%s proto=%s", r.Host, r.URL.Path, r.Proto)
+}
+
+// serveHTTPS answers HTTP/2 (negotiated h2) or HTTP/1.1 keep-alive
+// requests on tc with httpsAnswer.
+func serveHTTPS(tc *tls.Conn) {
+	if tc.ConnectionState().NegotiatedProtocol == "h2" {
+		(&http2.Server{}).ServeConn(tc, &http2.ServeConnOpts{Handler: gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+			_, _ = io.WriteString(w, httpsAnswer(r))
+		})})
+		return
+	}
+	br := bufio.NewReader(tc)
+	for {
+		req, err := gohttp.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, req.Body)
+		body := httpsAnswer(req)
+		fmt.Fprintf(tc, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+		if req.Close {
+			return
+		}
+	}
+}
+
+// httpsGet sends one HTTP/1.1 request on tc and returns the response.
+func httpsGet(t *testing.T, tc net.Conn, br *bufio.Reader, path, host string, closeConn bool) (*gohttp.Response, string) {
+	t.Helper()
+	req := "GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\n"
+	if closeConn {
+		req += "Connection: close\r\n"
+	}
+	if _, err := io.WriteString(tc, req+"\r\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	resp, err := gohttp.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp, string(body)
+}
+
+// streamUpdateField returns the first non-empty value get extracts from
+// id's updates, waiting up to 5s.
+func streamUpdateField(t *testing.T, s *usk1181Store, id, what string, get func(flow.StreamUpdate) string) string {
+	t.Helper()
+	return get(waitUpdate(t, s, id, what, func(u flow.StreamUpdate) bool { return get(u) != "" }))
+}
+
+// isMITMHTTPSStream matches a MITM-recorded HTTPS Stream.
+func isMITMHTTPSStream(st *flow.Stream) bool { return isHTTPStream(st) && st.Scheme == "https" }
+
+func rawOf(f *flow.Flow) []byte {
+	if f == nil {
+		return nil
+	}
+	return f.RawBytes
+}
+
+// T1 (USK-1317, smoke): HTTPS (ALPN http/1.1) on a non-443 port is MITM'd
+// under the SNI hostname, dialed at the original destination, and
+// recorded at L7 with its raw bytes.
+func TestTransparent_TLS_HTTPSMITMOnNonStandardPort_Smoke(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	up := newCapturingTLSUpstream(t, []string{"http/1.1"}, serveHTTPS)
+	p := startTransparentProxy(t, ctx, up.addr(), nil)
+
+	tc := tls.Client(p.dial(t), &tls.Config{ServerName: "sni.example", NextProtos: []string{"http/1.1"}, RootCAs: p.roots()})
+	if err := tc.Handshake(); err != nil {
+		t.Fatalf("TLS handshake against the proxy CA: %v (want a MITM certificate for sni.example)", err)
+	}
+	leaf := tc.ConnectionState().PeerCertificates[0]
+	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != "sni.example" {
+		t.Errorf("MITM certificate DNSNames = %v, want [sni.example]", leaf.DNSNames)
+	}
+	resp, body := httpsGet(t, tc, bufio.NewReader(tc), "/t1", "sni.example", true)
+	if resp.StatusCode != 200 || body != "tls host=sni.example path=/t1 proto=HTTP/1.1" {
+		t.Fatalf("response %d %q", resp.StatusCode, body)
+	}
+	_ = tc.Close()
+
+	st, flows := waitStream(t, p.store, 2, isMITMHTTPSStream)
+	if st.Tags["sni"] != "sni.example" {
+		t.Errorf("Tags[sni] = %q, want sni.example", st.Tags["sni"])
+	}
+	waitUpdate(t, p.store, st.ID, "State complete", func(u flow.StreamUpdate) bool { return u.State == "complete" })
+	if got := streamUpdateField(t, p.store, st.ID, "ServerAddr", func(u flow.StreamUpdate) string { return u.ServerAddr }); got != up.addr().String() {
+		t.Errorf("ServerAddr = %q, want the original destination %s", got, up.addr())
+	}
+	send, recv := flowByDirection(flows, "send"), flowByDirection(flows, "receive")
+	if send == nil || !strings.HasPrefix(string(send.RawBytes), "GET /t1 HTTP/1.1\r\n") {
+		t.Errorf("send flow raw bytes = %q, want the decrypted request", rawOf(send))
+	}
+	if recv == nil || !strings.HasPrefix(string(recv.RawBytes), "HTTP/1.1 200 OK\r\n") {
+		t.Errorf("receive flow raw bytes = %q, want the decrypted response", rawOf(recv))
+	}
+	hellos := up.seenHellos()
+	if len(hellos) != 1 || hellos[0].serverName != "sni.example" || strings.Join(hellos[0].protos, ",") != "http/1.1" {
+		t.Errorf("upstream ClientHellos = %+v, want one with SNI sni.example, ALPN [http/1.1]", hellos)
+	}
+	if n := up.accepts.Load(); n != 1 {
+		t.Errorf("upstream accepted %d connections, want 1", n)
+	}
+}
+
+// T11 / USK-1317 T5 (smoke): a TLS connection whose ALPN offer names no
+// HTTP protocol is passed through unmodified — the client sees the
+// upstream's own certificate, the upstream sees the offer verbatim — and
+// SNI, the ALPN offer list in wire order, JA3 and JA4 are recorded with
+// no payload byte. (USK-1316 passed every 0x16 connection through;
+// USK-1317 MITMs the HTTP offers, so this test now offers non-HTTP values
+// only — a spec change, not a weakening.)
 func TestTransparent_TLS_PassthroughWithClientHelloMetadata_Smoke(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	up := newTLSTestUpstream(t)
+	up := newCapturingTLSUpstream(t, []string{"imap"}, func(tc *tls.Conn) {
+		line, err := bufio.NewReader(tc).ReadString('\n')
+		if err == nil {
+			_, _ = io.WriteString(tc, "ok "+line)
+		}
+	})
 	p := startTransparentProxy(t, ctx, up.addr(), nil)
 
-	raw := p.dial(t)
-	tc := tls.Client(raw, &tls.Config{
+	tc := tls.Client(p.dial(t), &tls.Config{
 		ServerName:         "sni.example",
-		NextProtos:         []string{"h2", "http/1.1"},
+		NextProtos:         []string{"imap", "x-other"},
 		InsecureSkipVerify: true, //nolint:gosec // the test checks the cert by identity below
 	})
 	if err := tc.Handshake(); err != nil {
 		t.Fatalf("TLS handshake through the proxy: %v", err)
 	}
-	if got := tc.ConnectionState().PeerCertificates[0]; !got.Equal(up.srv.Certificate()) {
-		t.Fatalf("client saw certificate %q, want the upstream's own (no MITM)", got.Subject)
+	if leaf := tc.ConnectionState().PeerCertificates[0]; !up.issuedByUpstream(leaf) {
+		t.Fatalf("client saw certificate %q, want the upstream's own (no MITM)", leaf.Subject)
 	}
-	if _, err := io.WriteString(tc, "GET /tls HTTP/1.1\r\nHost: sni.example\r\nConnection: close\r\n\r\n"); err != nil {
+	if _, err := io.WriteString(tc, "a1 NOOP\r\n"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	resp, err := gohttp.ReadResponse(bufio.NewReader(tc), nil)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if string(body) != "tls host=sni.example path=/tls" {
-		t.Fatalf("body %q", body)
+	if reply, err := bufio.NewReader(tc).ReadString('\n'); err != nil || reply != "ok a1 NOOP\r\n" {
+		t.Fatalf("reply %q, %v", reply, err)
 	}
 	_ = tc.Close()
 
@@ -515,11 +700,17 @@ func TestTransparent_TLS_PassthroughWithClientHelloMetadata_Smoke(t *testing.T) 
 	if fl.Metadata["sni"] != "sni.example" {
 		t.Errorf("sni = %q", fl.Metadata["sni"])
 	}
-	if fl.Metadata["alpn_offers"] != "h2,http/1.1" {
-		t.Errorf("alpn_offers = %q, want h2,http/1.1 (wire order)", fl.Metadata["alpn_offers"])
+	if fl.Metadata["alpn_offers"] != "imap,x-other" {
+		t.Errorf("alpn_offers = %q, want imap,x-other (wire order)", fl.Metadata["alpn_offers"])
 	}
 	if fl.Metadata["client_ja3"] == "" || fl.Metadata["client_ja4"] == "" {
 		t.Errorf("metadata = %v, want client_ja3 / client_ja4", fl.Metadata)
+	}
+	if len(fl.RawBytes) != 0 || len(fl.Body) != 0 {
+		t.Errorf("metadata flow carries payload bytes (raw %d, body %d)", len(fl.RawBytes), len(fl.Body))
+	}
+	if hellos := up.seenHellos(); len(hellos) != 1 || strings.Join(hellos[0].protos, ",") != "imap,x-other" {
+		t.Errorf("upstream ClientHellos = %+v, want the client's offer verbatim", hellos)
 	}
 	if n := up.accepts.Load(); n != 1 {
 		t.Errorf("upstream accepted %d connections, want 1", n)

@@ -142,6 +142,22 @@ func peekClientHelloSNIAndALPN(clientConn net.Conn) ClientHelloPeek {
 		return ClientHelloPeek{ClientJA3: ja3, ClientJA4: ja4}
 	}
 
+	sni, alpnList, parsed := clientHelloNamesFromExtensions(exts, len(buf))
+	return ClientHelloPeek{
+		SNI:       sni,
+		ALPN:      alpnList,
+		ClientJA3: ja3,
+		ClientJA4: ja4,
+		// USK-1317: every extension this peek reads parsed cleanly, so a
+		// nil ALPN here means "none offered", not "could not be read".
+		ExtensionsParsed: parsed,
+	}
+}
+
+// clientHelloNamesFromExtensions extracts the SNI and the ALPN offer list
+// from a parsed extensions block, fail-soft: a malformed extension yields
+// its zero value and parsed=false (USK-1317). buffered is only logged.
+func clientHelloNamesFromExtensions(exts []byte, buffered int) (sni string, alpnList []string, parsed bool) {
 	// SNI: empty (no extension) and parse error both fold into "" — the
 	// findSNIInExtensions contract returns ("", nil) for "no SNI" and a
 	// non-nil error only on truncation. Treat truncation as no-SNI to
@@ -149,7 +165,7 @@ func peekClientHelloSNIAndALPN(clientConn net.Conn) ClientHelloPeek {
 	sni, sniErr := findSNIInExtensions(exts)
 	if sniErr != nil {
 		slog.Debug("connector: client hello SNI parse failed",
-			"error", sniErr, "buffered", len(buf))
+			"error", sniErr, "buffered", buffered)
 		sni = ""
 	}
 
@@ -160,14 +176,9 @@ func peekClientHelloSNIAndALPN(clientConn net.Conn) ClientHelloPeek {
 	alpnList, alpnErr := findALPNInExtensions(exts)
 	if alpnErr != nil {
 		slog.Debug("connector: client hello ALPN parse failed",
-			"error", alpnErr, "buffered", len(buf))
+			"error", alpnErr, "buffered", buffered)
 		alpnList = nil
 	}
 
-	return ClientHelloPeek{
-		SNI:       sni,
-		ALPN:      alpnList,
-		ClientJA3: ja3,
-		ClientJA4: ja4,
-	}
+	return sni, alpnList, sniErr == nil && alpnErr == nil
 }

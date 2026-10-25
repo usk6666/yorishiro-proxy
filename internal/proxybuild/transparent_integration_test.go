@@ -519,7 +519,7 @@ func TestTransparent_NameAllowAdmitsBoundOriginalDst(t *testing.T) {
 		return func(d *proxybuild.Deps) { d.Scope = s; d.NameResolver = r }
 	}
 
-	t.Run("TLS allowed and bound SNI passes through", func(t *testing.T) {
+	t.Run("TLS allowed and bound SNI admitted", func(t *testing.T) {
 		ctx := transparentCtx(t)
 		up := newTLSTestUpstream(t)
 		p := startTransparentProxy(t, ctx, up.addr(), mutate(names(), nameScope()))
