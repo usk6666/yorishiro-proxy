@@ -110,8 +110,9 @@ func NewTargetScope() *TargetScope {
 // than canonical dotted-quad decimal ("0x7f.0.0.1", "2130706433",
 // "127.1", "127.0.0.1."), which resolvers read differently — Go's pure
 // resolver sends the hex forms to DNS — so an allow for the address must
-// not admit it (USK-1273, see legacyIPv4Spelling). With no rules at all
-// (open mode) all three are allowed like any other host.
+// not admit it (USK-1273, see legacyIPv4Spelling). So is a port outside
+// 0..65535, which no TCP dial uses as written (USK-1262). With no rules at
+// all (open mode) all four are allowed like any other target.
 //
 // Returns allowed=true if the target is permitted, and a reason string
 // explaining the decision when blocked.
@@ -123,8 +124,8 @@ func (s *TargetScope) CheckTarget(scheme, hostname string, port int, path string
 
 // checkTargetLocked is CheckTarget for a caller already holding s.mu.
 func (s *TargetScope) checkTargetLocked(scheme, hostname string, port int, path string) (allowed bool, reason string) {
-	// 0. Fail closed on a dial host no rule can name (rules exist only).
-	if reason, blocked := s.dialHostFailClosedLocked(hostname); blocked {
+	// 0. Fail closed on a dial host or port no rule can name (rules exist only).
+	if reason, blocked := s.dialHostFailClosedLocked(hostname, port); blocked {
 		return false, reason
 	}
 
@@ -182,12 +183,19 @@ func (s *TargetScope) checkTargetLocked(scheme, hostname string, port int, path 
 // host (USK-1250, numericHostUnparsable), and a non-canonical IPv4
 // spelling that resolvers disagree on (USK-1273, legacyIPv4Spelling). The
 // order matters: the legacy "0" / "0x0" fold into 0.0.0.0 and keep the
-// unspecified reason. With no rules at all
+// unspecified reason. A port outside 0..65535 is refused too (USK-1262):
+// no TCP dial can use it as written, and a caller that parsed a port
+// leniently could otherwise hand over a value no ports rule names while
+// net.Dial wraps it modulo 2^32. (0 stays: it is the "unknown" port of a
+// scheme without a default.) With no rules at all
 // (open mode) nothing is refused. Name legs with a known dial target do
 // not come here (nameDenyLocked). Caller holds s.mu.
-func (s *TargetScope) dialHostFailClosedLocked(hostname string) (reason string, blocked bool) {
+func (s *TargetScope) dialHostFailClosedLocked(hostname string, port int) (reason string, blocked bool) {
 	if !s.hasRulesLocked() {
 		return "", false
+	}
+	if port < 0 || port > 65535 {
+		return ReasonPortOutOfRange, true
 	}
 	if unspecifiedOrEmptyHost(hostname) {
 		return unspecifiedHostReason, true
@@ -230,7 +238,7 @@ func (s *TargetScope) CheckHost(scheme, hostname string, port int) (allowed, pat
 
 	// Fail closed on a dial host no rule can name, as CheckTarget does
 	// (USK-1250, USK-1312).
-	if reason, blocked := s.dialHostFailClosedLocked(hostname); blocked {
+	if reason, blocked := s.dialHostFailClosedLocked(hostname, port); blocked {
 		return false, false, reason
 	}
 
@@ -296,8 +304,29 @@ func (s *TargetScope) CheckOpaqueTarget(scheme, hostname string, port int) (allo
 	return false, reason
 }
 
+// ReasonURLPortUninterpretable is the block reason for a URL whose port is
+// present but is not a decimal number in 1..65535 (see CheckURL).
+const ReasonURLPortUninterpretable = "blocked: URL has an uninterpretable host or port (the port must be a decimal number in 1-65535)"
+
+// ReasonPortOutOfRange is the block reason for a port outside 0..65535
+// handed to CheckTarget or CheckHost.
+const ReasonPortOutOfRange = "blocked: port is out of range 0-65535"
+
 // CheckURL is a convenience method that extracts scheme, hostname, port, and
 // path from a parsed URL and delegates to CheckTarget.
+//
+// The port is read from u.Host itself with SplitTargetHostPort's rule, not
+// from u.Port() (USK-1262). net/url accepts a 10-digit port that net.Dial
+// wraps modulo 2^32, and for a URL built as a struct (the MCP tools'
+// envelope.URLFromWirePath) u.Port() is "" whenever the port is not all
+// digits (" 8080", "+8080", "http"), so u.Hostname() returned the whole
+// "127.0.0.1: 8080" and the check judged that string on the scheme's
+// default port — while net.Dial skips the space or sign, or resolves the
+// service name. When the scope has rules, a URL whose port is present but
+// not a decimal 1..65535, or whose host has colons that are neither a
+// host:port split nor an IPv6 literal, is refused. A missing or empty port
+// takes the scheme default; a bare (unbracketed) IPv6 host is read as
+// before. Open mode is unchanged. The URL is never rewritten.
 func (s *TargetScope) CheckURL(u *url.URL) (allowed bool, reason string) {
 	if u == nil {
 		return s.CheckTarget("", "", 0, "")
@@ -305,13 +334,57 @@ func (s *TargetScope) CheckURL(u *url.URL) (allowed bool, reason string) {
 
 	scheme := strings.ToLower(u.Scheme)
 	hostname := u.Hostname()
-	port := defaultPort(scheme, u.Port())
+	port, portOK := urlScopePort(scheme, u)
 	// USK-1139: match on the wire-form path; matchTargetRule also tries
 	// its percent-decoded form, so a net/url-parsed URL and a Flow.URL
 	// built by envelope.URLFromWirePath decide identically.
 	path := envelope.WirePath(u)
 
-	return s.CheckTarget(scheme, hostname, port, path)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !portOK && s.hasRulesLocked() {
+		return false, ReasonURLPortUninterpretable
+	}
+	return s.checkTargetLocked(scheme, hostname, port, path)
+}
+
+// urlScopePort reads the port of u.Host for CheckURL. ok is false when a
+// port is present but fails parseStrictPort, or when the host part has
+// colons that are not a bracketed IPv6 literal. A bare IPv6 host
+// ("2001:db8::1", which net/url splits at its last colon) keeps the
+// u.Port() reading it always had.
+func urlScopePort(scheme string, u *url.URL) (port int, ok bool) {
+	host := u.Host
+	if isIPv6Literal(host) {
+		if p := u.Port(); p != "" {
+			port, _ = strconv.Atoi(p)
+			return port, true
+		}
+		return schemeDefaultPort(scheme), true
+	}
+	portStr := ""
+	if strings.HasPrefix(host, "[") {
+		end := strings.IndexByte(host, ']')
+		if end < 0 {
+			return 0, false
+		}
+		switch rest := host[end+1:]; {
+		case rest == "":
+		case rest[0] == ':':
+			portStr = rest[1:]
+		default:
+			return 0, false
+		}
+	} else if i := strings.LastIndexByte(host, ':'); i >= 0 {
+		if strings.IndexByte(host[:i], ':') >= 0 {
+			return 0, false
+		}
+		portStr = host[i+1:]
+	}
+	if portStr == "" {
+		return schemeDefaultPort(scheme), true
+	}
+	return parseStrictPort(portStr)
 }
 
 // SetPolicyRules sets the policy layer rules at initialization. The only
@@ -687,17 +760,15 @@ func containsStringFold(slice []string, val string) bool {
 	return false
 }
 
-// defaultPort returns the port number from the URL port string.
-// If the port string is empty, it returns the default port for the given scheme
-// (80 for http, 443 for https). Returns 0 if the port cannot be determined.
-func defaultPort(scheme, portStr string) int {
-	if portStr != "" {
-		p, err := strconv.Atoi(portStr)
-		if err != nil {
-			return 0
-		}
-		return p
-	}
+// schemeDefaultPort returns the default port for the given scheme (80 for
+// http, 443 for https), or 0 when the scheme has none.
+//
+// It deliberately takes no port string (USK-1262): it used to parse one
+// leniently and return 0 for anything strconv.Atoi refused, and 0 matches
+// no ports rule — an unparsable port silently became "matches nothing"
+// (fail open). Port strings are read with parseStrictPort, whose failure
+// each caller turns into a refusal when the scope has rules.
+func schemeDefaultPort(scheme string) int {
 	switch scheme {
 	case "http":
 		return 80

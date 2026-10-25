@@ -210,6 +210,12 @@ func validateGRPCSchemaDiscoverInput(params grpcSchemaToolParams) error {
 	default:
 		return fmt.Errorf("unsupported scheme %q: only http and https are allowed", params.Scheme)
 	}
+	// USK-1262: the reflection dial (protoschema.resolveReflectionDialTarget)
+	// connects to target_addr's port as net.Dial reads it; require the
+	// strict decimal form so the scope check reads the same port.
+	if _, _, err := resolveDialAuthority(params.TargetAddr, scheme != "http"); err != nil {
+		return fmt.Errorf("invalid target_addr: %w", err)
+	}
 	if err := validateHeaderKVList(params.Metadata, "metadata"); err != nil {
 		return err
 	}

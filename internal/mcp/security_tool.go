@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -337,6 +338,12 @@ func (s *Server) handleTestTarget(params securityParams) (*gomcp.CallToolResult,
 // The reason string from CheckTarget is used to determine the layer when no
 // specific deny rule matched (i.e., "not in X allow list" cases).
 func findMatchedRuleAndLayer(ts *connector.TargetScope, u *url.URL, allowed bool, reason string) (*connector.TargetRule, string) {
+	// CheckURL refused the URL before consulting any rule (USK-1262), so
+	// no rule decided it.
+	if !allowed && reason == connector.ReasonURLPortUninterpretable {
+		return nil, ""
+	}
+
 	policyAllows, policyDenies := ts.PolicyRules()
 	agentAllows, agentDenies := ts.AgentRules()
 
@@ -425,15 +432,15 @@ func validateNotPolicyDenies(ts *connector.TargetScope, removeDenies []connector
 
 // targetDefaultPort returns the port number from the URL port string.
 // If the port string is empty, returns the default port for the scheme.
+// A port outside the strict dial-port rule (isDecimalPort: ASCII digits,
+// 1..65535, leading zeros allowed) yields 0 rather than its digit-run value
+// or an overflowed one (USK-1262).
 func targetDefaultPort(scheme, portStr string) int {
 	if portStr != "" {
-		p := 0
-		for _, c := range portStr {
-			if c < '0' || c > '9' {
-				return 0
-			}
-			p = p*10 + int(c-'0')
+		if !isDecimalPort(portStr) {
+			return 0
 		}
+		p, _ := strconv.Atoi(portStr)
 		return p
 	}
 	switch scheme {

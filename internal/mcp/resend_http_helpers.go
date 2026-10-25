@@ -608,6 +608,8 @@ func resolveResendHTTPDial(msg *envelope.HTTPMessage, overrideHost string) (addr
 // an IPv6 literal ("db.internal:5432:80") or a bracket that does not hold
 // one ("[db.internal:5432]:80") is an error before any dial. Wrapping it
 // in brackets used to hand the scope check the host "db.internal:5432".
+// The resulting port must pass validateDialPort (USK-1262), whether it
+// came from the authority or from target_addr.
 func resolveDialAuthority(authority string, useTLS bool) (addr, sni string, err error) {
 	defaultPort := "80"
 	if useTLS {
@@ -623,11 +625,34 @@ func resolveDialAuthority(authority string, useTLS bool) (addr, sni string, err 
 	if err != nil {
 		return "", "", err
 	}
-	sni, _, err = net.SplitHostPort(addr)
+	var port string
+	sni, port, err = net.SplitHostPort(addr)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid authority %q: %w", authority, err)
 	}
+	if err := validateDialPort(addr, port); err != nil {
+		return "", "", err
+	}
 	return addr, sni, nil
+}
+
+// validateDialPort rejects a dial address whose port is not a decimal
+// number in 1..65535 — connector.SplitTargetHostPort's rule, the same one
+// validateOverrideHost and validateRawTargetAddr enforce (USK-1262).
+//
+// net.Dial wraps a decimal port modulo 2^32 ("127.0.0.1:4294975376"
+// reaches 8080), skips a leading space or "+", and resolves service names
+// ("http" → 80), while the scope check reads a port no ports rule names —
+// or, for a URL built from the authority, judges the whole "host:port" as
+// the hostname. This is input validation, not scope: it applies in open
+// mode too and runs before any scope check, so the address that is
+// checked is the address that is dialled. Only the dial address is
+// validated; the wire authority / Host value stays as written.
+func validateDialPort(addr, port string) error {
+	if !isDecimalPort(port) {
+		return fmt.Errorf("invalid dial address %q: dial port %q must be a decimal number in 1-65535 (net.Dial reads other spellings as a different port than the scope check)", addr, port)
+	}
+	return nil
 }
 
 // checkResendHTTPScope enforces TargetScope rules on both the canonical
