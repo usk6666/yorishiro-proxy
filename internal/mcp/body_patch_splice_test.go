@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -171,4 +172,53 @@ func TestValidateBodyPatch_ValueJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestApplyBodyPatches_JSONPath_Errors pins the error paths (message shapes
+// kept from the decode/re-encode implementation) and that malformed,
+// attacker-controlled bodies produce errors rather than panics.
+func TestApplyBodyPatches_JSONPath_Errors(t *testing.T) {
+	deep := strings.Repeat("[", 10001) + strings.Repeat("]", 10001)
+	tests := []struct {
+		name    string
+		body    string
+		path    string
+		wantErr string
+	}{
+		{"missing_final_key", `{"a":{"b":1}}`, "$.a.c", `json_path key "c" not found`},
+		{"missing_intermediate", `{"a":{"b":1}}`, "$.x.b", `json_path key "x" not found`},
+		{"non_object_intermediate", `{"a":[1]}`, "$.a.b", `json_path key "b": expected object, got array`},
+		{"top_level_array", `[1]`, "$.a", `json_path key "a": expected object, got array`},
+		{"top_level_string", ` "s" `, "$.a", `json_path key "a": expected object, got string`},
+		{"empty_object", `{}`, "$.a", `json_path key "a" not found`},
+		{"truncated", `{"a":1`, "$.a", "body is not valid JSON"},
+		{"trailing_garbage", `{"a":1} x`, "$.a", "body is not valid JSON"},
+		{"empty_body", ``, "$.a", "body is not valid JSON"},
+		{"too_deep", deep, "$.a", "body is not valid JSON"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := applyBodyPatches([]byte(tt.body), []BodyPatch{{JSONPath: tt.path, Value: float64(1)}})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("applyBodyPatches() error = %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// FuzzApplyJSONPathPatch checks the scanner never panics on arbitrary
+// bodies and, whenever it succeeds, yields valid JSON.
+func FuzzApplyJSONPathPatch(f *testing.F) {
+	f.Add([]byte(`{"zeta":1,"alpha":{"y":2,"b":3}}`), "$.alpha.b")
+	f.Add([]byte(`{"a":1,"a":{"b":"\"}"}}`), "$.a.b")
+	f.Add([]byte(`[{"a":1}]`), "$.a")
+	f.Fuzz(func(t *testing.T, body []byte, path string) {
+		got, err := applyBodyPatches(body, []BodyPatch{{JSONPath: path, ValueJSON: `"X"`}})
+		if err != nil {
+			return
+		}
+		if !json.Valid(got) {
+			t.Fatalf("patched body is not valid JSON: %q -> %q", body, got)
+		}
+	})
 }

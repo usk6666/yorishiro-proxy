@@ -72,7 +72,11 @@ Request body interpreted per `body_encoding`. Default empty.
 Set to `true` to override the body to empty (zero-length). Otherwise an omitted/empty `body` field is treated as "no override — keep recorded body" when `flow_id` is set.
 
 ### body_patches (array, optional)
-Body modifications applied on top of any body replacement. Each entry must have either `json_path`+`value` or `regex`+`replace` (mutually exclusive). Optional `encoding` chain is applied to the patch value.
+Body modifications applied on top of any body replacement, in order. Each entry must have either `json_path`+`value` (or `json_path`+`value_json`) or `regex`+`replace` (mutually exclusive). Optional `encoding` chain is applied to the patch value (string `value`s and `replace` only).
+
+- **`json_path`** is a dot path into a JSON object body (`$.a.b`; array indexes are not supported; the final key must already exist). The patch is a byte splice: only the bytes of the target value are replaced — key order, whitespace, escapes, number spelling and every other byte of the body are left exactly as they were. If an object on the path has duplicate keys, the last occurrence is rewritten; earlier occurrences are left as is (use `regex` to target another one).
+- **`value`** is encoded as compact JSON without HTML escaping (`<`, `>`, `&` are written as-is). Numbers and objects in `value` pass through the MCP JSON layer as float64 / map, so integers beyond 2^53 lose precision and object key order is not kept. For exact large integers or raw JSON use `value_json`.
+- **`value_json`** (string) is raw JSON text spliced verbatim as the new value — no re-encoding, so big integers, key order, whitespace (including leading/trailing) and escapes inside it are preserved. It must be valid JSON and cannot be combined with `value`, `encoding` or `regex`. Example: `{"json_path": "$.big", "value_json": "12345678901234567890"}`.
 
 ### override_host (string, optional)
 Redirect the dial target (`host:port`) while preserving the request's `Host`/`:authority`. Useful for wrong-server-routing tests.

@@ -163,7 +163,7 @@ Parameters (key=value or --key=value):
   http.trailers=<json>              Ordered [{name, value}] trailers; full replacement
   http.body=<text|base64>           Body replacement, per http.body_encoding
   http.body_encoding=<enc>          text|base64; default text
-  http.body_patches=<json>          JSON array of {json_path, value} or {regex, replace}, applied after body
+  http.body_patches=<json>          JSON array of {json_path, value|value_json} or {regex, replace}, applied after body
   ws.opcode=<name>                  text|binary|close|ping|pong|continuation (a number: ws.opcode:=1)
   ws.fin=<bool>                     FIN bit
   ws.payload=<text|base64>          Frame payload, per ws.body_encoding
@@ -215,7 +215,7 @@ Parameters (key=value or --key=value):
 
   headers=<json>           Ordered [{name, value}] list as a JSON array. A FULL replacement of the
                            recorded headers (wire case, order and duplicates preserved), not a merge
-  body_patches=<json>      JSON array of {json_path, value} or {regex, replace} patches
+  body_patches=<json>      JSON array of {json_path, value|value_json} or {regex, replace} patches
 
 Examples:
   yorishiro-proxy client resend_http flow_id=abc123

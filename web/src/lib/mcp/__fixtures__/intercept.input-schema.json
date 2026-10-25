@@ -138,7 +138,11 @@
               "replace": {
                 "type": "string"
               },
-              "value": true
+              "value": true,
+              "value_json": {
+                "description": "raw JSON text spliced verbatim as the json_path replacement value, e.g. a big integer 12345678901234567890 passed as a string; exclusive with value and encoding",
+                "type": "string"
+              }
             },
             "type": "object"
           },
