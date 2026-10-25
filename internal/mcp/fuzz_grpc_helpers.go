@@ -1082,8 +1082,13 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	// rebuilt above), and the engine is live, so a policy reload or an
 	// agent `security` change since the plan-time check applies to every
 	// variant not yet sent. Recorded exactly like a safety violation below.
+	//
+	// USK-1371: both rejections leave a metadata-only blocked_by audit
+	// Stream so the row's stream_id names a Stream; it stays empty if
+	// nothing was recorded.
 	if err := s.checkResendGRPCScope(variantPlan); err != nil {
 		row.Error = err.Error()
+		row.StreamID = s.recordFuzzBlockedVariant(ctx, fuzzGRPCBlockedEnvelope(variantPlan), pipeline.BlockedByTargetScope, tag, err)
 		return row, 0, nil, nil
 	}
 
@@ -1094,19 +1099,28 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	// the run loop continues to the next variant.
 	if v := s.checkSafetyInput(concatResendGRPCPayloads(variantPlan), variantPlan.canonicalURL, variantPlan.metadata); v != nil {
 		row.Error = safetyViolationError(v)
+		row.StreamID = s.recordFuzzBlockedVariant(ctx, fuzzGRPCBlockedEnvelope(variantPlan), pipeline.BlockedBySafetyFilter, tag, errors.New(row.Error))
 		return row, 0, nil, nil
 	}
 
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	endEnv, recvData, _, err := s.runResendGRPC(rtCtx, variantPlan, p, flow.OriginFuzz)
+	endEnv, recvData, _, responded, err := s.runResendGRPCDispatch(rtCtx, variantPlan, p, flow.OriginFuzz)
+	// USK-1371: a plugin Drop / Respond on the Start envelope exits the
+	// pipeline before RecordStep opens the Stream and carries no
+	// blocked_by attribution, so nothing is recorded. Blank the ID rather
+	// than return one that names no Stream.
+	if responded || errors.Is(err, errSendDroppedByPipeline) {
+		row.StreamID = ""
+	}
 	// USK-1347 (parity with fuzz_http / fuzz_ws): fuzz_grpc bypasses
 	// session.RunSession, so the per-variant Stream created by RecordStep
 	// must be finalised here (State + Duration + user tag, USK-1362) or
 	// it stays State="active" forever. Use the parent ctx (not rtCtx) so
 	// the terminal UPDATE lands even when the per-variant timeout expired.
-	finalizeResendStream(ctx, s.flowStore.store, variantPlan.streamID, tag, err)
+	// row.StreamID: finalize no-ops on the blanked ID.
+	finalizeResendStream(ctx, s.flowStore.store, row.StreamID, tag, err)
 	if err != nil {
 		return row, 0, nil, err
 	}
@@ -1132,6 +1146,16 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	}
 
 	return row, row.Status, body, nil
+}
+
+// fuzzGRPCBlockedEnvelope builds the Start envelope a variant would have
+// sent, pinned to the variant's StreamID, for the blocked_by audit Stream
+// a scope / Safety rejection records (USK-1371). Only its identity
+// (StreamID, Protocol) is persisted — never the message content.
+func fuzzGRPCBlockedEnvelope(plan *resendGRPCPlan) *envelope.Envelope {
+	env := buildResendGRPCStartEnvelope(plan)
+	env.StreamID = plan.streamID
+	return env
 }
 
 // injectGRPCResponseVars writes the gRPC-specific __response_* reserved

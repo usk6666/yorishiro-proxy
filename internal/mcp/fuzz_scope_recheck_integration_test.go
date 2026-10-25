@@ -37,6 +37,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
+	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 )
 
 // scopeRecheckErrSubstr is the prefix every TargetScope rejection carries
@@ -47,6 +48,15 @@ const scopeRecheckErrSubstr = "request blocked by target scope"
 // TargetScope (the engine the reloader mutates) and returns a client
 // session.
 func setupFuzzScopeRecheckSession(t *testing.T, scope *connector.TargetScope) *gomcp.ClientSession {
+	t.Helper()
+	cs, _ := setupFuzzScopeRecheckSessionWithStore(t, scope)
+	return cs
+}
+
+// setupFuzzScopeRecheckSessionWithStore is setupFuzzScopeRecheckSession
+// that also returns the flow store, for tests asserting the blocked_by
+// audit Stream a denied variant leaves (USK-1371).
+func setupFuzzScopeRecheckSessionWithStore(t *testing.T, scope *connector.TargetScope) (*gomcp.ClientSession, flow.Store) {
 	t.Helper()
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -73,7 +83,17 @@ func setupFuzzScopeRecheckSession(t *testing.T, scope *connector.TargetScope) *g
 		t.Fatalf("client connect: %v", err)
 	}
 	t.Cleanup(func() { cs.Close() })
-	return cs
+	return cs, store
+}
+
+// assertScopeDeniedAuditStreams checks every denied variant (index >= 1 in
+// the reload tests) left a blocked_by=target_scope audit Stream under its
+// stream_id (USK-1371).
+func assertScopeDeniedAuditStreams(t *testing.T, cs *gomcp.ClientSession, store flow.Store, streamIDs []string, protocol, tag string) {
+	t.Helper()
+	for i := 1; i < len(streamIDs); i++ {
+		assertFuzzBlockedAuditStream(t, cs, store, streamIDs[i], protocol, pipeline.BlockedByTargetScope, tag)
+	}
 }
 
 // variantGate counts upstream requests and holds the FIRST one until
@@ -230,7 +250,7 @@ func startGatedRawServer(t *testing.T, g *variantGate) string {
 
 func TestFuzzRaw_ScopeRecheck_ReloadDeniesRemainingVariants(t *testing.T) {
 	scope := allowLoopbackScope()
-	cs := setupFuzzScopeRecheckSession(t, scope)
+	cs, store := setupFuzzScopeRecheckSessionWithStore(t, scope)
 	g := newVariantGate(t)
 	addr := startGatedRawServer(t, g)
 
@@ -239,6 +259,7 @@ func TestFuzzRaw_ScopeRecheck_ReloadDeniesRemainingVariants(t *testing.T) {
 		"positions": []map[string]any{
 			{"path": "payload", "payloads": []string{"v0", "v1", "v2"}},
 		},
+		"tag":        "usk1371-scope-raw",
 		"timeout_ms": 10000,
 	})
 	g.waitArrived(t)
@@ -248,10 +269,13 @@ func TestFuzzRaw_ScopeRecheck_ReloadDeniesRemainingVariants(t *testing.T) {
 	var out fuzzRawResult
 	awaitFuzzResult(t, ch, &out)
 	errs := make([]string, len(out.Variants))
+	ids := make([]string, len(out.Variants))
 	for i, v := range out.Variants {
 		errs[i] = v.Error
+		ids[i] = v.StreamID
 	}
 	assertScopeRecheckRows(t, errs, out.CompletedVariants, out.StoppedReason, g.hits.Load())
+	assertScopeDeniedAuditStreams(t, cs, store, ids, "raw", "usk1371-scope-raw")
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +326,7 @@ func startGatedWSServer(t *testing.T, g *variantGate) string {
 
 func TestFuzzWS_ScopeRecheck_ReloadDeniesRemainingVariants(t *testing.T) {
 	scope := allowLoopbackScope()
-	cs := setupFuzzScopeRecheckSession(t, scope)
+	cs, store := setupFuzzScopeRecheckSessionWithStore(t, scope)
 	g := newVariantGate(t)
 	addr := startGatedWSServer(t, g)
 
@@ -314,6 +338,7 @@ func TestFuzzWS_ScopeRecheck_ReloadDeniesRemainingVariants(t *testing.T) {
 		"positions": []map[string]any{
 			{"path": "payload", "payloads": []string{"v0", "v1", "v2"}},
 		},
+		"tag":        "usk1371-scope-ws",
 		"timeout_ms": 10000,
 	})
 	g.waitArrived(t)
@@ -323,10 +348,13 @@ func TestFuzzWS_ScopeRecheck_ReloadDeniesRemainingVariants(t *testing.T) {
 	var out fuzzWSResult
 	awaitFuzzResult(t, ch, &out)
 	errs := make([]string, len(out.Variants))
+	ids := make([]string, len(out.Variants))
 	for i, v := range out.Variants {
 		errs[i] = v.Error
+		ids[i] = v.StreamID
 	}
 	assertScopeRecheckRows(t, errs, out.CompletedVariants, out.StoppedReason, g.hits.Load())
+	assertScopeDeniedAuditStreams(t, cs, store, ids, "ws", "usk1371-scope-ws")
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +410,7 @@ func TestFuzzGRPC_ScopeRecheck_ServicePositionJudgedOnMutatedPath(t *testing.T) 
 		[]connector.TargetRule{{Hostname: "127.0.0.1"}},
 		[]connector.TargetRule{{Hostname: "127.0.0.1", PathPrefix: "/admin."}},
 	)
-	cs := setupFuzzScopeRecheckSession(t, scope)
+	cs, store := setupFuzzScopeRecheckSessionWithStore(t, scope)
 	upstream := &fuzzGRPCEchoServer{}
 	addr, shutdown := startFuzzGRPCUpstream(t, upstream)
 	defer shutdown()
@@ -396,6 +424,7 @@ func TestFuzzGRPC_ScopeRecheck_ServicePositionJudgedOnMutatedPath(t *testing.T) 
 		"positions": []map[string]any{
 			{"path": "service", "payloads": []string{fuzzGRPCServiceName, "admin.Secret"}},
 		},
+		"tag":        "usk1371-scope-grpc",
 		"timeout_ms": 10000,
 	})
 	var out fuzzGRPCResult
@@ -410,6 +439,7 @@ func TestFuzzGRPC_ScopeRecheck_ServicePositionJudgedOnMutatedPath(t *testing.T) 
 		t.Errorf("variants[1].error = %q, want a %q rejection — the mutated :path /admin.Secret/... reached the wire (status=%d %s)",
 			out.Variants[1].Error, scopeRecheckErrSubstr, out.Variants[1].Status, codes.Code(out.Variants[1].Status))
 	}
+	assertScopeDeniedAuditStreams(t, cs, store, []string{out.Variants[0].StreamID, out.Variants[1].StreamID}, "grpc", "usk1371-scope-grpc")
 }
 
 // ---------------------------------------------------------------------------
@@ -646,7 +676,7 @@ func TestFuzzHTTP_ScopeRecheck_AuthorityPlusPathDeniedOnDialTarget(t *testing.T)
 		[]connector.TargetRule{{Hostname: "127.0.0.1"}, {Hostname: "decoy.test"}},
 		[]connector.TargetRule{{Hostname: "127.0.0.1", PathPrefix: "/admin"}},
 	)
-	cs := setupFuzzScopeRecheckSession(t, scope)
+	cs, store := setupFuzzScopeRecheckSessionWithStore(t, scope)
 	rec := &pathRecorder{}
 	upstream := httptest.NewServer(rec.handler())
 	t.Cleanup(upstream.Close)
@@ -661,12 +691,19 @@ func TestFuzzHTTP_ScopeRecheck_AuthorityPlusPathDeniedOnDialTarget(t *testing.T)
 			{"path": "authority", "payloads": []string{authority, "decoy.test"}},
 			{"path": "path", "payloads": []string{"/public", "/admin"}},
 		},
+		"tag":        "usk1371-scope-http",
 		"timeout_ms": 10000,
 	})
 	var out fuzzHTTPResult
 	awaitFuzzResult(t, ch, &out)
 	assertFuzzHTTPRowsByPayload(t, out, 4, func(p map[string]string) bool { return p["path"] == "/admin" })
 	assertNoDeniedPathOnWire(t, rec, "/admin")
+	// USK-1371: every denied row names a blocked_by=target_scope audit Stream.
+	for _, v := range out.Variants {
+		if v.Payloads["path"] == "/admin" {
+			assertFuzzBlockedAuditStream(t, cs, store, v.StreamID, "http", pipeline.BlockedByTargetScope, "usk1371-scope-http")
+		}
+	}
 }
 
 // TestFuzzHTTP_ScopeRecheck_SchemePlusPathDeniedOnPlaintextDial pins the

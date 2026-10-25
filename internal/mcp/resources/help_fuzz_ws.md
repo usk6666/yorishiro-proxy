@@ -100,7 +100,7 @@ The `fuzz_macro_results` table (one row per hook invocation) keys on `(fuzz_id, 
 - `fuzz_id` (string, UUID) — primary key of the `fuzz_jobs` row created for this run. Chain with `query { resource: "fuzz_results", filter: { fuzz_id: "...", outliers_only: true } }` to surface outlier variants without re-running the fuzz job (USK-836 + USK-278).
 - `total_variants`, `completed_variants`, `stopped_reason`
 - `variants[]` — per-variant compact rows:
-  - `index`, `stream_id`
+  - `index`, `stream_id` — for a variant blocked before it was sent (target scope, SafetyFilter, budget) `stream_id` names a metadata-only audit Stream (`state: "error"`, `blocked_by: "target_scope" | "safety_filter" | "budget"`, no flows); empty when nothing was recorded
   - `opcode`, `fin` — terminating frame metadata
   - `payload_size` (int): terminating frame payload byte length. Full payload retrievable via `query` keyed by `stream_id`. (Storing the full payload would let a malicious upstream amplify memory use up to 1000 × 16 MiB; CWE-770. `close_reason` stays on the row because RFC 6455 §5.5.1 caps Close payloads at 125 bytes.)
   - `compressed` (bool)
