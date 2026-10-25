@@ -26,8 +26,10 @@ export { McpClient } from "./client.js";
 export type { McpClientConfig, McpClientEvent, McpClientEventListener } from "./client.js";
 
 // Context & Provider
-export { McpProvider, useMcpContext } from "./context.js";
-export type { McpContextValue, McpProviderProps } from "./context.js";
+export { McpProvider } from "./McpProvider.js";
+export type { McpProviderProps } from "./McpProvider.js";
+export { useMcpContext } from "./context.js";
+export type { McpContextValue } from "./context.js";
 
 // Hooks
 export {

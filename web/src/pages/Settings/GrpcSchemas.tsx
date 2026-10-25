@@ -686,7 +686,6 @@ export function GrpcSchemas() {
                           // Stable per-row key: insertion-order index is
                           // sufficient because rows are append-only and
                           // removal preserves remaining order.
-                          // eslint-disable-next-line react/no-array-index-key
                           key={`grpc-discover-meta-${idx}`}
                           style={{
                             display: "flex",

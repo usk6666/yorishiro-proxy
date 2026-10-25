@@ -6,7 +6,7 @@ import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
 import { Tabs } from "../../components/ui/Tabs.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useToast } from "../../components/ui/toastContext.js";
 import { useMcpContext } from "../../lib/mcp/context.js";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import type {
@@ -567,44 +567,44 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
     [],
   );
 
-  // --- Build typed positions array from the form. Returns null on
-  //     validation failure (and surfaces a toast). ---
-  function buildPositions<
-    P extends FuzzHTTPPosition | FuzzWSPosition | FuzzGRPCPosition | FuzzRawPosition,
-  >(): P[] | null {
-    const built: P[] = [];
-    for (const p of positions) {
-      if (!p.path.trim()) continue; // skip empty rows
-      const payloads = splitPayloads(p.payloadsText);
-      if (payloads.length === 0) {
+  // --- Submit handler ---
+  const handleSubmit = useCallback(async () => {
+    // --- Build typed positions array from the form. Returns null on
+    //     validation failure (and surfaces a toast). ---
+    function buildPositions<
+      P extends FuzzHTTPPosition | FuzzWSPosition | FuzzGRPCPosition | FuzzRawPosition,
+    >(): P[] | null {
+      const built: P[] = [];
+      for (const p of positions) {
+        if (!p.path.trim()) continue; // skip empty rows
+        const payloads = splitPayloads(p.payloadsText);
+        if (payloads.length === 0) {
+          addToast({
+            type: "warning",
+            message: `Position '${p.path}' must have at least one payload`,
+          });
+          return null;
+        }
+        const pos = {
+          path: p.path.trim(),
+          payloads,
+        } as P;
+        // Encoding is optional; default "text" matches backend default.
+        if (p.encoding && p.encoding !== "text") {
+          (pos as { encoding?: string }).encoding = p.encoding;
+        }
+        built.push(pos);
+      }
+      if (built.length === 0) {
         addToast({
           type: "warning",
-          message: `Position '${p.path}' must have at least one payload`,
+          message: "At least one position with a path and payloads is required",
         });
         return null;
       }
-      const pos = {
-        path: p.path.trim(),
-        payloads,
-      } as P;
-      // Encoding is optional; default "text" matches backend default.
-      if (p.encoding && p.encoding !== "text") {
-        (pos as { encoding?: string }).encoding = p.encoding;
-      }
-      built.push(pos);
+      return built;
     }
-    if (built.length === 0) {
-      addToast({
-        type: "warning",
-        message: "At least one position with a path and payloads is required",
-      });
-      return null;
-    }
-    return built;
-  }
 
-  // --- Submit handler ---
-  const handleSubmit = useCallback(async () => {
     if (!client || mcpStatus !== "connected") {
       addToast({
         type: "error",

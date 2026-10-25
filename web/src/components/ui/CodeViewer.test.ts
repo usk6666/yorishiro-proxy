@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   walkHighlightedRoot,
   type NodeLike,
-} from "./CodeViewer.js";
+} from "./highlightWalker.js";
 import {
   isValidElement,
   type ReactElement,

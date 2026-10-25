@@ -2,9 +2,9 @@ import { useCallback, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
-import { useDialog } from "../../components/ui/Dialog.js";
+import { useDialog } from "../../components/ui/dialogContext.js";
 import { Spinner } from "../../components/ui/Spinner.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useToast } from "../../components/ui/toastContext.js";
 import { generateCurl } from "../../lib/export/curl.js";
 import { buildHar, downloadHar } from "../../lib/export/har.js";
 import {

@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
-import { useToast } from "../../components/ui/Toast.js";
+import { useToast } from "../../components/ui/toastContext.js";
 import { useManage, useQuery } from "../../lib/mcp/hooks.js";
 
 // ---------------------------------------------------------------------------
