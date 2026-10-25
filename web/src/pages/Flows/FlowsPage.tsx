@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { HttpVersionBadge } from "../../components/flow/HttpVersionBadge.js";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { useDialog } from "../../components/ui/dialogContext.js";
@@ -843,6 +844,7 @@ export function FlowsPage() {
                       <Badge variant={protocolVariant(flow.protocol)}>
                         {flow.protocol}
                       </Badge>
+                      <HttpVersionBadge flow={flow} />
                       {flow.tags?.streaming_type === "sse" && (
                         <Badge variant="warning">SSE</Badge>
                       )}

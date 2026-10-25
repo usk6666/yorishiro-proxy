@@ -148,9 +148,7 @@ function buildEntry(flow: FlowDetailResult): HarEntry {
 }
 
 function buildEntryFromListItem(flow: FlowEntry): HarEntry {
-  // `query resource=flows` entries carry no http_version, so list exports
-  // use the same fallback as a flow without a recorded version.
-  const httpVersion = harHttpVersion(undefined);
+  const httpVersion = harHttpVersion(flow.http_version);
 
   return {
     startedDateTime: flow.timestamp,
