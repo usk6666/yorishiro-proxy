@@ -296,22 +296,24 @@ func streamToHARWebSocket(st *Stream, flows []*Flow) *HAREntry {
 			if reqFlow == nil && f.Method != "" {
 				reqFlow = f
 			} else {
+				opcode := parseOpcode(f.Metadata)
 				wsMessages = append(wsMessages, &HARWebSocketMessage{
 					Type:   "send",
 					Time:   float64(f.Timestamp.UnixMilli()) / 1000.0,
-					Opcode: parseOpcode(f.Metadata),
-					Data:   wsFlowData(f),
+					Opcode: opcode,
+					Data:   wsFlowData(f, opcode),
 				})
 			}
 		case "receive":
 			if respFlow == nil && f.StatusCode != 0 {
 				respFlow = f
 			} else {
+				opcode := parseOpcode(f.Metadata)
 				wsMessages = append(wsMessages, &HARWebSocketMessage{
 					Type:   "receive",
 					Time:   float64(f.Timestamp.UnixMilli()) / 1000.0,
-					Opcode: parseOpcode(f.Metadata),
-					Data:   wsFlowData(f),
+					Opcode: opcode,
+					Data:   wsFlowData(f, opcode),
 				})
 			}
 		}
@@ -632,12 +634,15 @@ func extractIP(addr string) string {
 	return addr
 }
 
-// parseOpcode extracts the WebSocket opcode from flow metadata.
+// parseOpcode extracts the WebSocket opcode from flow metadata. The key is
+// the one pipeline RecordStep writes (projectWSMessage: "ws_opcode", a
+// decimal string). A missing or unparsable value yields 0 because the HAR
+// opcode field is a required int.
 func parseOpcode(metadata map[string]string) int {
 	if metadata == nil {
 		return 0
 	}
-	if s, ok := metadata["opcode"]; ok {
+	if s, ok := metadata["ws_opcode"]; ok {
 		if v, err := strconv.Atoi(s); err == nil {
 			return v
 		}
@@ -645,13 +650,16 @@ func parseOpcode(metadata map[string]string) int {
 	return 0
 }
 
-// wsFlowData returns the WebSocket flow data as a string.
-// Binary data is base64-encoded.
-func wsFlowData(f *Flow) string {
+// wsFlowData returns the WebSocket flow data as a string. Only a Text
+// frame (opcode 1) with a valid UTF-8 payload is emitted verbatim; every
+// other frame (Binary, Close, Ping, Pong, Continuation) and any non-UTF-8
+// payload is base64-encoded, so the data encoding follows the opcode
+// rather than whether the bytes happen to look like text.
+func wsFlowData(f *Flow, opcode int) string {
 	if len(f.Body) == 0 {
 		return ""
 	}
-	if utf8.Valid(f.Body) {
+	if opcode == 1 && utf8.Valid(f.Body) {
 		return string(f.Body)
 	}
 	return base64.StdEncoding.EncodeToString(f.Body)

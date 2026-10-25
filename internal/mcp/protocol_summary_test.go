@@ -12,8 +12,8 @@ import (
 func TestBuildProtocolSummary_CanonicalSpellings(t *testing.T) {
 	t.Run("ws", func(t *testing.T) {
 		msgs := []*flow.Flow{
-			{Sequence: 0, Direction: "send", Metadata: map[string]string{"opcode": "1"}},
-			{Sequence: 1, Direction: "receive", Metadata: map[string]string{"opcode": "8"}},
+			{Sequence: 0, Direction: "send", Metadata: map[string]string{"ws_opcode": "1"}},
+			{Sequence: 1, Direction: "receive", Metadata: map[string]string{"ws_opcode": "8"}},
 		}
 		summary := buildProtocolSummary("ws", msgs)
 		if summary == nil {
@@ -29,7 +29,7 @@ func TestBuildProtocolSummary_CanonicalSpellings(t *testing.T) {
 
 	t.Run("grpc", func(t *testing.T) {
 		msgs := []*flow.Flow{
-			{Sequence: 0, Direction: "send", Metadata: map[string]string{"service": "S", "method": "M"}},
+			{Sequence: 0, Direction: "send", Metadata: map[string]string{"grpc_service": "S", "grpc_method": "M"}},
 			{Sequence: 1, Direction: "receive", Metadata: map[string]string{"grpc_status": "0"}},
 		}
 		summary := buildProtocolSummary("grpc", msgs)
@@ -43,7 +43,7 @@ func TestBuildProtocolSummary_CanonicalSpellings(t *testing.T) {
 
 	t.Run("grpc-web", func(t *testing.T) {
 		msgs := []*flow.Flow{
-			{Sequence: 0, Direction: "send", Metadata: map[string]string{"service": "S", "method": "M"}},
+			{Sequence: 0, Direction: "send", Metadata: map[string]string{"grpc_service": "S", "grpc_method": "M"}},
 		}
 		summary := buildProtocolSummary("grpc-web", msgs)
 		if summary == nil {

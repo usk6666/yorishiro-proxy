@@ -39,16 +39,19 @@ type BinaryDisplayMode = "hex" | "base64";
 
 /** WebSocket opcode constants (RFC 6455 Section 11.8). */
 const WS_OPCODE = {
-  TEXT: "1",
-  BINARY: "2",
-  CLOSE: "8",
-  PING: "9",
-  PONG: "10",
+  CONTINUATION: 0,
+  TEXT: 1,
+  BINARY: 2,
+  CLOSE: 8,
+  PING: 9,
+  PONG: 10,
 } as const;
 
-/** Map opcode string to a human-readable label. */
-function opcodeLabel(opcode: string): string {
+/** Map an opcode to a human-readable label. */
+function opcodeLabel(opcode: number): string {
   switch (opcode) {
+    case WS_OPCODE.CONTINUATION:
+      return "Continuation";
     case WS_OPCODE.TEXT:
       return "Text";
     case WS_OPCODE.BINARY:
@@ -60,13 +63,13 @@ function opcodeLabel(opcode: string): string {
     case WS_OPCODE.PONG:
       return "Pong";
     default:
-      return `0x${Number(opcode).toString(16)}`;
+      return `0x${opcode.toString(16)}`;
   }
 }
 
-/** Get the Badge variant for an opcode. */
+/** Get the Badge variant for an opcode (null = not a WS frame). */
 function opcodeBadgeVariant(
-  opcode: string,
+  opcode: number | null,
 ): "default" | "success" | "warning" | "danger" | "info" {
   switch (opcode) {
     case WS_OPCODE.TEXT:
@@ -85,12 +88,22 @@ function opcodeBadgeVariant(
 }
 
 /** Check if the opcode indicates a control frame. */
-function isControlFrame(opcode: string): boolean {
+function isControlFrame(opcode: number | null): boolean {
   return (
     opcode === WS_OPCODE.CLOSE ||
     opcode === WS_OPCODE.PING ||
     opcode === WS_OPCODE.PONG
   );
+}
+
+/**
+ * Parse a recorded decimal metadata value (e.g. ws_opcode, ws_close_code).
+ * Returns null for a missing or non-decimal value so that `Number("")`
+ * (= 0) cannot fabricate a Continuation opcode or a status code.
+ */
+function parseDecimal(value: string | undefined): number | null {
+  if (value === undefined || !/^[0-9]{1,6}$/.test(value)) return null;
+  return Number(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +130,7 @@ const CLOSE_CODES: Record<number, string> = {
 };
 
 /** Parse a Close frame body into status code and reason. */
-function parseCloseFrame(body: string, encoding: string): { code: number; reason: string; codeDescription: string } | null {
+function parseCloseFrame(body: string, encoding: string): WSCloseInfo | null {
   if (!body) return null;
 
   let bytes: Uint8Array;
@@ -174,9 +187,45 @@ export interface WSFrameInfo {
   close: WSCloseInfo | null;
 }
 
-/** Classify a message entry of a WS stream for display. */
-export function wsFrameInfo(_msg: MessageEntry): WSFrameInfo {
-  return { opcode: null, label: "", close: null };
+/**
+ * Classify a message entry of a WS stream for display.
+ *
+ * Reads the Metadata keys the proxy's RecordStep writes: ws_opcode for
+ * every frame, ws_close_code / ws_close_reason for Close frames. The Close
+ * body is parsed only when those keys are absent. Rows without ws_opcode
+ * (the HTTP upgrade request / 101 response in the same stream) get a
+ * neutral label instead of an opcode.
+ */
+export function wsFrameInfo(msg: MessageEntry): WSFrameInfo {
+  const opcode = parseDecimal(msg.metadata?.ws_opcode);
+  if (opcode === null) {
+    const isHttp = Boolean(msg.method) || Boolean(msg.status_code);
+    return { opcode: null, label: isHttp ? "HTTP" : "?", close: null };
+  }
+  let close: WSCloseInfo | null = null;
+  if (opcode === WS_OPCODE.CLOSE) {
+    close = closeFromMetadata(msg) ?? parseCloseFrame(msg.body, msg.body_encoding);
+  }
+  return { opcode, label: opcodeLabel(opcode), close };
+}
+
+/** Close status from ws_close_code / ws_close_reason; null when absent. */
+function closeFromMetadata(msg: MessageEntry): WSCloseInfo | null {
+  const code = parseDecimal(msg.metadata?.ws_close_code);
+  if (code === null) return null;
+  const reason = msg.metadata?.ws_close_reason ?? "";
+  // RFC 6455 §7.4: a Close frame without a status code is recorded as "0".
+  if (code === 0) {
+    return { code: null, codeDescription: "no status code", reason };
+  }
+  return { code, codeDescription: CLOSE_CODES[code] ?? "Unknown", reason };
+}
+
+/** One-line Close status text: "1000 Normal Closure - bye". */
+function closeSummary(close: WSCloseInfo): string {
+  const status =
+    close.code === null ? close.codeDescription : `${close.code} ${close.codeDescription}`;
+  return close.reason ? `${status} - ${close.reason}` : status;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,20 +400,18 @@ export function WebSocketMessageList({
       {/* Message list */}
       <div className="sd-ws-message-list">
         {messages.map((msg) => {
-          const opcode = msg.metadata?.opcode ?? "";
+          const frame = wsFrameInfo(msg);
+          const opcode = frame.opcode;
           const isSend = msg.direction === "send";
           const isExpanded = expandedId === msg.id;
           const size = bodyByteSize(msg.body, msg.body_encoding);
           const isControl = isControlFrame(opcode);
-          const closeInfo =
-            opcode === WS_OPCODE.CLOSE
-              ? parseCloseFrame(msg.body, msg.body_encoding)
-              : null;
+          const closeInfo = frame.close;
 
           // Build content preview
           let preview: string;
-          if (opcode === WS_OPCODE.CLOSE && closeInfo) {
-            preview = `${closeInfo.code} ${closeInfo.codeDescription}${closeInfo.reason ? ` - ${closeInfo.reason}` : ""}`;
+          if (closeInfo) {
+            preview = closeSummary(closeInfo);
           } else if (msg.body_encoding === "base64") {
             preview = `(binary ${formatSize(size)})`;
           } else if (isControl) {
@@ -394,7 +441,7 @@ export function WebSocketMessageList({
                   {isSend ? "\u2191" : "\u2193"}
                 </span>
                 <Badge variant={opcodeBadgeVariant(opcode)}>
-                  {opcodeLabel(opcode)}
+                  {frame.label}
                 </Badge>
                 <span className="sd-ws-msg-size">{formatSize(size)}</span>
                 <span className="sd-ws-msg-time">
@@ -474,13 +521,11 @@ export function WebSocketMessageDetail({
   onJsonPrettyChange,
   onClose,
 }: WebSocketMessageDetailProps) {
-  const opcode = message.metadata?.opcode ?? "";
+  const frame = wsFrameInfo(message);
+  const opcode = frame.opcode;
   const isBinary = message.body_encoding === "base64";
-  const isClose = opcode === WS_OPCODE.CLOSE;
   const size = bodyByteSize(message.body, message.body_encoding);
-  const closeInfo = isClose
-    ? parseCloseFrame(message.body, message.body_encoding)
-    : null;
+  const closeInfo = frame.close;
 
   // Detect JSON for text messages.
   const bodyIsJson = !isBinary && isJsonString(message.body);
@@ -510,11 +555,7 @@ export function WebSocketMessageDetail({
           <span className="sd-message-detail-title">
             Message #{message.sequence}
           </span>
-          <Badge
-            variant={opcodeBadgeVariant(opcode)}
-          >
-            {opcodeLabel(opcode)}
-          </Badge>
+          <Badge variant={opcodeBadgeVariant(opcode)}>{frame.label}</Badge>
           <span
             className={`sd-ws-msg-direction ${message.direction === "send" ? "sd-ws-msg-direction--send" : "sd-ws-msg-direction--recv"}`}
           >
@@ -528,12 +569,14 @@ export function WebSocketMessageDetail({
       </div>
 
       {/* Close frame info */}
-      {isClose && closeInfo && (
+      {closeInfo && (
         <div className="sd-ws-close-info">
           <div className="sd-meta-item">
             <span className="sd-meta-label">Status Code</span>
             <span className="sd-meta-value">
-              {closeInfo.code} ({closeInfo.codeDescription})
+              {closeInfo.code === null
+                ? closeInfo.codeDescription
+                : `${closeInfo.code} (${closeInfo.codeDescription})`}
             </span>
           </div>
           {closeInfo.reason && (

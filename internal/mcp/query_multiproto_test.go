@@ -252,7 +252,7 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 		Method:    "POST",
 		URL:       parsedURL,
 		Body:      []byte("grpc-request"),
-		Metadata:  map[string]string{"service": "UserService", "method": "GetUser"},
+		Metadata:  map[string]string{"grpc_service": "UserService", "grpc_method": "GetUser"},
 	}
 	if err := store.SaveFlow(ctx, sendMsg); err != nil {
 		t.Fatalf("AppendMessage: %v", err)

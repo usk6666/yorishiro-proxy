@@ -32,10 +32,11 @@ func buildWebSocketSummary(msgs []*flow.Flow) map[string]string {
 		"message_count": strconv.Itoa(len(msgs)),
 	}
 
-	// Find the last frame type from the last message's opcode.
+	// Find the last frame type from the last message's opcode. The key is
+	// the one pipeline RecordStep writes (projectWSMessage: "ws_opcode").
 	if len(msgs) > 0 {
 		last := msgs[len(msgs)-1]
-		if opcode, ok := last.Metadata["opcode"]; ok {
+		if opcode, ok := last.Metadata["ws_opcode"]; ok {
 			summary["last_frame_type"] = wsOpcodeLabel(opcode)
 		}
 	}
@@ -48,12 +49,15 @@ func buildGRPCSummary(msgs []*flow.Flow) map[string]string {
 	summary := map[string]string{}
 
 	// Extract gRPC service/method from the first send message's metadata.
+	// The input keys are the ones pipeline RecordStep writes
+	// (projectGRPCStart / projectGRPCData: "grpc_service" / "grpc_method");
+	// the summary's output keys stay "service" / "method".
 	for _, msg := range msgs {
 		if msg.Direction == "send" {
-			if svc, ok := msg.Metadata["service"]; ok {
+			if svc, ok := msg.Metadata["grpc_service"]; ok {
 				summary["service"] = svc
 			}
-			if method, ok := msg.Metadata["method"]; ok {
+			if method, ok := msg.Metadata["grpc_method"]; ok {
 				summary["method"] = method
 			}
 			break
