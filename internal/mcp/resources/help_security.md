@@ -356,7 +356,13 @@ Rate limits use the same two-layer architecture as target scope. The Policy Laye
 
 Requests that exceed rate limits receive a `429 Too Many Requests` response. At the connection-level gates -- an HTTP CONNECT tunnel request and the plain HTTP forward proxy -- that is `HTTP/1.1 429 Too Many Requests` with body `yorishiro-proxy: target blocked by rate limit`, after which the connection closes; no tunnel is opened and the target is not contacted. Elsewhere the response carries an `X-Blocked-By: rate_limit` header.
 
-**Applicability**: Both Policy Layer and Agent Layer rate limits apply to **all** proxy traffic -- transparent MITM traffic (HTTP CONNECT tunnel, plain HTTP forward proxy, SOCKS5 tunnel) and MCP tool-initiated requests (the same list as for `target_scope`). The effective rate (the stricter of policy and agent) is shared across both paths.
+**Applicability**: Both Policy Layer and Agent Layer rate limits apply to **all** proxy traffic -- live proxied traffic (HTTP CONNECT tunnel, plain HTTP forward proxy, SOCKS5 tunnel, and every route of a `transparent_mode` listener) and MCP tool-initiated requests (the same list as for `target_scope`). The effective rate (the stricter of policy and agent) is shared across both paths.
+
+**Transparent listener** (`transparent_mode: "redirect"`): the limit is checked once per connection, after the target scope check (a scope-refused connection consumes no token) and before any upstream contact; requests on a kept-alive connection are not re-checked. The per-host key is the **original-destination IP** (the dial target), so virtual hosts or CDN names served from one IP share one per-host bucket, separate from the CONNECT gate's bucket for the same name. A connection over the limit is refused as follows, and every refusal is recorded as an error Stream with `blocked_by: "rate_limit"`, `failure_reason: "rate_limit"`, `tags.route`, `tags.target` (original destination), `tags.rate_limit_type` (`global` / `per_host`) and `tags.rate_limit_effective_rps`, plus an Info log `transparent target blocked by rate limit`:
+
+- Plain HTTP route: the same `HTTP/1.1 429 Too Many Requests` bytes as the CONNECT / forward gates, then the connection closes.
+- TLS (both the MITM and the passthrough classes): the connection is reset before any TLS byte is written -- no 429 is sent inside TLS. The Stream is `tls-handshake` with `tags.name` = SNI and the client's JA3 / JA4 on its connection info.
+- Other passthrough routes (server-first, opaque, h2c): the connection is reset with no byte written.
 
 ### `set_rate_limits`
 

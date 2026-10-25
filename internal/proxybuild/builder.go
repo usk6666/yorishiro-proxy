@@ -118,8 +118,9 @@ type Deps struct {
 	// Pipeline.
 	RecordScope *flow.RecordScope
 
-	// RateLimiter is the per-host rate-limit policy applied to CONNECT
-	// and SOCKS5 negotiations. nil = unlimited.
+	// RateLimiter is the rate-limit policy applied per connection at the
+	// CONNECT, plain-HTTP forward and SOCKS5 gates and on every
+	// transparent-listener route (USK-1374). nil = unlimited.
 	RateLimiter *connector.RateLimiter
 
 	// BudgetManager enforces the diagnostic-session budget

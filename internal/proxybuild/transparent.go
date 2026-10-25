@@ -66,6 +66,7 @@ func configureTransparentListener(flCfg *connector.FullListenerConfig, deps Deps
 		BuildCfg:    deps.BuildConfig,
 		Scope:       deps.Scope,
 		LiveConns:   deps.LiveConns,
+		RateLimiter: deps.RateLimiter,
 		NameBinder:  connector.NewNameBindingCache(deps.NameResolver, connector.NameBindingConfig{}),
 		PeekTimeout: deps.TransparentPeekTimeout,
 		Observer:    newTransparentRecorder(deps.FlowStore, listenerName, logger, deps.RecordScope),
@@ -256,7 +257,8 @@ func (r *transparentRecorder) OnComplete(_ context.Context, obs connector.Transp
 }
 
 // OnBlocked implements connector.TransparentObserver: a refused
-// connection (BlockedBy target_scope), a failed upstream dial, or a
+// connection (BlockedBy target_scope or rate_limit — USK-1374: the
+// denial's rate_limit_* tags merged in), a failed upstream dial, or a
 // failed TLS MITM handshake (USK-1317: the SNI as "name", the error as
 // "error", the client's JA3 / JA4 on ConnInfo). No upstream socket was
 // handed to a Layer, so ServerAddr stays empty.
@@ -283,6 +285,9 @@ func (r *transparentRecorder) OnBlocked(ctx context.Context, b connector.Transpa
 	}
 	if b.Error != "" {
 		tags["error"] = b.Error
+	}
+	for k, v := range b.Tags {
+		tags[k] = v
 	}
 	st := &flow.Stream{
 		ID:            streamID,
