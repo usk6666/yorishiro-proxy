@@ -1,0 +1,20 @@
+# Tools run by `make lint-workflows`. Single source of truth for their versions
+# and integrity pins: CI runs the same `make` target, so local == CI.
+# tools/lint-workflows/install.sh validates this file's shape on every run.
+#
+#   <tool> <vX.Y.Z> <pin>...
+#   checksums=<sha256>     sha256 of the release's *_checksums.txt (covers all platforms)
+#   <os>_<arch>=<sha256>   sha256 of that platform's release asset
+#
+# Bumping: pick a release at least 7 days old (the repo's release-age rule),
+# take the hashes from the release assets themselves, and re-run the target.
+# All are build-time tools run as separate executables and never shipped, so
+# they are outside the Dependency License Policy (CLAUDE.md); shellcheck is GPL-3.0.
+pinact     v5.0.0  checksums=ea650a629b9b2aaceb98b9b421ae302aca3087a3bc8aeadd777e8b6f16b5c2c6
+ghalint    v1.5.6  checksums=3f64dc66a4aa379ab7361bab31cbb5e3a591aa0f38ae2575b94a48129e161e21
+actionlint v1.7.12 checksums=433028cf0ba3c42163ea1a668dedce30fcdbe84fe912b1a5e288c006eab8a4f5
+# shellcheck publishes no checksums file: per-platform .tar.gz hashes.
+shellcheck v0.11.0 linux_amd64=b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6 linux_arm64=68a8133197a50beb8803f8d42f9908d1af1c5540d4bb05fdfca8c1fa47decefc darwin_amd64=c2c15e08df0e8fbc374c335b230a7ee958c313fa5714817a59aa59f1aa594f51 darwin_arm64=339b930feb1ea764467013cc1f72d09cd6b869ebf1013296ba9055ab2ffbd26f
+# yq's `checksums` file is multi-column and needs checksums_hashes_order to
+# read; per-platform binary hashes instead (cross-checked against that file).
+yq         v4.54.1 linux_amd64=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f linux_arm64=189088da0c6429ec5178dfaab1a114805f6cab0b61b165ab236efedf1d57a71b darwin_amd64=3a812fce205a4d67014fb71b7fa297092210e580df3d8f52dddc2cf3a599c22b darwin_arm64=fee511a181bd8b3e6b7da98842b41973bfac8cd3bcd341ed29a584620b5b2844

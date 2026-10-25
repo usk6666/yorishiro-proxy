@@ -1,0 +1,18 @@
+# ghalint policy config for `make lint-workflows`.
+#
+# Rule ownership is split so each concern has exactly one gate:
+#   pinact   -- action pinning: every `uses:` is a full commit SHA AND its
+#               `# vX.Y.Z` comment resolves to that same commit (--verify-comment
+#               catches the annotated-tag-object SHA class that PR #105 fixed).
+#   ghalint  -- everything else it checks: job permissions, secrets and App-token
+#               scoping, container tags, timeout-minutes, persist-credentials.
+#
+# action_ref_should_be_full_length_commit_sha is pinact's job, so ghalint's copy
+# is switched off for every action ("*/*" and "*/*/*" cover owner/repo and
+# owner/repo/path refs). Keeping both would report one mistake twice, and only
+# pinact can also tell a wrong SHA from a right one.
+excludes:
+  - policy_name: action_ref_should_be_full_length_commit_sha
+    action_name: "*/*"
+  - policy_name: action_ref_should_be_full_length_commit_sha
+    action_name: "*/*/*"
