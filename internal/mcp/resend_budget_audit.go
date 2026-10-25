@@ -93,6 +93,11 @@ func (s *Server) budgetCheckResendUpgrade(ctx context.Context, env *envelope.Env
 // flow.OriginResend for resend dispatches and flow.OriginFuzz for fuzz
 // dispatches so the query tool's `origin` filter buckets blocked rows
 // alongside their successful siblings (USK-786).
+// recordBlockedStream is a red-phase scaffold for USK-1371.
+func recordBlockedStream(_ context.Context, _ flow.StreamWriter, _ *envelope.Envelope, _, _ string, _ flow.Origin) bool {
+	return false
+}
+
 func recordBudgetBlockedStream(ctx context.Context, store flow.StreamWriter, env *envelope.Envelope, streamID string, origin flow.Origin) {
 	if store == nil || env == nil || streamID == "" {
 		return
