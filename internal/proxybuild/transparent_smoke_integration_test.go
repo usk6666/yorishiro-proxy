@@ -457,6 +457,10 @@ func TestTransparent_ServerFirst_BannerRelayed_Smoke(t *testing.T) {
 	if st.Tags["target"] != up.addr().String() {
 		t.Errorf("Tags[target] = %q, want %s", st.Tags["target"], up.addr())
 	}
+	// USK-1318: every transparent Stream carries the original destination.
+	if st.Tags["original_dst"] != up.addr().String() {
+		t.Errorf("Tags[original_dst] = %q, want %s", st.Tags["original_dst"], up.addr())
+	}
 	if st.ListenerName != transparentListenerName {
 		t.Errorf("ListenerName = %q", st.ListenerName)
 	}

@@ -1947,6 +1947,77 @@ func TestSQLiteStore_HostFilter_TagsTarget(t *testing.T) {
 	}
 }
 
+// TestSQLiteStore_HostFilter_TagsOriginalDst pins that filter.host finds a
+// transparent-mode Stream by its original destination (tags.original_dst)
+// when server_addr is an upstream proxy (USK-1318).
+func TestSQLiteStore_HostFilter_TagsOriginalDst(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	rows := []struct {
+		originalDst string
+		serverAddr  string
+	}{
+		{originalDst: "192.0.2.10:443", serverAddr: "127.0.0.1:3128"},
+		{originalDst: "[2001:db8::1]:80", serverAddr: "127.0.0.1:3128"},
+		{originalDst: "192.0.2.100:443", serverAddr: "127.0.0.1:3128"},
+		// A proxy-only row must not match the destination filter.
+		{serverAddr: "127.0.0.1:3128"},
+	}
+	for i, r := range rows {
+		st := &Stream{
+			Protocol:  "http",
+			State:     "complete",
+			Timestamp: now.Add(time.Duration(i) * time.Millisecond),
+			ConnInfo:  &ConnectionInfo{ServerAddr: r.serverAddr},
+		}
+		if r.originalDst != "" {
+			st.Tags = map[string]string{"original_dst": r.originalDst, "sni": "named.example"}
+		}
+		if err := store.SaveStream(ctx, st); err != nil {
+			t.Fatalf("SaveStream(%+v): %v", r, err)
+		}
+	}
+
+	tests := []struct {
+		name string
+		host string
+		want []string
+	}{
+		{"host only", "192.0.2.10", []string{"192.0.2.10:443"}},
+		{"host:port exact", "192.0.2.10:443", []string{"192.0.2.10:443"}},
+		{"IPv6 exact", "[2001:db8::1]:80", []string{"[2001:db8::1]:80"}},
+		{"IP prefix does not match", "192.0.2.1", nil},
+		{"non-matching IP", "198.51.100.7", nil},
+		{"wrong port", "192.0.2.10:80", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := StreamListOptions{Host: tt.host}
+			streams, err := store.ListStreams(ctx, opts)
+			if err != nil {
+				t.Fatalf("ListStreams(Host=%q): %v", tt.host, err)
+			}
+			var got []string
+			for _, st := range streams {
+				got = append(got, st.Tags["original_dst"])
+			}
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("ListStreams(Host=%q) original_dst = %q, want %q", tt.host, got, tt.want)
+			}
+			n, err := store.CountStreams(ctx, opts)
+			if err != nil {
+				t.Fatalf("CountStreams(Host=%q): %v", tt.host, err)
+			}
+			if n != len(tt.want) {
+				t.Errorf("CountStreams(Host=%q) = %d, want %d", tt.host, n, len(tt.want))
+			}
+		})
+	}
+}
+
 // TestSQLiteStore_HostFilter_InvalidTagsJSON pins that the tags.target leg
 // of the host filter tolerates a row whose tags column is not valid JSON
 // (a hand-crafted or imported database): the query neither errors nor
