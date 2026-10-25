@@ -994,7 +994,11 @@ func upgradeResendTLS(ctx context.Context, transport httputilpkg.TLSTransport, c
 //
 // If the pipeline drops or responds short-circuits the send, runResendHTTP
 // returns the produced response envelope (or nil for Drop) without
-// performing the network round-trip.
+// performing the network round-trip. responded reports a Send-side
+// Respond (plugin custom response): the pipeline stopped before RecordStep
+// saw the send, so no Stream row exists for env.StreamID. An unlabelled
+// Drop returns errSendDroppedByPipeline for the same reason; the caller
+// blanks the returned stream_id on either (USK-1375).
 //
 // USK-818: send-direction Drops with BlockedBy="budget" trigger a
 // minimal state="error" + blocked_by="budget" audit Stream via the
@@ -1002,9 +1006,9 @@ func upgradeResendTLS(ctx context.Context, transport httputilpkg.TLSTransport, c
 // fall through to the legacy "dropped by pipeline" error without
 // recording an audit row — matches the live data path's selective
 // recording policy.
-func (s *Server) runResendHTTP(ctx context.Context, env *envelope.Envelope, dial session.DialFunc, p *pipeline.Pipeline) (*envelope.Envelope, error) {
+func (s *Server) runResendHTTP(ctx context.Context, env *envelope.Envelope, dial session.DialFunc, p *pipeline.Pipeline) (respEnv *envelope.Envelope, responded bool, err error) {
 	if p == nil {
-		return nil, errors.New("resend pipeline is nil")
+		return nil, false, errors.New("resend pipeline is nil")
 	}
 
 	sendEnv, action, custom, blockedBy := p.RunWithBlockedBy(ctx, env)
@@ -1012,32 +1016,33 @@ func (s *Server) runResendHTTP(ctx context.Context, env *envelope.Envelope, dial
 	case pipeline.Drop:
 		if blockedBy == pipeline.BlockedByBudget {
 			recordBudgetBlockedStream(ctx, s.flowStore.store, sendEnv, sendEnv.StreamID, flow.OriginResend)
-			return nil, errBudgetExhausted
+			return nil, false, errBudgetExhausted
 		}
-		return nil, errors.New("send envelope dropped by pipeline")
+		return nil, false, errSendDroppedByPipeline
 	case pipeline.Respond:
 		// Custom response short-circuit. Tie the response to the send's
 		// StreamID and record it so analysts see the synthetic reply
 		// alongside the request.
 		if custom == nil {
-			return nil, errors.New("pipeline returned Respond with nil response envelope")
+			return nil, false, errors.New("pipeline returned Respond with nil response envelope")
 		}
 		custom.StreamID = sendEnv.StreamID
 		custom.Sequence = 1
 		_, _, _ = p.Run(ctx, custom)
-		return custom, nil
+		return custom, true, nil
 	}
 
 	ch, err := dial(ctx, sendEnv)
 	if err != nil {
-		return nil, fmt.Errorf("dial: %w", err)
+		return nil, false, fmt.Errorf("dial: %w", err)
 	}
 	defer ch.Close()
 
 	if err := ch.Send(ctx, sendEnv); err != nil {
-		return nil, fmt.Errorf("upstream send: %w", err)
+		return nil, false, fmt.Errorf("upstream send: %w", err)
 	}
-	return receiveResendHTTPResponse(ctx, ch, p, sendEnv.StreamID)
+	respEnv, err = receiveResendHTTPResponse(ctx, ch, p, sendEnv.StreamID)
+	return respEnv, false, err
 }
 
 // maxResendHTTPInterimResponses bounds how many 1xx interim responses

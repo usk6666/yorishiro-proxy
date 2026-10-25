@@ -515,7 +515,7 @@ func TestBudget_ResendWS_AuditStreamStaysOriginResend(t *testing.T) {
 }
 
 // TestBudget_ResendGRPC_AuditStreamStaysOriginResend is the regression
-// guard for the shared runResendGRPC seam: resend_grpc keeps
+// guard for the shared runResendGRPCDispatch seam: resend_grpc keeps
 // origin=resend.
 func TestBudget_ResendGRPC_AuditStreamStaysOriginResend(t *testing.T) {
 	bm := newBudgetOneManager()

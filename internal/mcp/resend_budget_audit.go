@@ -61,12 +61,13 @@ import (
 // non-empty fields (USK-818).
 var errBudgetExhausted = errors.New("request blocked: budget exhausted")
 
-// errSendDroppedByPipeline is returned by the fuzz_http exchange and the
-// shared gRPC dispatch (runResendGRPC) when the Send-side pipeline drops
-// the envelope WITHOUT a blocked_by attribution (a plugin Drop). Nothing
-// is recorded for such a drop — RecordStep never ran and the live path
-// records no audit row for an unlabelled Drop either — so fuzz callers
-// match it with errors.Is to blank the variant's stream_id (USK-1371).
+// errSendDroppedByPipeline is returned by the resend_http / fuzz_http
+// exchanges and the shared gRPC dispatch (runResendGRPCDispatch) when the
+// Send-side pipeline drops the envelope WITHOUT a blocked_by attribution
+// (a plugin Drop). Nothing is recorded for such a drop — RecordStep never
+// ran and the live path records no audit row for an unlabelled Drop
+// either — so callers match it with errors.Is to blank the stream_id they
+// would otherwise return (USK-1371, USK-1375).
 var errSendDroppedByPipeline = errors.New("send envelope dropped by pipeline")
 
 // budgetCheckResendUpgrade is the WS / SSE / raw equivalent of the

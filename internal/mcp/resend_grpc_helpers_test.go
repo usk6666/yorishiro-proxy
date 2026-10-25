@@ -858,7 +858,7 @@ func TestRebuildFuzzGRPCCanonicalURL_FollowsPlanSchemeNotUseTLS(t *testing.T) {
 // USK-1056 failure-path advisory.
 //
 // plan.warnings is only ever attached to result.Warnings, which is built
-// after runResendGRPC succeeds — so on the one topology this change
+// after runResendGRPCDispatch succeeds — so on the one topology this change
 // knowingly breaks (a tcp_forwards plaintext client leg fronting an
 // upstream_tls upstream, where the observed TLS belongs to a hop beyond the
 // recorded :authority) the caller would see a bare handshake error with
