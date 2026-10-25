@@ -1062,7 +1062,7 @@ func (s *Server) runFuzzWSSingleVariant(ctx context.Context, plan *fuzzWSPlan, p
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	respEnv, err := s.runResendWS(rtCtx, variantPlan, sendEnv, p)
+	respEnv, err := s.runResendWS(rtCtx, variantPlan, sendEnv, p, flow.OriginFuzz)
 	// USK-882 (parity with USK-789 for resend_ws + USK-832 for fuzz_http):
 	// fuzz_ws bypasses session.RunSession so the proxy-path's OnComplete-
 	// driven Stream finalisation never fires. Without this, the per-variant

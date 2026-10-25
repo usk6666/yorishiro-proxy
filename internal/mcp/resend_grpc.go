@@ -44,6 +44,8 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // resendGRPCInput is the typed input for the resend_grpc tool.
@@ -248,7 +250,7 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 	warnings := append(append([]string(nil), plan.warnings...),
 		s.collectResendGRPCUnknownFieldWarnings(ctx, &input, plan)...)
 
-	endEnv, recvData, recvStartMeta, err := s.runResendGRPC(rtCtx, plan, pipe)
+	endEnv, recvData, recvStartMeta, err := s.runResendGRPC(rtCtx, plan, pipe, flow.OriginResend)
 	// USK-789: resend bypasses session.RunSession so the proxy path's
 	// OnComplete-driven Stream finalisation never fires. Mirror the
 	// contract here so the new Stream transitions out of State="active"

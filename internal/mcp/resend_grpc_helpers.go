@@ -1014,7 +1014,12 @@ func (s *Server) buildResendGRPCPipeline(encoders *pipeline.WireEncoderRegistry)
 // is nil when the stream terminated without a trailer HEADERS frame —
 // callers surface this in the result as "end omitted" and may inspect
 // the Channel's terminal Err() via the Layer.
-func (s *Server) runResendGRPC(ctx context.Context, plan *resendGRPCPlan, p *pipeline.Pipeline) (*envelope.Envelope, []*envelope.Envelope, []envelope.KeyValue, error) {
+//
+// origin is the caller's flow.Origin (flow.OriginResend from resend_grpc,
+// flow.OriginFuzz from fuzz_grpc). It stamps the budget audit Stream left
+// when BudgetStep drops the Start envelope, so it must match the
+// WithOrigin value of the caller's pipeline.
+func (s *Server) runResendGRPC(ctx context.Context, plan *resendGRPCPlan, p *pipeline.Pipeline, origin flow.Origin) (*envelope.Envelope, []*envelope.Envelope, []envelope.KeyValue, error) {
 	if p == nil {
 		return nil, nil, nil, errors.New("resend pipeline is nil")
 	}
@@ -1028,7 +1033,7 @@ func (s *Server) runResendGRPC(ctx context.Context, plan *resendGRPCPlan, p *pip
 	switch action {
 	case pipeline.Drop:
 		if blockedBy == pipeline.BlockedByBudget {
-			recordBudgetBlockedStream(ctx, s.flowStore.store, postStart, plan.streamID, flow.OriginResend)
+			recordBudgetBlockedStream(ctx, s.flowStore.store, postStart, plan.streamID, origin)
 			return nil, nil, nil, errBudgetExhausted
 		}
 		return nil, nil, nil, errors.New("send envelope dropped by pipeline")

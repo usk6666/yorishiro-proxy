@@ -24,11 +24,9 @@ const (
 	// OriginResend marks streams created by the resend_* MCP tools
 	// (resend_http / resend_ws / resend_grpc / resend_raw).
 	OriginResend Origin = "resend"
-	// OriginFuzz is reserved for streams created by fuzz campaigns. It
-	// is enumerated for forward compatibility but no production write
-	// path stamps this value yet — that wiring lives in a follow-up
-	// Issue. Existing fuzz streams continue to record as OriginProxy
-	// until the fuzz path is updated.
+	// OriginFuzz marks streams created by the fuzz_* MCP tools
+	// (fuzz_http / fuzz_ws / fuzz_grpc / fuzz_raw), including the
+	// blocked_by="budget" audit Streams of over-budget trials.
 	OriginFuzz Origin = "fuzz"
 )
 
@@ -93,8 +91,8 @@ type Stream struct {
 	BlockedBy string
 	// Origin classifies how the Stream came into existence (USK-785).
 	// OriginProxy for live MITM-recorded traffic, OriginResend for streams
-	// created by the resend_* MCP tools, OriginFuzz reserved for fuzz
-	// campaigns (not yet written from any production path). Empty string
+	// created by the resend_* MCP tools, OriginFuzz for streams created by
+	// the fuzz_* MCP tools. Empty string
 	// is treated as OriginProxy by readers that want backward compatibility
 	// with pre-schemaV12 rows; the SQLite column itself defaults to 'proxy'.
 	Origin Origin

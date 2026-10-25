@@ -1100,7 +1100,7 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	endEnv, recvData, _, err := s.runResendGRPC(rtCtx, variantPlan, p)
+	endEnv, recvData, _, err := s.runResendGRPC(rtCtx, variantPlan, p, flow.OriginFuzz)
 	// USK-1347 (parity with fuzz_http / fuzz_ws): fuzz_grpc bypasses
 	// session.RunSession, so the per-variant Stream created by RecordStep
 	// must be finalised here (State + Duration + user tag, USK-1362) or

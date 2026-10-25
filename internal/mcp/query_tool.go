@@ -340,7 +340,7 @@ var validFilterStates = []string{"active", "complete", "error"}
 var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "intercept_cancelled", "rate_limit", "safety_filter", "budget", "capacity"}
 
 // validFilterOrigins lists valid values for filter.origin (USK-786).
-// Mirrors flow.Origin constants; "fuzz" is reserved for forward compatibility.
+// Mirrors flow.Origin constants.
 var validFilterOrigins = []string{"proxy", "resend", "fuzz"}
 
 // validFilterFuzzJobStatuses lists valid values for filter.status (fuzz_jobs).
