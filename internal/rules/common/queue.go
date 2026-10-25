@@ -218,6 +218,15 @@ func (q *HoldQueue) TimeoutBehavior() TimeoutBehavior {
 
 // Hold enqueues an envelope and blocks until an action is received,
 // the context is cancelled, or the timeout expires.
+//
+// Buffer ownership. The queue stores a Clone of env, which Retains env's
+// disk-backed buffers (Envelope.RawBuffer, HTTPMessage.BodyBuffer). Hold
+// releases that clone's references exactly once, on return, after the
+// entry has left the queue — so no Get / List can clone it afterwards.
+// A returned ActionModifyAndForward action transfers ownership of
+// action.Modified (and the references it holds) to the caller. When Hold
+// returns an error instead, any Modified envelope that was delivered is
+// released here.
 func (q *HoldQueue) Hold(ctx context.Context, env *envelope.Envelope, matchedRules []string) (*HoldAction, error) {
 	id := uuid.New().String()
 	actionCh := make(chan HoldAction, 1)
@@ -234,9 +243,14 @@ func (q *HoldQueue) Hold(ctx context.Context, env *envelope.Envelope, matchedRul
 	// Check capacity.
 	if q.maxItems > 0 && len(q.items) >= q.maxItems {
 		q.mu.Unlock()
+		entry.Envelope.ReleaseBuffers()
 		return &HoldAction{Type: ActionRelease}, nil
 	}
 	q.items[id] = entry
+	// Every return below happens after the entry left q.items (Release /
+	// Clear delete it before delivering an action; the ctx and timer arms
+	// remove it), so this is the clone's last user.
+	defer entry.Envelope.ReleaseBuffers()
 	timeout := q.timeout
 	behavior := q.behavior
 	// Per-protocol override resolution (USK-855). Honour the Envelope's
@@ -262,10 +276,23 @@ func (q *HoldQueue) Hold(ctx context.Context, env *envelope.Envelope, matchedRul
 	case action := <-actionCh:
 		return &action, nil
 	case <-ctx.Done():
-		q.remove(id)
+		if !q.remove(id) {
+			// A Release or Clear claimed the entry first; its action is
+			// already buffered in actionCh (delivered under q.mu). Nobody
+			// will forward it, so release what it carries.
+			action := <-actionCh
+			if action.Modified != nil {
+				action.Modified.ReleaseBuffers()
+			}
+		}
 		return nil, ctx.Err()
 	case <-timer.C:
-		q.remove(id)
+		if !q.remove(id) {
+			// A Release or Clear raced the timer and won: honour the
+			// action that was delivered rather than the timeout default.
+			action := <-actionCh
+			return &action, nil
+		}
 		switch behavior {
 		case TimeoutAutoDrop:
 			return &HoldAction{Type: ActionDrop}, nil
@@ -276,21 +303,31 @@ func (q *HoldQueue) Hold(ctx context.Context, env *envelope.Envelope, matchedRul
 }
 
 // Release provides an action for a held entry, unblocking the Hold() caller.
+//
+// On success ownership of action.Modified passes to the queue (and from it
+// to the Hold caller). On error — the entry is gone, typically because the
+// hold timed out or its session ended — the caller still owns
+// action.Modified and must release its buffer references.
 func (q *HoldQueue) Release(id string, action *HoldAction) error {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	entry, ok := q.items[id]
 	if !ok {
-		q.mu.Unlock()
 		return fmt.Errorf("held entry %q not found", id)
 	}
 	delete(q.items, id)
-	q.mu.Unlock()
-
+	// Deliver under the lock: actionCh is buffered(1) and this is its only
+	// sender for the entry (whoever deletes the entry from items sends), so
+	// the send cannot block. Delivering before unlocking lets Hold's ctx /
+	// timer arms rely on "entry missing from items ⇒ action buffered".
 	entry.actionCh <- *action
 	return nil
 }
 
-// List returns all currently held entries. Returns cloned envelopes.
+// List returns all currently held entries. Returns cloned envelopes; each
+// clone holds its own references on the held envelope's disk-backed
+// buffers, so the caller must call Envelope.ReleaseBuffers on every
+// returned entry once it is done with it.
 func (q *HoldQueue) List() []*HeldEntry {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -311,7 +348,9 @@ func (q *HoldQueue) List() []*HeldEntry {
 	return result
 }
 
-// Get returns a specific held entry by ID.
+// Get returns a specific held entry by ID. Like List, the returned
+// envelope is a clone the caller owns and must release with
+// Envelope.ReleaseBuffers.
 func (q *HoldQueue) Get(id string) (*HeldEntry, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -363,10 +402,17 @@ func (q *HoldQueue) Clear() {
 	q.items = make(map[string]*HeldEntry)
 }
 
-func (q *HoldQueue) remove(id string) {
+// remove deletes id from the queue and reports whether it was still there.
+// false means a Release or Clear already claimed the entry and delivered an
+// action to its actionCh.
+func (q *HoldQueue) remove(id string) bool {
 	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, ok := q.items[id]; !ok {
+		return false
+	}
 	delete(q.items, id)
-	q.mu.Unlock()
+	return true
 }
 
 func cloneStrings(s []string) []string {
