@@ -206,11 +206,13 @@ type queryInput struct {
 // queryFilter contains filter options for the flows and fuzz resources.
 type queryFilter struct {
 	// Protocol filters flows by canonical Message-type family. Accepted values:
-	// http, ws, grpc, grpc-web, sse, raw, tls-handshake. Each family expands
-	// across all wire spellings recorded for it (e.g. protocol=http matches
-	// HTTP/1.x, HTTPS, HTTP/2 and their SOCKS5+ variants). To find all TLS flows
-	// regardless of HTTP version, use scheme=https instead.
-	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter — canonical Message-type family: http, ws, grpc, grpc-web, sse, raw, tls-handshake. Each family expands across all wire spellings. Use scheme=https to find all TLS flows regardless of HTTP version."`
+	// http, ws, grpc, grpc-web, sse, raw, tls-handshake. The value is matched
+	// exactly against Stream.Protocol (no expansion): Streams recorded under a
+	// legacy spelling ("HTTP/1.x", "HTTPS", "HTTP/2", "SOCKS5+HTTPS", ... —
+	// from pre-RFC-001 databases or JSONL imports) are not matched by any
+	// canonical value. To find all TLS flows regardless of HTTP version, use
+	// scheme=https instead.
+	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter — canonical Message-type family: http, ws, grpc, grpc-web, sse, raw, tls-handshake. Matched exactly against the recorded Stream.Protocol; rows stored under legacy spellings (e.g. HTTP/2, SOCKS5+HTTPS) are not matched. Use scheme=https to find all TLS flows regardless of HTTP version."`
 	// Scheme filters flows by Stream.Scheme — the wire-observed handshake
 	// transport ("http", "https", "tcp"). Per USK-848, WebSocket Streams keep
 	// the handshake transport (http or https); they do NOT record "ws"/"wss".
@@ -259,13 +261,18 @@ type queryFilter struct {
 	// Host filters flows by host (matches server_addr, tags.target or URL host).
 	Host string `json:"host,omitempty" jsonschema:"host filter for flows (matches server_addr, tags.target or URL host, e.g. example.com)"`
 	// BodyContains filters fuzz_results by response body substring.
-	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter (fuzz_results)"`
+	// Rejected on resource=flows (validateFlowFilters).
+	BodyContains string `json:"body_contains,omitempty" jsonschema:"response body substring filter; applies to fuzz_results only (rejected on flows)"`
 	// OutliersOnly filters fuzz_results to return only outlier results.
-	OutliersOnly bool `json:"outliers_only,omitempty" jsonschema:"return only outlier fuzz results (by status_code, body_length, or timing)"`
+	// Rejected on resource=flows (validateFlowFilters).
+	OutliersOnly bool `json:"outliers_only,omitempty" jsonschema:"return only outlier fuzz results (by status_code, body_length, or timing); applies to fuzz_results only (rejected on flows)"`
 	// Status filters fuzz_jobs by status (e.g. "running", "completed").
-	Status string `json:"status,omitempty" jsonschema:"fuzz job status filter (e.g. running, completed)"`
-	// Tag filters fuzz_jobs by tag (exact match).
-	Tag string `json:"tag,omitempty" jsonschema:"fuzz job tag filter (exact match)"`
+	// Rejected on resource=flows (validateFlowFilters).
+	Status string `json:"status,omitempty" jsonschema:"fuzz job status filter (e.g. running, completed); applies to fuzz_jobs only (rejected on flows)"`
+	// Tag is an exact-match tag filter. On fuzz_jobs it matches the job
+	// tag; on flows it matches Stream.Tags["tag"], the label resend_* /
+	// fuzz_* record from their tag parameter. Not trimmed or case-folded.
+	Tag string `json:"tag,omitempty" jsonschema:"exact-match tag filter. fuzz_jobs: job tag; flows: Stream.Tags[\"tag\"] set by resend_* / fuzz_* from their tag parameter"`
 }
 
 // availableResources lists all valid resource names for error messages.
@@ -413,6 +420,9 @@ func validateEnum(param, value string, valid []string) error {
 // validateFlowFilters validates enum filter parameters for the flows resource.
 func validateFlowFilters(input queryInput) error {
 	if input.Filter != nil {
+		if err := rejectFuzzOnlyFlowFilters(input.Filter); err != nil {
+			return err
+		}
 		if err := validateEnum("protocol", input.Filter.Protocol, validFilterProtocols); err != nil {
 			return err
 		}
@@ -447,6 +457,21 @@ func validateFlowFilters(input queryInput) error {
 	}
 	if err := validateEnum("sort_by", input.SortBy, validFlowSortByValues); err != nil {
 		return err
+	}
+	return nil
+}
+
+// rejectFuzzOnlyFlowFilters rejects filter fields that only the fuzz
+// resources read, so a caller of resource=flows cannot mistake an ignored
+// filter for "no match".
+func rejectFuzzOnlyFlowFilters(f *queryFilter) error {
+	switch {
+	case f.BodyContains != "":
+		return fmt.Errorf("filter.body_contains is not supported on resource=flows: it applies to fuzz_results only")
+	case f.OutliersOnly:
+		return fmt.Errorf("filter.outliers_only is not supported on resource=flows: it applies to fuzz_results only")
+	case f.Status != "":
+		return fmt.Errorf("filter.status is not supported on resource=flows: it applies to fuzz_jobs only (use filter.state for the flow lifecycle state)")
 	}
 	return nil
 }
@@ -492,7 +517,8 @@ func (s *Server) registerQuery() {
 			"Set 'resource' to one of those values; 'id' supplies the flow/macro/messages ID and 'fuzz_id' " +
 			"supplies the fuzz job ID. 'filter' / 'fields' / 'sort_by' / 'limit' / 'offset' shape result sets. " +
 			"Protocol filter accepts canonical Message-type families (http, ws, grpc, grpc-web, sse, raw, tls-handshake) " +
-			"each expanding across all wire spellings; use scheme=https to find all TLS flows regardless of HTTP version. " +
+			"matched exactly against the recorded Stream.Protocol (legacy-spelling rows such as HTTP/2 are not matched); " +
+			"use scheme=https to find all TLS flows regardless of HTTP version. " +
 			"Modified flows surface both original and modified variants (variant=original|modified). " +
 			"For large bodies that would exceed the MCP token cap on flow / messages, pass " +
 			"include_bodies=false (metadata only) or body_max_bytes=N (per-side byte cap). " +
@@ -795,7 +821,12 @@ type queryFlowsEntry struct {
 	ID       string `json:"id"`
 	Protocol string `json:"protocol"`
 	Scheme   string `json:"scheme,omitempty"`
-	State    string `json:"state"`
+	// HTTPVersion is the wire HTTP version of the head message, resolved
+	// exactly as resource=flow does (resolveHTTPVersion). WS / SSE streams
+	// report their HTTP head's version; non-HTTP streams and pre-USK-788
+	// rows omit it.
+	HTTPVersion string `json:"http_version,omitempty"`
+	State       string `json:"state"`
 	// FailureReason carries the canonical layer.ErrorCode label
 	// (refused / canceled / aborted / internal_error / protocol_error)
 	// or one of the recorder-specific labels (e.g. "upstream_tls_error",
@@ -870,16 +901,19 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 		opts.ConnID = input.Filter.ConnID
 		opts.ListenerName = input.Filter.ListenerName
 		opts.Host = input.Filter.Host
+		opts.Tag = input.Filter.Tag
 	}
 	return opts
 }
 
-// extractFlowSummary extracts the method, URL, and status code of the flows
-// list entry from the head message of each direction (USK-1343), so the list
-// and the flow detail agree: a WebSocket stream lists its Upgrade GET / 101
-// and a modified head lists its modified variant.
-func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode int) {
+// extractFlowSummary extracts the method, URL, status code, and HTTP
+// version of the flows list entry from the head message of each direction
+// (USK-1343), so the list and the flow detail agree: a WebSocket stream
+// lists its Upgrade GET / 101 and a modified head lists its modified
+// variant.
+func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode int, httpVersion string) {
 	cat := categorizeMessages(msgs)
+	httpVersion = resolveHTTPVersion(cat)
 	if cat.sendMsg != nil {
 		method = cat.sendMsg.Method
 		if cat.sendMsg.URL != nil {
@@ -889,7 +923,7 @@ func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode in
 	if cat.recvMsg != nil {
 		statusCode = cat.recvMsg.StatusCode
 	}
-	return method, urlStr, statusCode
+	return method, urlStr, statusCode, httpVersion
 }
 
 // headSourceFlows returns the rows the head projection (categorizeMessages /
@@ -967,13 +1001,14 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 		if err != nil {
 			return nil, nil, fmt.Errorf("get semantic messages for flow %s: %w", fl.ID, err)
 		}
-		method, urlStr, statusCode := extractFlowSummary(headMsgs)
+		method, urlStr, statusCode, httpVersion := extractFlowSummary(headMsgs)
 		summary := buildProtocolSummary(fl.Protocol, msgs)
 
 		entries = append(entries, queryFlowsEntry{
 			ID:              fl.ID,
 			Protocol:        fl.Protocol,
 			Scheme:          fl.Scheme,
+			HTTPVersion:     httpVersion,
 			State:           fl.State,
 			FailureReason:   fl.FailureReason,
 			ListenerName:    fl.ListenerName,

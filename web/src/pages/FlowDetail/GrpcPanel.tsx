@@ -76,36 +76,6 @@ function grpcStatusVariant(
   }
 }
 
-/** Human-readable label for gRPC streaming type. */
-function streamTypeLabel(flowType: string): string {
-  switch (flowType) {
-    case "unary":
-      return "Unary";
-    case "stream":
-      return "Streaming";
-    case "bidirectional":
-      return "Bidi Streaming";
-    default:
-      return flowType;
-  }
-}
-
-/** Badge variant for streaming type. */
-function streamTypeBadgeVariant(
-  flowType: string,
-): "default" | "success" | "warning" | "danger" | "info" {
-  switch (flowType) {
-    case "unary":
-      return "default";
-    case "stream":
-      return "info";
-    case "bidirectional":
-      return "warning";
-    default:
-      return "default";
-  }
-}
-
 /** Well-known gRPC metadata header prefixes that should be displayed in metadata table. */
 const GRPC_METADATA_PREFIXES = [
   "grpc-",
@@ -436,16 +406,9 @@ export function GrpcPanel({ flow, messages }: GrpcPanelProps) {
           {/* Service / Method */}
           <ServiceMethodDisplay service={service} method={method} />
 
-          {/* Status + Stream Type badges row */}
+          {/* Status badges row. No unary/streaming badge: the recording
+              cannot know RPC cardinality without the proto schema. */}
           <div className="sd-grpc-badges">
-            {/* Stream Type badge */}
-            <div className="sd-meta-item">
-              <span className="sd-meta-label">Stream Type</span>
-              <Badge variant={streamTypeBadgeVariant(flow.flow_type)}>
-                {streamTypeLabel(flow.flow_type)}
-              </Badge>
-            </div>
-
             {/* gRPC Status */}
             {grpcStatus && (
               <div className="sd-meta-item">

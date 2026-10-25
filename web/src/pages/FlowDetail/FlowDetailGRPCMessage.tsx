@@ -3,7 +3,8 @@
  * message timeline. Covers both gRPC and gRPC-Web flows.
  *
  * Reuses the existing GrpcPanel for the structured Start/Data/End view and
- * the generic MessageList for streaming RPCs.
+ * the generic MessageList for the per-frame timeline. Unary and streaming
+ * RPCs are rendered the same way: the recording does not classify them.
  */
 
 import type { FlowDetailResult, MessageEntry } from "../../lib/mcp/types.js";
@@ -19,8 +20,6 @@ export interface FlowDetailGRPCMessageProps {
   limit: number;
   loading: boolean;
   onPageChange: (offset: number) => void;
-  /** When false, the streaming message list is hidden (e.g. unary RPCs). */
-  showMessageTimeline: boolean;
 }
 
 export function FlowDetailGRPCMessage({
@@ -31,25 +30,22 @@ export function FlowDetailGRPCMessage({
   limit,
   loading,
   onPageChange,
-  showMessageTimeline,
 }: FlowDetailGRPCMessageProps) {
   return (
     <>
       <GrpcPanel flow={flow} messages={messages} />
-      {showMessageTimeline && (
-        <div className="sd-section">
-          <h2 className="sd-section-title">Messages</h2>
-          <MessageList
-            messages={messages ?? []}
-            total={total ?? 0}
-            offset={offset}
-            limit={limit}
-            loading={loading}
-            onPageChange={onPageChange}
-            protocol={flow.protocol}
-          />
-        </div>
-      )}
+      <div className="sd-section">
+        <h2 className="sd-section-title">Messages</h2>
+        <MessageList
+          messages={messages ?? []}
+          total={total ?? 0}
+          offset={offset}
+          limit={limit}
+          loading={loading}
+          onPageChange={onPageChange}
+          protocol={flow.protocol}
+        />
+      </div>
     </>
   );
 }

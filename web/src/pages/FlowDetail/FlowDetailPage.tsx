@@ -8,7 +8,7 @@ import { useToast } from "../../components/ui/toastContext.js";
 import { generateCurl } from "../../lib/export/curl.js";
 import { buildHar, downloadHar } from "../../lib/export/har.js";
 import {
-  isStreamingFlow,
+  needsMessagesQuery,
   pickFlowDetailKind,
   protocolVariant,
 } from "../../lib/mcp/dispatch.js";
@@ -98,7 +98,7 @@ export function FlowDetailPage() {
   const { showDialog } = useDialog();
   const { manage, loading: executeLoading } = useManage();
 
-  // Messages pagination state (for streaming flows)
+  // Messages pagination state (for message-timeline protocols)
   const [messagesOffset, setMessagesOffset] = useState(0);
   const messagesLimit = 50;
 
@@ -113,7 +113,8 @@ export function FlowDetailPage() {
     enabled: !!id,
   });
 
-  // Fetch messages for streaming flows
+  // Fetch messages for every protocol that renders a message timeline
+  // (all but a single HTTP exchange).
   const {
     data: messagesData,
     loading: messagesLoading,
@@ -121,7 +122,7 @@ export function FlowDetailPage() {
     id: id ?? "",
     limit: messagesLimit,
     offset: messagesOffset,
-    enabled: !!id && !!flowData && isStreamingFlow(flowData),
+    enabled: !!id && needsMessagesQuery(flowData),
   });
 
   // Delete flow handler
@@ -241,7 +242,6 @@ export function FlowDetailPage() {
     );
   }
 
-  const streaming = isStreamingFlow(flowData);
   const messages: MessageEntry[] =
     messagesData?.messages ?? flowData.message_preview ?? [];
   const totalMessages = messagesData?.total ?? flowData.message_count ?? 0;
@@ -361,10 +361,6 @@ export function FlowDetailPage() {
             <span className="sd-meta-value">
               {formatTimestamp(flowSafe.timestamp ?? "")}
             </span>
-          </div>
-          <div className="sd-meta-item">
-            <span className="sd-meta-label">Type</span>
-            <Badge variant="default">{flowSafe.flow_type || "unknown"}</Badge>
           </div>
           <div className="sd-meta-item">
             <span className="sd-meta-label">State</span>
@@ -505,7 +501,6 @@ export function FlowDetailPage() {
             limit={messagesLimit}
             loading={messagesLoading}
             onPageChange={handleMessagesPageChange}
-            showMessageTimeline={streaming}
           />
           <FlowDetailHTTPMessage flow={flowSafe} />
         </>
@@ -535,7 +530,6 @@ export function FlowDetailPage() {
           limit={messagesLimit}
           loading={messagesLoading}
           onPageChange={handleMessagesPageChange}
-          showMessageTimeline={streaming}
         />
       )}
 

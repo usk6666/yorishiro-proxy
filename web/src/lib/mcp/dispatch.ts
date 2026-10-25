@@ -20,6 +20,15 @@ import type {
   PluginIntrospectResult,
 } from "./types.js";
 
+/**
+ * The fields HTTP version helpers read. Both `query resource=flow` results
+ * and `query resource=flows` entries satisfy it.
+ */
+export interface HttpVersionedFlow {
+  protocol: string;
+  http_version?: string;
+}
+
 /** The five Message-typed display kinds the FlowDetail page renders. */
 export type FlowDetailKind = "http" | "ws" | "grpc" | "raw" | "sse";
 
@@ -144,14 +153,13 @@ export function pickFuzzTool(
  * Whether a flow is HTTP/2 (h2 over TLS or h2c cleartext).
  *
  * HTTP/2 streams are recorded as `protocol: "http"`; the wire version lives
- * in `http_version` ("h2" / "h2c"), which `query resource=flow` returns.
+ * in `http_version` ("h2" / "h2c"), which both `query resource=flow` and
+ * `query resource=flows` entries return.
  * gRPC / gRPC-Web also ride on HTTP/2 but are their own protocol families
  * and are not reported here. Legacy rows whose `protocol` is itself an
  * HTTP/2 spelling ("HTTP/2", "h2") count even without `http_version`.
  */
-export function isHttp2(
-  flow: Pick<FlowDetailResult, "protocol" | "http_version"> | null | undefined,
-): boolean {
+export function isHttp2(flow: HttpVersionedFlow | null | undefined): boolean {
   if (!flow) return false;
   if (pickFlowDetailKind(flow.protocol) !== "http") return false;
   const proto = (flow.protocol ?? "").toLowerCase();
@@ -209,17 +217,18 @@ export function protocolVariant(
 }
 
 /**
- * Whether a flow uses one of the streaming flow_types that produces a per-message
- * timeline (WebSocket, gRPC server/client/bidi streaming, SSE).
- *
- * Mirrors FlowDetailPage's local helper but accepts a partial flow shape so it
- * can be unit tested without constructing a full FlowDetailResult.
+ * Whether FlowDetail needs the per-message `query resource=messages` call
+ * for this flow. Decided by protocol family alone: a single HTTP exchange
+ * is rendered entirely from the flow response, while every other family
+ * (ws, grpc, grpc-web, sse, raw, tls-handshake) renders a message
+ * timeline. The server has no unary/streaming classification — a MITM
+ * proxy cannot know RPC cardinality without the proto schema.
  */
-export function isStreamingFlow(
-  flow: Pick<FlowDetailResult, "flow_type"> | null | undefined,
+export function needsMessagesQuery(
+  flow: Pick<FlowDetailResult, "protocol"> | null | undefined,
 ): boolean {
   if (!flow) return false;
-  return (flow.flow_type ?? "") !== "unary";
+  return pickFlowDetailKind(flow.protocol) !== "http";
 }
 
 /**
