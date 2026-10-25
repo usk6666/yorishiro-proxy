@@ -1181,7 +1181,7 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 	// origFlow.ID keeps the wire-observed FlowID (a UUID produced by the
 	// Layer). The variant pair is disambiguated at the SQL layer by the
 	// schemaV11 `variant` column (projected from Metadata["variant"]) and
-	// at the MCP query layer by resolveVariantPair, neither of which
+	// at the MCP query layer by resolveHeadPair, neither of which
 	// depend on the FlowID string shape.
 	origFlow.Metadata["variant"] = "original"
 	if err := s.store.SaveFlow(ctx, origFlow); err != nil {

@@ -1926,7 +1926,7 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 	modifiedSend := &flow.Flow{
 		ID:        id + "-send-mod",
 		StreamID:  id,
-		Sequence:  1,
+		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Method:    "POST",
@@ -1942,7 +1942,7 @@ func seedVariantSession(t *testing.T, store flow.Store, id string) {
 	recvMsg := &flow.Flow{
 		ID:         id + "-recv",
 		StreamID:   id,
-		Sequence:   2,
+		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
 		StatusCode: 200,
@@ -2051,7 +2051,7 @@ func TestQuery_Session_VariantOriginalRequest_BodyTruncated(t *testing.T) {
 	modifiedSend := &flow.Flow{
 		ID:        id + "-send-mod",
 		StreamID:  id,
-		Sequence:  1,
+		Sequence:  0,
 		Direction: "send",
 		Timestamp: time.Now().UTC(),
 		Method:    "POST",
@@ -2229,7 +2229,7 @@ func seedResponseVariantSession(t *testing.T, store flow.Store, id string) {
 	modifiedRecv := &flow.Flow{
 		ID:         id + "-recv-mod",
 		StreamID:   id,
-		Sequence:   2,
+		Sequence:   1,
 		Direction:  "receive",
 		Timestamp:  time.Now().UTC(),
 		StatusCode: 403,
@@ -2369,7 +2369,7 @@ func seedBothVariantsSession(t *testing.T, store flow.Store, id string) {
 	// Modified send (variant=modified)
 	modURL, _ := url.Parse("https://example.com/api-mod")
 	if err := store.SaveFlow(ctx, &flow.Flow{
-		ID: id + "-send-mod", StreamID: id, Sequence: 1, Direction: "send",
+		ID: id + "-send-mod", StreamID: id, Sequence: 0, Direction: "send",
 		Timestamp: time.Now().UTC(), Method: "POST", URL: modURL,
 		Headers:  map[string][]string{"Host": {"example.com"}},
 		Body:     []byte("mod-req-body"),
@@ -2380,7 +2380,7 @@ func seedBothVariantsSession(t *testing.T, store flow.Store, id string) {
 
 	// Original receive (variant=original)
 	if err := store.SaveFlow(ctx, &flow.Flow{
-		ID: id + "-recv-orig", StreamID: id, Sequence: 2, Direction: "receive",
+		ID: id + "-recv-orig", StreamID: id, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 200,
 		Headers:  map[string][]string{"Content-Type": {"application/json"}},
 		Body:     []byte(`{"r":"orig"}`),
@@ -2391,7 +2391,7 @@ func seedBothVariantsSession(t *testing.T, store flow.Store, id string) {
 
 	// Modified receive (variant=modified)
 	if err := store.SaveFlow(ctx, &flow.Flow{
-		ID: id + "-recv-mod", StreamID: id, Sequence: 3, Direction: "receive",
+		ID: id + "-recv-mod", StreamID: id, Sequence: 1, Direction: "receive",
 		Timestamp: time.Now().UTC(), StatusCode: 401,
 		Headers:  map[string][]string{"Content-Type": {"text/plain"}},
 		Body:     []byte("Unauthorized"),

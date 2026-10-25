@@ -11,7 +11,8 @@
 
 import { useCallback, useMemo, useState } from "react";
 import { Badge } from "../../components/ui/Badge.js";
-import type { FlowDetailResult } from "../../lib/mcp/types.js";
+import { firstGrpcDataMessage } from "../../lib/grpcPayload.js";
+import type { FlowDetailResult, MessageEntry } from "../../lib/mcp/types.js";
 import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------
@@ -20,6 +21,13 @@ import "./FlowDetailPage.css";
 
 export interface GrpcPanelProps {
   flow: FlowDetailResult;
+  /**
+   * Messages fetched via `query resource=messages` (may be a later page).
+   * Combined with `flow.message_preview` to find the first Data payload of
+   * each direction; the flow's top-level bodies belong to the Start
+   * messages and carry no protobuf payload.
+   */
+  messages?: MessageEntry[];
 }
 
 type ProtobufViewMode = "base64" | "hex";
@@ -398,8 +406,17 @@ function ProtobufBodyViewer({
 // Main Component
 // ---------------------------------------------------------------------------
 
-export function GrpcPanel({ flow }: GrpcPanelProps) {
+export function GrpcPanel({ flow, messages }: GrpcPanelProps) {
   const summary = flow.protocol_summary ?? {};
+
+  // The protobuf payload is on the first Data message of each direction.
+  const { requestData, responseData } = useMemo(() => {
+    const all = [...(flow.message_preview ?? []), ...(messages ?? [])];
+    return {
+      requestData: firstGrpcDataMessage(all, "send"),
+      responseData: firstGrpcDataMessage(all, "receive"),
+    };
+  }, [flow.message_preview, messages]);
 
   const service = summary.service ?? "";
   const method = summary.method ?? "";
@@ -478,13 +495,13 @@ export function GrpcPanel({ flow }: GrpcPanelProps) {
         <div className="sd-grpc-bodies-grid">
           <ProtobufBodyViewer
             label="Request Body"
-            body={flow.request_body}
-            encoding={flow.request_body_encoding}
+            body={requestData?.body ?? ""}
+            encoding={requestData?.body_encoding ?? "text"}
           />
           <ProtobufBodyViewer
             label="Response Body"
-            body={flow.response_body}
-            encoding={flow.response_body_encoding}
+            body={responseData?.body ?? ""}
+            encoding={responseData?.body_encoding ?? "text"}
           />
         </div>
       </div>

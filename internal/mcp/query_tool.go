@@ -874,27 +874,36 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 	return opts
 }
 
-// extractFlowSummary extracts the effective method, URL, and status code from flow messages.
-// It prefers "modified" variant messages as they represent the actually transmitted data.
+// extractFlowSummary extracts the method, URL, and status code of the flows
+// list entry from the head message of each direction (USK-1343), so the list
+// and the flow detail agree: a WebSocket stream lists its Upgrade GET / 101
+// and a modified head lists its modified variant.
 func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode int) {
-	for _, msg := range msgs {
-		if msg.Direction == "send" {
-			variant := msg.Metadata["variant"]
-			if method == "" || variant == "modified" {
-				method = msg.Method
-				if msg.URL != nil {
-					urlStr = envelope.WireURLStringJSONSafe(msg.URL)
-				}
-			}
-		}
-		if msg.Direction == "receive" {
-			variant := msg.Metadata["variant"]
-			if statusCode == 0 || variant == "modified" {
-				statusCode = msg.StatusCode
-			}
+	cat := categorizeMessages(msgs)
+	if cat.sendMsg != nil {
+		method = cat.sendMsg.Method
+		if cat.sendMsg.URL != nil {
+			urlStr = envelope.WireURLStringJSONSafe(cat.sendMsg.URL)
 		}
 	}
+	if cat.recvMsg != nil {
+		statusCode = cat.recvMsg.StatusCode
+	}
 	return method, urlStr, statusCode
+}
+
+// headSourceFlows returns the rows the head projection (categorizeMessages /
+// extractFlowSummary) reads for streamID. msgs was fetched under wireLevel;
+// semantic and "all" ("" here) fetches already contain every semantic row
+// (resolveHeadPair skips overlay rows itself), while an overlay-only filter
+// (h2-frame, ...) does not, so the semantic rows are fetched separately. The
+// top level never depends on filter.wire_level, which governs only
+// message_count / message_preview.
+func (s *Server) headSourceFlows(ctx context.Context, streamID, wireLevel string, msgs []*flow.Flow) ([]*flow.Flow, error) {
+	if wireLevel == "" || wireLevel == flow.WireLevelSemantic {
+		return msgs, nil
+	}
+	return s.flowStore.store.GetFlows(ctx, streamID, flow.FlowListOptions{WireLevel: flow.WireLevelSemantic})
 }
 
 // handleQueryFlows returns a paginated list of flows with message summary data.
@@ -944,7 +953,11 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			return nil, nil, fmt.Errorf("get messages for flow %s: %w", fl.ID, err)
 		}
 
-		method, urlStr, statusCode := extractFlowSummary(msgs)
+		headMsgs, err := s.headSourceFlows(ctx, fl.ID, wireLevel, msgs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("get semantic messages for flow %s: %w", fl.ID, err)
+		}
+		method, urlStr, statusCode := extractFlowSummary(headMsgs)
 		summary := buildProtocolSummary(fl.Protocol, msgs)
 
 		entries = append(entries, queryFlowsEntry{
@@ -1161,36 +1174,31 @@ type queryVariantResponse struct {
 // streamPreviewLimit is the maximum number of messages to include in a streaming flow preview.
 const streamPreviewLimit = 10
 
-// categorizedMessages holds messages split by direction with variant resolution.
+// categorizedMessages holds the head message of each direction with variant
+// resolution (USK-1343). The head is the message the flow detail's top-level
+// fields (method / url / headers / status / body / raw) are projected from.
 type categorizedMessages struct {
-	// sendMsg is the effective send message (modified variant if present).
+	// sendMsg is the effective send head (the modified variant when the
+	// head has a variant pair).
 	sendMsg *flow.Flow
-	// originalSendMsg is the original send message before modification (nil if no variant).
+	// originalSendMsg is the original send head before modification (nil
+	// unless the send head has a variant=original row).
 	originalSendMsg *flow.Flow
-	// recvMsg is the effective receive message (modified variant if present).
+	// recvMsg is the effective receive head (the modified variant when the
+	// head has a variant pair).
 	recvMsg *flow.Flow
-	// originalRecvMsg is the original receive message before modification (nil if no variant).
+	// originalRecvMsg is the original receive head before modification
+	// (nil unless the receive head has a variant=original row).
 	originalRecvMsg *flow.Flow
 }
 
-// categorizeMessages splits messages by direction and resolves variant pairs.
-// For each direction, if multiple messages exist, the "modified" variant is the effective
-// message and the "original" variant is preserved for diff display.
+// categorizeMessages resolves the head message of each direction via
+// resolveHeadPair. Overlay (non-semantic wire_level) rows in msgs are
+// ignored, so the result does not depend on filter.wire_level.
 func categorizeMessages(msgs []*flow.Flow) categorizedMessages {
-	var sendMsgs []*flow.Flow
-	var recvMsgs []*flow.Flow
-	for _, msg := range msgs {
-		if msg.Direction == "send" {
-			sendMsgs = append(sendMsgs, msg)
-		}
-		if msg.Direction == "receive" {
-			recvMsgs = append(recvMsgs, msg)
-		}
-	}
-
 	var result categorizedMessages
-	result.sendMsg, result.originalSendMsg = resolveVariantPair(sendMsgs)
-	result.recvMsg, result.originalRecvMsg = resolveVariantPair(recvMsgs)
+	result.sendMsg, result.originalSendMsg = resolveHeadPair(msgs, "send")
+	result.recvMsg, result.originalRecvMsg = resolveHeadPair(msgs, "receive")
 	return result
 }
 
@@ -1210,35 +1218,104 @@ func resolveHTTPVersion(cat categorizedMessages) string {
 	return ""
 }
 
-// resolveVariantPair determines the effective and original messages from a slice of
-// directional messages. If variants exist, "modified" is the effective message and
-// "original" is preserved for diff display.
-func resolveVariantPair(msgs []*flow.Flow) (effective, original *flow.Flow) {
-	if len(msgs) == 0 {
-		return nil, nil
-	}
-	if len(msgs) == 1 {
-		return msgs[0], nil
-	}
+// resolveHeadPair returns the head message of direction ("send" /
+// "receive") in msgs and, when the head was modified, its original variant
+// (USK-1343).
+//
+// The head is the lowest-Sequence semantic row of the direction: the
+// request / response of an HTTP exchange, the Upgrade GET / 101 of a
+// WebSocket, the Start of a gRPC / gRPC-Web stream, the request / response
+// head of an SSE stream, the first chunk of a Raw stream. Later messages
+// (frames, Data, events, chunks) are surfaced through message_preview /
+// messages, never at the top level.
+//
+// On the receive side HTTP 1xx informational responses (except 101, which
+// is the response that switches protocols) precede the final response and
+// are skipped; when only 1xx rows exist the last one is the head. The
+// predicate is HTTP-only (the row's recorded protocol must be "http").
+//
+// original is non-nil only when the head's (sequence, direction) group
+// carries a RecordStep variant pair: effective is then the
+// variant=modified row and original the variant=original row. Untagged
+// rows never produce an original — RecordStep is the sole producer of
+// variant rows and always tags both. Overlay (non-semantic wire_level)
+// rows are never the head.
+func resolveHeadPair(msgs []*flow.Flow, direction string) (effective, original *flow.Flow) {
+	var candidates []*flow.Flow
 	for _, m := range msgs {
-		variant := m.Metadata["variant"]
-		if variant == "modified" {
-			effective = m
-		} else if variant == "original" {
-			original = m
+		if m != nil && m.Direction == direction && isSemanticFlowRow(m) {
+			candidates = append(candidates, m)
 		}
 	}
-	// Fallback: if no variant metadata, use the last as effective and first as original.
-	if effective == nil {
-		effective = msgs[len(msgs)-1]
-		original = msgs[0]
+	if len(candidates) == 0 {
+		return nil, nil
 	}
-	return effective, original
+	return pickVariantAtSequence(candidates, headSequence(candidates, direction))
 }
 
-// resolveHeadPair is not implemented yet (USK-1343 red-phase scaffolding).
-func resolveHeadPair(msgs []*flow.Flow, direction string) (effective, original *flow.Flow) {
-	return nil, nil
+// headSequence returns the Sequence of the head among candidates (all of one
+// direction, non-empty): the lowest Sequence, skipping HTTP 1xx interim
+// responses on the receive side. When every candidate is a 1xx response (the
+// final response never arrived) the highest Sequence — the most recent wire
+// state — is the head.
+func headSequence(candidates []*flow.Flow, direction string) int {
+	headSeq, found := 0, false
+	lastSeq := candidates[0].Sequence
+	for _, m := range candidates {
+		lastSeq = max(lastSeq, m.Sequence)
+		if direction == "receive" && isHTTPInformationalResponse(m) {
+			continue
+		}
+		if !found || m.Sequence < headSeq {
+			headSeq, found = m.Sequence, true
+		}
+	}
+	if !found {
+		return lastSeq
+	}
+	return headSeq
+}
+
+// pickVariantAtSequence resolves the rows of candidates at seq: a RecordStep
+// variant pair yields (modified, original); otherwise the first row is the
+// effective message and there is no original.
+func pickVariantAtSequence(candidates []*flow.Flow, seq int) (effective, original *flow.Flow) {
+	var first, modified, orig *flow.Flow
+	for _, m := range candidates {
+		if m.Sequence != seq {
+			continue
+		}
+		if first == nil {
+			first = m
+		}
+		switch v := m.Metadata["variant"]; {
+		case v == "modified" && modified == nil:
+			modified = m
+		case v == "original" && orig == nil:
+			orig = m
+		}
+	}
+	if modified != nil {
+		return modified, orig
+	}
+	return first, nil
+}
+
+// isSemanticFlowRow reports whether f is a canonical L7 row (wire_level
+// "semantic", or empty for pre-schemaV14 rows) rather than an overlay row
+// (h2-frame, h1-chunk, grpc-lpm-frame, grpcweb-base64).
+func isSemanticFlowRow(f *flow.Flow) bool {
+	return f.WireLevel == "" || f.WireLevel == flow.WireLevelSemantic
+}
+
+// isHTTPInformationalResponse reports whether f is an HTTP 1xx interim
+// response other than 101 Switching Protocols (RFC 9110 §15.2). HTTP-only:
+// rows of any other recorded protocol never match.
+func isHTTPInformationalResponse(f *flow.Flow) bool {
+	if f.Metadata["protocol"] != string(envelope.ProtocolHTTP) {
+		return false
+	}
+	return f.StatusCode >= 100 && f.StatusCode < 200 && f.StatusCode != 101
 }
 
 // decodedBodyView is the additive body-decoded form produced from a stored
@@ -1628,7 +1705,11 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
 
-	cat := categorizeMessages(msgs)
+	headMsgs, err := s.headSourceFlows(ctx, fl.ID, wireLevel, msgs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get semantic messages: %w", err)
+	}
+	cat := categorizeMessages(headMsgs)
 	decodeEnabled := resolveDecodeBodies(input)
 	limit := resolveBodyLimitOptions(input)
 

@@ -6,6 +6,7 @@ import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Tabs } from "../../components/ui/Tabs.js";
 import { useToast } from "../../components/ui/Toast.js";
+import { firstGrpcDataPayload } from "../../lib/grpcPayload.js";
 import { useMcpContext } from "../../lib/mcp/context.js";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import type {
@@ -741,9 +742,12 @@ export function ResendPage() {
     if (isGrpcFlow(flow)) {
       // gRPC / gRPC-Web flow: populate the typed editor from the source flow.
       //
-      // NOTE (USK-936 MVP scope): `flow.request_body` may carry a
-      // base64-encoded protobuf payload (when `flow.request_body_encoding ===
-      // "base64"`), but the editor only emits `body_encoding: "text"`. That
+      // The payload comes from the first send-direction Data message: the
+      // top-level `request_body` belongs to the Start message and is empty.
+      //
+      // NOTE (USK-936 MVP scope): the Data body may carry a base64-encoded
+      // protobuf payload (when its `body_encoding === "base64"`), but the
+      // editor only emits `body_encoding: "text"`. That
       // means binary-protobuf payloads pre-populate as base64 text and round-
       // trip incorrectly on send. Proto-schema-aware editing + base64 mode
       // are deferred to the follow-up Issue (see Issue body "out of scope")
@@ -757,7 +761,7 @@ export function ResendPage() {
         service,
         method,
         metadata: metadataRows,
-        messagePayload: flow.request_body || "",
+        messagePayload: firstGrpcDataPayload(flow.message_preview, "send"),
       });
     } else if (isWsFlow(flow)) {
       // WebSocket flow: populate single-frame editor from the handshake URL

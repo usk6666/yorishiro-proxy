@@ -35,7 +35,7 @@ export function FlowDetailGRPCMessage({
 }: FlowDetailGRPCMessageProps) {
   return (
     <>
-      <GrpcPanel flow={flow} />
+      <GrpcPanel flow={flow} messages={messages} />
       {showMessageTimeline && (
         <div className="sd-section">
           <h2 className="sd-section-title">Messages</h2>
