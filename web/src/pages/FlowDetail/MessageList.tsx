@@ -9,6 +9,7 @@ import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
+import { isGrpcProtocol } from "../../lib/mcp/dispatch.js";
 import type { MessageEntry } from "../../lib/mcp/types.js";
 import { BodyViewer } from "./BodyViewer.js";
 import "./FlowDetailPage.css";
@@ -84,13 +85,8 @@ export function MessageList({
 }: MessageListProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // Canonical Envelope.Protocol spellings ("grpc" / "grpc-web") plus the
-  // legacy display spellings.
-  const isGrpc =
-    protocol === "grpc" ||
-    protocol === "grpc-web" ||
-    protocol === "gRPC" ||
-    protocol === "gRPC-Web";
+  // Canonical grpc / grpc-web, plus legacy spellings from old rows.
+  const isGrpc = isGrpcProtocol(protocol);
 
   // Pagination info
   const totalPages = Math.max(1, Math.ceil(total / limit));

@@ -10,8 +10,6 @@
  *   - lib/mcp/dispatch.ts: the tolerant helpers that read a recorded
  *     `protocol`. Old DBs / JSONL imports may still hold legacy values
  *     (no migration rewrites Stream.Protocol), and the file documents why.
- *   - MessageList.tsx / GrpcPanel.tsx: being fixed in PR 251; they move
- *     onto the shared helpers once it merges.
  *   - UI labels (`label: "..."`), which name a protocol for a human and
  *     are never compared or sent.
  */
@@ -24,12 +22,7 @@ const sources = import.meta.glob("/src/**/*.{ts,tsx}", {
   eager: true,
 }) as Record<string, string>;
 
-const ALLOWED_FILES = new Set([
-  "/src/lib/mcp/dispatch.ts",
-  // PR 251 changes these; consolidate onto the shared helpers after it merges.
-  "/src/pages/FlowDetail/MessageList.tsx",
-  "/src/pages/FlowDetail/GrpcPanel.tsx",
-]);
+const ALLOWED_FILES = new Set(["/src/lib/mcp/dispatch.ts"]);
 
 const LEGACY_LITERAL =
   /(["'`])(HTTP\/1\.x|HTTPS|HTTP\/2|WebSocket|gRPC|gRPC-Web|TCP|SOCKS5\+[A-Za-z]*|http\/1\.x|http\/2)\1/;

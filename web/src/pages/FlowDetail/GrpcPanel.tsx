@@ -12,6 +12,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { Badge } from "../../components/ui/Badge.js";
 import { firstGrpcDataMessage } from "../../lib/grpcPayload.js";
+import { isGrpcWebProtocol } from "../../lib/mcp/dispatch.js";
 import type { FlowDetailResult, MessageEntry } from "../../lib/mcp/types.js";
 import "./FlowDetailPage.css";
 
@@ -422,7 +423,7 @@ export function GrpcPanel({ flow, messages }: GrpcPanelProps) {
   const method = summary.method ?? "";
   const grpcStatus = summary.grpc_status ?? "";
   const grpcStatusName = summary.grpc_status_name ?? "";
-  const isGrpcWeb = flow.protocol === "grpc-web" || flow.protocol === "gRPC-Web";
+  const isGrpcWeb = isGrpcWebProtocol(flow.protocol);
   const panelTitle = isGrpcWeb ? "gRPC-Web Details" : "gRPC Details";
 
   return (

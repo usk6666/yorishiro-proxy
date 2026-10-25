@@ -162,6 +162,14 @@ export function isGrpcProtocol(protocol: string | null | undefined): boolean {
   return proto === "grpc" || proto === "grpc-web";
 }
 
+/**
+ * Whether a recorded protocol is gRPC-Web specifically (legacy-tolerant:
+ * old rows may hold "gRPC-Web"; see the file header).
+ */
+export function isGrpcWebProtocol(protocol: string | null | undefined): boolean {
+  return (protocol ?? "").toLowerCase() === "grpc-web";
+}
+
 /** Whether a recorded protocol is WebSocket (legacy-tolerant). */
 export function isWsProtocol(protocol: string | null | undefined): boolean {
   const proto = (protocol ?? "").toLowerCase();
