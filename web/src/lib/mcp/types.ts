@@ -432,7 +432,6 @@ export interface FlowEntry {
   id: string;
   protocol: string;
   scheme?: string;
-  flow_type: string;
   state: string;
   /** Name of the listener that accepted the connection (proxy_start name). */
   listener_name?: string;
@@ -551,7 +550,6 @@ export interface FlowDetailResult {
    * distinguishes them from HTTP/1.x.
    */
   http_version?: string;
-  flow_type: string;
   state: string;
   /** Name of the listener that accepted the connection (proxy_start name). */
   listener_name?: string;

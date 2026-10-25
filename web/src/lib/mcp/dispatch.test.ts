@@ -259,7 +259,6 @@ function makeMinimalFlow(
     id: "minimal",
     conn_id: "",
     protocol: "",
-    flow_type: "unary",
     state: "active",
     method: "",
     url: "",

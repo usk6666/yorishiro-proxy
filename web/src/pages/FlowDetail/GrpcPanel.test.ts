@@ -19,7 +19,6 @@ function flowWithProtocol(protocol: string): FlowDetailResult {
     id: "f1",
     conn_id: "c1",
     protocol,
-    flow_type: "unary",
     state: "complete",
     method: "POST",
     url: "https://example.com/pkg.Svc/Method",
