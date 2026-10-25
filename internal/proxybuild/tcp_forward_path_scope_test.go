@@ -10,11 +10,11 @@ import (
 )
 
 // USK-1130: a path-scoped allow at the tcp_forwards gate. Arms whose
-// Pipeline path-checks every request (http, http2, websocket, sse, auto —
-// whose raw fallback and h2 gRPC streams HostScopeStep blocks) admit the
-// target provisionally; raw and grpc never yield a checked path and stay
-// strict. Start-time, accept-time and live-connection checks share the
-// predicate.
+// Pipeline path-checks every request (http, http2, websocket, sse, grpc —
+// each RPC's Start since USK-1236 — and auto, whose raw fallback
+// HostScopeStep blocks) admit the target provisionally; raw never yields
+// a checked path and stays strict. Start-time, accept-time and
+// live-connection checks share the predicate.
 func TestTCPForwardScopeCheck_PathScopedAllow(t *testing.T) {
 	const target = "127.0.0.1:4444"
 	scope := connector.NewTargetScope()
@@ -31,7 +31,7 @@ func TestTCPForwardScopeCheck_PathScopedAllow(t *testing.T) {
 		{"websocket", true},
 		{"sse", true},
 		{"raw", false},
-		{"grpc", false},
+		{"grpc", true},
 	}
 	for _, tc := range cases {
 		t.Run("protocol="+tc.protocol, func(t *testing.T) {
