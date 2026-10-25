@@ -12,8 +12,12 @@
  *     (no migration rewrites Stream.Protocol), and the file documents why.
  *   - UI labels (`label: "..."`), which name a protocol for a human and
  *     are never compared or sent.
+ *
+ * "SSE" / "Raw" are checked separately on the TypeScript AST (see below),
+ * because both are also everyday UI labels.
  */
 
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const sources = import.meta.glob("/src/**/*.{ts,tsx}", {
@@ -77,12 +81,104 @@ describe("legacy protocol literals", () => {
 // compared, defaulted, switched on, passed, stored, or typed.
 // ---------------------------------------------------------------------------
 
+const SSE_RAW = new Set(["SSE", "Raw"]);
+
+/** Binary operators whose string operand is a compared or defaulted value. */
+const VALUE_OPERATORS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.QuestionQuestionToken,
+  ts.SyntaxKind.BarBarToken,
+  ts.SyntaxKind.EqualsToken,
+]);
+
+/** Object keys and JSX attributes whose string value is a human label. */
+const LABEL_KEYS = new Set(["label", "title"]);
+
+/** JSX attributes whose string value is a protocol value. */
+const VALUE_JSX_ATTRIBUTES = new Set(["value", "protocol"]);
+
+function propertyName(name: ts.PropertyName | ts.JsxAttributeName): string {
+  return ts.isIdentifier(name) || ts.isStringLiteral(name) ? name.text : "";
+}
+
+/**
+ * Climb from a literal through nodes that pass its value through unchanged
+ * (parens, casts, a ternary branch, a JSX `{...}` container) and return the
+ * outermost such node, whose parent decides how the value is used.
+ */
+function climbTransparent(node: ts.Node): ts.Node {
+  let child = node;
+  for (;;) {
+    const p = child.parent;
+    const transparent =
+      ts.isParenthesizedExpression(p) ||
+      ts.isJsxExpression(p) ||
+      ((ts.isAsExpression(p) || ts.isSatisfiesExpression(p) || ts.isTypeAssertionExpression(p)) &&
+        p.expression === child) ||
+      (ts.isConditionalExpression(p) && (p.whenTrue === child || p.whenFalse === child));
+    if (!transparent) return child;
+    child = p;
+  }
+}
+
+/** Whether the literal `node` is used as a value rather than as a label. */
+function isValueUse(node: ts.StringLiteral | ts.NoSubstitutionTemplateLiteral): boolean {
+  if (ts.isLiteralTypeNode(node.parent)) return true;
+  const child = climbTransparent(node);
+  const p = child.parent;
+  if (ts.isBinaryExpression(p)) return VALUE_OPERATORS.has(p.operatorToken.kind);
+  if (ts.isCaseClause(p)) return p.expression === child;
+  if (ts.isPropertyAssignment(p)) {
+    return p.initializer === child && !LABEL_KEYS.has(propertyName(p.name));
+  }
+  if (ts.isCallExpression(p) || ts.isNewExpression(p)) {
+    return (p.arguments ?? []).some((a) => a === child);
+  }
+  if (ts.isArrayLiteralExpression(p)) return true;
+  if (
+    ts.isVariableDeclaration(p) ||
+    ts.isParameter(p) ||
+    ts.isPropertyDeclaration(p) ||
+    ts.isBindingElement(p)
+  ) {
+    return p.initializer === child;
+  }
+  if (ts.isJsxAttribute(p)) return VALUE_JSX_ATTRIBUTES.has(propertyName(p.name));
+  return false;
+}
+
 /**
  * Return "line: text" for every "SSE" / "Raw" string literal in `src` that
- * is used as a value rather than as a label. Not implemented yet.
+ * is used as a value rather than as a label. Labels — JSX text, `label:` /
+ * `title` values, a ternary rendered as JSX text, the return value of a
+ * label function — are not reported.
  */
-function findProtocolValueLiterals(_src: string, _fileName: string): string[] {
-  return [];
+function findProtocolValueLiterals(src: string, fileName: string): string[] {
+  const sf = ts.createSourceFile(
+    fileName,
+    src,
+    ts.ScriptTarget.Latest,
+    true,
+    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const lines = src.split("\n");
+  const hits: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (
+      (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+      SSE_RAW.has(node.text) &&
+      isValueUse(node)
+    ) {
+      const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line;
+      hits.push(`${line + 1}: ${lines[line].trim()}`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return hits;
 }
 
 describe("legacy SSE / Raw protocol literals", () => {
