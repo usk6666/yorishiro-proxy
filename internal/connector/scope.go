@@ -58,10 +58,11 @@ type TargetRule struct {
 	// trailing dot ("db.internal." matches "db.internal" and "*.internal");
 	// and legacy inet_aton IPv4 spellings ("2130706433", "0x7f.0.0.1",
 	// "127.1" match "127.0.0.1"; only a libc resolver or an upstream proxy
-	// reads those as the address — Go's pure resolver looks them up in DNS,
-	// so on an allow rule they may admit a different host; see
-	// canonicalScopeHost) (USK-1129, USK-1250). The stored rule is
-	// never rewritten. Empty matches any host (Policy layer only; the Agent
+	// reads those as the address — Go's pure resolver looks the hex ones up
+	// in DNS — so as a dial host they are refused outright whenever any
+	// rule exists, and the folding only lets a deny catch them in a Host /
+	// :authority name; see canonicalScopeHost) (USK-1129, USK-1250,
+	// USK-1273). The stored rule is never rewritten. Empty matches any host (Policy layer only; the Agent
 	// layer requires a hostname).
 	Hostname string `json:"hostname"`
 
@@ -105,8 +106,12 @@ func NewTargetScope() *TargetScope {
 // no rule can name (USK-1250, see numericHostUnparsable). So is an empty
 // host or an unspecified address ("0.0.0.0", "::" and their spellings),
 // which Go's dialer reads as the proxy host itself (USK-1312, see
-// unspecifiedOrEmptyHost). With no rules at all (open mode) both are
-// allowed like any other host.
+// unspecifiedOrEmptyHost). So is an IPv4 address in any spelling other
+// than canonical dotted-quad decimal ("0x7f.0.0.1", "2130706433",
+// "127.1", "127.0.0.1."), which resolvers read differently — Go's pure
+// resolver sends the hex forms to DNS — so an allow for the address must
+// not admit it (USK-1273, see legacyIPv4Spelling). With no rules at all
+// (open mode) all three are allowed like any other host.
 //
 // Returns allowed=true if the target is permitted, and a reason string
 // explaining the decision when blocked.
@@ -173,8 +178,11 @@ func (s *TargetScope) checkTargetLocked(scheme, hostname string, port int, path 
 // either layer has any rule, a dial host that a resolver or the dialer may
 // read as a destination no rule can name is refused before deny and allow
 // evaluation — an empty or unspecified host, which Go dials as the proxy
-// host itself (USK-1312, unspecifiedOrEmptyHost), and an unparsable
-// numeric host (USK-1250, numericHostUnparsable). With no rules at all
+// host itself (USK-1312, unspecifiedOrEmptyHost), an unparsable numeric
+// host (USK-1250, numericHostUnparsable), and a non-canonical IPv4
+// spelling that resolvers disagree on (USK-1273, legacyIPv4Spelling). The
+// order matters: the legacy "0" / "0x0" fold into 0.0.0.0 and keep the
+// unspecified reason. With no rules at all
 // (open mode) nothing is refused. Name legs with a known dial target do
 // not come here (nameDenyLocked). Caller holds s.mu.
 func (s *TargetScope) dialHostFailClosedLocked(hostname string) (reason string, blocked bool) {
@@ -186,6 +194,9 @@ func (s *TargetScope) dialHostFailClosedLocked(hostname string) (reason string, 
 	}
 	if numericHostUnparsable(hostname) {
 		return numericHostReason, true
+	}
+	if legacyIPv4Spelling(hostname) {
+		return legacyIPv4Reason, true
 	}
 	return "", false
 }

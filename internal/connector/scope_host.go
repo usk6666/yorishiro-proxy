@@ -55,11 +55,13 @@ const legacyIPv4Reason = "blocked: non-canonical IPv4 spelling (integer, hex, oc
 //     "127.0.0.01") is rewritten to its dotted-quad form. A libc resolver
 //     (GODEBUG=netdns=cgo) or an upstream proxy reads these as that
 //     address. Go's pure resolver (the Linux default) does not parse them
-//     as IPs; it looks them up in DNS, applying the resolv.conf search
-//     list. So the deny side is exact, but an allow for "10.0.0.5" also
-//     admits "10.5" or "0x0a.0.0.5", which under the pure resolver dials
-//     whatever DNS returns for that name — not necessarily the allowed
-//     host. Resolver-aware gating is a follow-up (USK-1250 D2/D3).
+//     as IPs: it rejects the all-digit ones and looks the others
+//     ("0x0a.0.0.5") up in DNS, applying the resolv.conf search list. The
+//     folding is therefore exact for a deny but would widen an allow, so
+//     as a dial host such a spelling is refused outright whenever rules
+//     exist (USK-1273, legacyIPv4Spelling). The fold still matters for
+//     name legs (a deny for 127.0.0.1 blocks "Host: 0x7f.0.0.1"), for
+//     numericHostUnparsable, and for rule-side comparison.
 //
 // The input may be an attacker-controlled Host header; nothing here can
 // panic, and the "[", "]" and "[]" length guard keeps those verbatim.
@@ -247,8 +249,23 @@ func isDigits(s string, base uint64) bool {
 	return true
 }
 
-// legacyIPv4Spelling reports whether host is an IPv4 address written in a
-// form other than canonical dotted-quad decimal. Scaffolding for USK-1273.
+// legacyIPv4Spelling reports whether host is an IPv4 address that
+// canonicalScopeHost reads in a spelling other than canonical dotted-quad
+// decimal: the inet_aton forms ("2130706433", "0x7f.0.0.1", "0177.0.0.1",
+// "127.1", "127.0.0.01"), any of them or a dotted-quad with a trailing dot
+// ("127.0.0.1."), and a bracketed IPv4 ("[127.0.0.1]"). Resolvers
+// disagree on what such a host dials: a libc resolver or an upstream proxy
+// reads it as the folded address, Go's pure resolver sends the hex forms
+// to DNS (with the resolv.conf search list) and rejects the all-digit
+// ones. So an allow for the folded address must not admit it, and
+// CheckTarget refuses it whenever rules exist (USK-1273; see
+// TargetScope.dialHostFailClosedLocked). A host containing ":" is never
+// reported: IPv6 literals, IPv4-mapped ones included, are dialed as IP
+// literals and reach the folded address.
 func legacyIPv4Spelling(host string) bool {
-	return false
+	if strings.IndexByte(host, ':') >= 0 {
+		return false
+	}
+	c, isIP := canonicalScopeHostIP(host)
+	return isIP && c != host
 }
