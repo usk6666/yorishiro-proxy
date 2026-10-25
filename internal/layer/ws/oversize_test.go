@@ -351,3 +351,41 @@ func TestOversize_AtCapUnchanged(t *testing.T) {
 		t.Errorf("trailing Next err = %v, want io.EOF", err)
 	}
 }
+
+// The sending leg's max_frame_size (pre-mask payload cap) applies to a
+// verbatim over-cap frame exactly as it does to a Message-path frame: a
+// received frame whose payload exceeds it is refused, not written.
+func TestOversize_Send_FrameOverMaxFrameSizeRefused(t *testing.T) {
+	big, _ := oversizeMessages()
+	comp := compressMessages(t, true, big)
+	p := oversizeParams(true)
+
+	rdRWC := newFakeRWC(compressedServerFrame(t, comp[0]))
+	rdL := New(rdRWC, rdRWC, rdRWC, "s-1", RoleClient,
+		WithDeflateEnabled(true), WithServerDeflate(p), withInflateCap(oversizeTestCap))
+	t.Cleanup(func() { _ = rdL.Close() })
+	wrRWC := newFakeRWC(nil)
+	wrL := New(wrRWC, wrRWC, wrRWC, "s-1", RoleServer,
+		WithDeflateEnabled(true), WithServerDeflate(p), withInflateCap(oversizeTestCap),
+		WithMaxFrameSize(int64(len(comp[0])-1)))
+	t.Cleanup(func() { _ = wrL.Close() })
+	rd, wr := <-rdL.Channels(), <-wrL.Channels()
+
+	env, _ := mustNextWS(t, rd)
+	err := wr.Send(context.Background(), env)
+	var se *layer.StreamError
+	if !errors.As(err, &se) || se.Code != layer.ErrorAborted {
+		t.Fatalf("Send err = %v, want *layer.StreamError{ErrorAborted} for a frame over max_frame_size", err)
+	}
+	if !strings.Contains(se.Reason, "payload too large") {
+		t.Errorf("Send StreamError.Reason = %q, want the max_frame_size refusal", se.Reason)
+	}
+	if wrRWC.writer.Len() != 0 {
+		t.Errorf("refused Send wrote %d bytes, want 0", wrRWC.writer.Len())
+	}
+	select {
+	case <-wr.Closed():
+	default:
+		t.Error("Channel not terminated after a refused Send")
+	}
+}
