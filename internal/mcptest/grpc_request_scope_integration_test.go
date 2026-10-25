@@ -98,26 +98,47 @@ func assertPermissionDenied(t *testing.T, err error, what string) {
 // with blocked_by=target_scope and asserts it is state=error.
 func waitBlockedStream(t *testing.T, h *mcptest.Harness, protocol string) {
 	t.Helper()
+	waitBlockedStreams(t, h, protocol, 1)
+}
+
+// countBlockedStreams returns how many target_scope-blocked Streams of
+// protocol the query tool currently reports, reporting an error for any
+// such Stream whose state is not "error".
+func countBlockedStreams(t *testing.T, h *mcptest.Harness, protocol string) int {
+	t.Helper()
+	res := h.MustOK(t, "query", map[string]any{
+		"resource": "flows",
+		"filter":   map[string]any{"blocked_by": "target_scope", "protocol": protocol},
+	})
+	flows, _ := res.Decoded["flows"].([]any)
+	n := 0
+	for _, raw := range flows {
+		f, _ := raw.(map[string]any)
+		if f["protocol"] != protocol || f["blocked_by"] != "target_scope" {
+			continue
+		}
+		if st, _ := f["state"].(string); !strings.EqualFold(st, "error") {
+			t.Errorf("blocked %s Stream state = %q, want error", protocol, st)
+		}
+		n++
+	}
+	return n
+}
+
+// waitBlockedStreams waits until at least want target_scope-blocked
+// Streams of protocol are recorded, so a caller that counted the Streams
+// before its request can require that request to add one of its own.
+func waitBlockedStreams(t *testing.T, h *mcptest.Harness, protocol string, want int) {
+	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
+	got := 0
 	for time.Now().Before(deadline) {
-		res := h.MustOK(t, "query", map[string]any{
-			"resource": "flows",
-			"filter":   map[string]any{"blocked_by": "target_scope", "protocol": protocol},
-		})
-		flows, _ := res.Decoded["flows"].([]any)
-		for _, raw := range flows {
-			f, _ := raw.(map[string]any)
-			if f["protocol"] != protocol || f["blocked_by"] != "target_scope" {
-				continue
-			}
-			if st, _ := f["state"].(string); !strings.EqualFold(st, "error") {
-				t.Errorf("blocked %s Stream state = %q, want error", protocol, st)
-			}
+		if got = countBlockedStreams(t, h, protocol); got >= want {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Errorf("query(flows, protocol=%s, blocked_by=target_scope) returned no Stream", protocol)
+	t.Errorf("query(flows, protocol=%s, blocked_by=target_scope) returned %d Streams, want at least %d", protocol, got, want)
 }
 
 // E1: over CONNECT, a native gRPC call whose :authority names a denied
@@ -300,12 +321,15 @@ func TestE2E_GRPCRequestScope_GRPCWebH1_DeniedHost(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := received.Load()
+			blockedBefore := countBlockedStreams(t, h, "grpc-web")
 			_ = writeProxyRequestNoWait(t, proxyAddr, request(tc.hostLines))
 			time.Sleep(200 * time.Millisecond)
 			if got := received.Load() - before; got != 0 {
 				t.Errorf("upstream received %d bytes (head %q), want 0 — the denied Host reached it", got, lastHead())
 			}
-			waitBlockedStream(t, h, "grpc-web")
+			// Each subtest must record its own blocked Stream, not find
+			// the one an earlier subtest left behind.
+			waitBlockedStreams(t, h, "grpc-web", blockedBefore+1)
 		})
 	}
 }

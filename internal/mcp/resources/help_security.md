@@ -209,6 +209,11 @@ steps:
 - **Deny** `{hostname: X, path_prefix: "/admin"}`: never refuses or closes a
   connection; it is enforced per request. It therefore does not cover TLS
   passthrough or raw traffic to X — deny the host itself for that.
+  It matches the literal wire path (and its percent-decoded form) only —
+  for HTTP and gRPC / gRPC-Web alike — so aliases a server may route to the
+  same resource (`//admin`, `/./admin`, `/x/../admin`, `%2F` spellings) are
+  not matched. A path deny is not a hard boundary; to confine traffic to
+  some paths, use a path-scoped **allow** instead.
 
 Every request is checked against both the host it names (`Host` / `:authority`)
 and the host the connection actually reaches, each with the request path, so
@@ -300,7 +305,9 @@ recorded request still shows the scheme exactly as the client declared it.
 | HTTP/1.x, HTTP/2 request | `403` with `X-Blocked-By: target_scope` | Stream with `blocked_by: target_scope`, `state: error` |
 | Raw TCP (bytechunk — CONNECT / SOCKS5 tunnels carrying an unknown protocol, `raw_passthrough_hosts`, `tcp_forwards` with `protocol: raw` or an `auto` fallback to raw) | The connection is closed (EOF) when it settles on a raw relay, before any byte is relayed in either direction; none of the client's bytes reach the denied host and none of its bytes reach the client | One raw Stream with `blocked_by: target_scope`, `state: error` |
 | Native gRPC call | The call fails with `grpc-status: 7` (PERMISSION_DENIED) and `grpc-message: blocked by target_scope`; the RPC ends, the connection stays open | Stream with `blocked_by: target_scope`, `state: error` |
-| WebSocket, gRPC-Web message | The message is dropped; the connection stays open | Stream with `blocked_by: target_scope` |
+| WebSocket message | The message is dropped; the connection stays open | Stream with `blocked_by: target_scope` |
+| gRPC-Web call denied by the host the connection dials | Every message of the call is dropped; the connection stays open and the client gets no gRPC-Web response | Stream with `blocked_by: target_scope` |
+| gRPC-Web call denied by its own request (path, `:authority` / `Host`, `host` metadata) | The call is aborted: its start is dropped, so no request byte reaches the upstream, and the HTTP/1.x connection is closed (HTTP/2: the stream is reset); the client gets no gRPC-Web status. A TCP (and TLS) connection to the dial target the connection was already admitted for may still be opened | Stream with `blocked_by: target_scope` |
 | `tcp_forwards` target denied when `proxy_start` runs | `proxy_start` fails with an error naming the scope, port and target; nothing is bound | Nothing |
 | `tcp_forwards` target denied when a client connects | Plaintext `protocol: http` / `websocket` / `sse`: `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`, then close. Every other protocol and every `tls: true` entry: the connection is closed with no byte (a TLS client's handshake fails). The target is never contacted | Nothing (Info log) |
 
