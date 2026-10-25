@@ -117,8 +117,8 @@ func flowHTTPVersion(t *testing.T, h *mcptest.Harness, id string) string {
 	return parsed.HTTPVersion
 }
 
-// streamIDsWithVersion returns the ids of origin-filtered streams that have
-// at least one Flow recorded with http_version == version.
+// streamIDsWithVersion returns the ids of origin-filtered streams whose head
+// HTTP version (the value query shows as flows[].http_version) is version.
 func streamIDsWithVersion(t *testing.T, h *mcptest.Harness, origin, version string) map[string]bool {
 	t.Helper()
 	res := h.MustOK(t, "query", map[string]any{

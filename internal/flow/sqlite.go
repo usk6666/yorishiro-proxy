@@ -434,8 +434,9 @@ func ValidateStreamID(id string) error {
 const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin, tls_client_ja3, tls_client_ja4, listener_name, upstream_proxy`
 
 // buildStreamWhereClause constructs a SQL WHERE clause from StreamListOptions.
-// Method, URLPattern, StatusCode, and HTTPVersion are matched via EXISTS
-// subqueries on flows. The simple-equality predicates (Scheme, BlockedBy,
+// Method, URLPattern, and StatusCode are matched via EXISTS subqueries on
+// flows; HTTPVersion compares the stream's head HTTP version
+// (streamHeadHTTPVersionExpr). The simple-equality predicates (Scheme, BlockedBy,
 // State, Origin) are factored into appendStreamSimplePredicates to keep this
 // function under the gocyclo threshold.
 func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
@@ -563,17 +564,70 @@ func appendStreamSimplePredicates(conds []string, args []interface{}, opts Strea
 	return conds, args
 }
 
+// flowRowIsHTTPInformationalExpr is a 0/1 SQL expression over the flows
+// row aliased alias: 1 when the row is an HTTP 1xx interim response other
+// than 101. It mirrors isHTTPInformationalResponse in
+// internal/mcp/query_tool.go — the row's recorded metadata protocol must
+// be "http". The json_valid guard (as in streamTagsTargetExpr) keeps a
+// metadata value that is not valid JSON from failing the query; such a
+// row reads as not-1xx, as it does in Go (Metadata decodes to nil).
+func flowRowIsHTTPInformationalExpr(alias string) string {
+	return "(CASE WHEN " + alias + ".status_code BETWEEN 100 AND 199 AND " + alias + ".status_code <> 101" +
+		" AND (CASE WHEN json_valid(" + alias + ".metadata) THEN json_extract(" + alias + ".metadata, '$.protocol') END) = 'http'" +
+		" THEN 1 ELSE 0 END)"
+}
+
+// streamHeadHTTPVersionExpr returns a SQL scalar expression evaluating to
+// the head HTTP version of the stream whose id is streamIDRef ("s.id" under
+// SELECT, "streams.id" under DELETE, which has no alias slot): the value
+// the MCP flows list shows as flows[].http_version, or "" when the stream
+// has none (non-HTTP protocols, rows recorded before the field existed,
+// streams with no flow rows).
+//
+// It mirrors resolveHTTPVersion / resolveHeadPair / headSequence /
+// pickVariantAtSequence in internal/mcp/query_tool.go, which are
+// authoritative — change both together:
+//
+//   - only semantic rows (wire_level empty or "semantic") are candidates,
+//     so the result is independent of filter.wire_level;
+//   - the send head is the lowest-sequence send row; the receive head is
+//     the lowest-sequence receive row that is not an HTTP 1xx interim
+//     response, or the highest-sequence receive row when every receive
+//     row is 1xx;
+//   - at the head sequence the variant="modified" row wins; otherwise the
+//     earliest row (GetFlows order) is taken;
+//   - the send head's version is used unless it is empty, in which case
+//     the receive head's is.
+//
+// streamIDRef is always a constant column reference supplied by this
+// package, never caller input; the filter value stays a bound parameter.
+// Every subquery is keyed on stream_id (idx_flows_stream_id) and the
+// expression is only built when filter.http_version is set.
+func streamHeadHTTPVersionExpr(streamIDRef string) string {
+	rows := func(alias, direction string) string {
+		return alias + ".stream_id = " + streamIDRef + " AND " + alias + ".direction = '" + direction +
+			"' AND " + alias + ".wire_level IN ('', '" + WireLevelSemantic + "')"
+	}
+	versionAt := func(direction, seqExpr string) string {
+		return "(SELECT v.http_version FROM flows v WHERE " + rows("v", direction) + " AND v.sequence = " + seqExpr +
+			" ORDER BY (v.variant = 'modified') DESC, v.timestamp ASC LIMIT 1)"
+	}
+	sendSeq := "(SELECT MIN(q.sequence) FROM flows q WHERE " + rows("q", "send") + ")"
+	recvSeq := "COALESCE(" +
+		"(SELECT MIN(q.sequence) FROM flows q WHERE " + rows("q", "receive") + " AND " + flowRowIsHTTPInformationalExpr("q") + " = 0), " +
+		"(SELECT MAX(q.sequence) FROM flows q WHERE " + rows("q", "receive") + "))"
+	return "COALESCE(NULLIF(" + versionAt("send", sendSeq) + ", ''), " + versionAt("receive", recvSeq) + ", '')"
+}
+
 // appendStreamFlowExistsPredicates adds HTTPVersion / Method / URLPattern /
-// StatusCode predicates, all of which match via an EXISTS subquery on flows.
-// HTTPVersion (USK-792, schemaV13) treats nil as "no filter" and an explicit
-// empty string as "match pre-USK-788 rows".
+// StatusCode predicates. Method / URLPattern / StatusCode match via an
+// EXISTS subquery on flows. HTTPVersion (schemaV13) treats nil as "no
+// filter" and otherwise compares the stream's head HTTP version
+// (streamHeadHTTPVersionExpr) with the value; an explicit empty string
+// selects streams with no HTTP version.
 func appendStreamFlowExistsPredicates(conds []string, args []interface{}, opts StreamListOptions) ([]string, []interface{}) {
 	if opts.HTTPVersion != nil {
-		// EXISTS subquery: any flow on the stream matching the
-		// http_version value selects the stream. Empty string matches
-		// pre-USK-788 rows (schemaV13's DEFAULT ''). The
-		// idx_flows_http_version index makes the subquery cheap.
-		conds = append(conds, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.http_version = ?)")
+		conds = append(conds, streamHeadHTTPVersionExpr("s.id")+" = ?")
 		args = append(args, *opts.HTTPVersion)
 	}
 	if opts.Method != "" {
@@ -688,10 +742,10 @@ func (s *SQLiteStore) DeleteStreamsByProtocol(ctx context.Context, protocol stri
 // DeleteAllStreams for that explicit case.
 //
 // The query is parameterised throughout; no filter value is ever
-// interpolated into the SQL string. The http_version predicate is an
-// EXISTS subquery on the flows table because http_version lives there
-// (schemaV13). The idx_flows_http_version index makes the subquery
-// cheap. The url_pattern predicate is an EXISTS subquery on the flows
+// interpolated into the SQL string. The http_version predicate compares
+// the stream's head HTTP version (streamHeadHTTPVersionExpr, shared with
+// buildStreamWhereClause) because http_version lives on the flows table
+// (schemaV13). The url_pattern predicate is an EXISTS subquery on the flows
 // table mirroring the SELECT-side URL-pattern predicate
 // (appendStreamFlowExistsPredicates). Time bounds use the same
 // RFC3339Nano lex-comparable string format DeleteStreamsOlderThan uses
@@ -714,10 +768,10 @@ func (s *SQLiteStore) DeleteStreamsByFilter(ctx context.Context, filter StreamDe
 	}
 	if filter.HTTPVersion != nil {
 		// streams.id (not an alias) — DELETE has no FROM-alias slot, so the
-		// subquery references the table by name. Mirrors the
-		// idx_flows_http_version-backed predicate used in
-		// buildStreamWhereClause (which aliases as s.id under SELECT).
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = streams.id AND m.http_version = ?)")
+		// head-version expression references the table by name. Same
+		// expression as buildStreamWhereClause (s.id under SELECT), so
+		// delete_flows removes exactly the streams query / export select.
+		conditions = append(conditions, streamHeadHTTPVersionExpr("streams.id")+" = ?")
 		args = append(args, *filter.HTTPVersion)
 	}
 	if filter.URLPattern != "" {

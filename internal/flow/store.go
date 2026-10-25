@@ -106,13 +106,13 @@ type StreamDeleteFilter struct {
 	// Scheme matches Stream.Scheme exactly. Canonical lowercased values:
 	// "http", "https", "ws", "wss", "tcp".
 	Scheme string
-	// HTTPVersion matches an associated Flow's http_version column via
-	// an EXISTS subquery. Canonical lowercased values: "http/1.0",
-	// "http/1.1", "h2", "h2c". Nil means the predicate is omitted; the
-	// non-nil empty string means "match streams whose flows have an
-	// empty http_version" (pre-USK-788 rows). Empty string is the
-	// source-of-truth marker for unknown / pre-migration data per
-	// schemaV13's `DEFAULT ''`.
+	// HTTPVersion matches the stream's head HTTP version — the same
+	// expression StreamListOptions.HTTPVersion uses
+	// (streamHeadHTTPVersionExpr). Canonical lowercased values:
+	// "http/1.0", "http/1.1", "h2", "h2c". Nil means the predicate is
+	// omitted; the non-nil empty string matches streams with no HTTP
+	// version (non-HTTP protocols, rows recorded before the field
+	// existed per schemaV13's `DEFAULT ''`, streams with no flows).
 	HTTPVersion *string
 	// URLPattern matches streams whose send-direction flow URL contains
 	// this substring. Implemented as `EXISTS (SELECT 1 FROM flows m
@@ -271,14 +271,16 @@ type StreamListOptions struct {
 	// recorded value, so synthetic / imported rows with "ws"/"wss" still
 	// round-trip.
 	Scheme string
-	// HTTPVersion filters streams whose flows have at least one row
-	// matching this http_version value (USK-792). Canonical lowercased
-	// values: "http/1.0", "http/1.1", "h2", "h2c". Nil means the
-	// predicate is omitted; non-nil empty string ("") matches streams
-	// whose flows have an empty http_version (pre-USK-788 rows). The
-	// match runs as `EXISTS (SELECT 1 FROM flows m WHERE m.stream_id =
-	// s.id AND m.http_version = ?)` — i.e. a single matching flow makes
-	// the whole stream selected, mirroring how Method/StatusCode work.
+	// HTTPVersion filters streams by their head HTTP version — the value
+	// the MCP flows list shows as http_version (resolveHTTPVersion in
+	// internal/mcp/query_tool.go; streamHeadHTTPVersionExpr mirrors it in
+	// SQL). Unlike Method / StatusCode it is not an "any row" match: a
+	// WS / SSE stream is selected by its Upgrade / request head's
+	// version, never by its version-less frame / event rows. Canonical
+	// lowercased values: "http/1.0", "http/1.1", "h2", "h2c". Nil means
+	// the predicate is omitted; non-nil empty string ("") matches streams
+	// with no HTTP version (non-HTTP protocols, rows recorded before the
+	// field existed, streams with no flows).
 	HTTPVersion *string
 	// Method filters streams that have a send flow with this HTTP method.
 	Method string
