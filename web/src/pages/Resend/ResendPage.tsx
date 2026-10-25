@@ -6,7 +6,11 @@ import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Tabs } from "../../components/ui/Tabs.js";
 import { useToast } from "../../components/ui/Toast.js";
-import { firstGrpcDataPayload } from "../../lib/grpcPayload.js";
+import {
+  firstGrpcDataMessage,
+  firstGrpcDataPayload,
+  grpcDataPayloadWithFallback,
+} from "../../lib/grpcPayload.js";
 import { useMcpContext } from "../../lib/mcp/context.js";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import type {
@@ -847,6 +851,40 @@ export function ResendPage() {
     // re-fetch must not overwrite in-flight edits; trigger only on flow id change
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flow?.id]);
+
+  // gRPC payload fallback: the server emits message_preview only for flows
+  // with more than two messages, so a gRPC flow that stopped early (send
+  // Start + Data, no receive rows) has no preview and the populate effect
+  // above leaves the payload empty. Fetch the messages list for that flow
+  // and fill the payload, unless the user has already typed one.
+  useEffect(() => {
+    if (!flow || !isGrpcFlow(flow) || !client) return;
+    if (firstGrpcDataMessage(flow.message_preview, "send")) return;
+    let cancelled = false;
+    const preview = flow.message_preview;
+    client
+      .query({ resource: "messages", id: flow.id })
+      .then((res) => {
+        if (cancelled) return;
+        const payload = grpcDataPayloadWithFallback(
+          preview,
+          (res as MessagesResult).messages,
+          "send",
+        );
+        if (!payload) return;
+        setGrpcState((prev) =>
+          prev.messagePayload === "" ? { ...prev, messagePayload: payload } : prev,
+        );
+      })
+      .catch(() => {
+        // Best-effort pre-fill: leave the payload empty on failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Same trigger as the populate effect: only on flow id change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flow?.id, client]);
 
   // Sync route param changes.
   useEffect(() => {

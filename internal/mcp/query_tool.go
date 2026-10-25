@@ -899,6 +899,14 @@ func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode in
 // (h2-frame, ...) does not, so the semantic rows are fetched separately. The
 // top level never depends on filter.wire_level, which governs only
 // message_count / message_preview.
+//
+// Cost: under an overlay-only filter this is one extra full GetFlows
+// (bodies included) per stream, on top of the caller's own per-stream
+// fetch. It is accepted rather than adding a head-only store query: the
+// extra fetch is opt-in (only the non-default overlay-only wire_level
+// triggers it), bounded by the page size on resource=flows (one stream on
+// resource=flow), reachable only by the MCP caller, and no larger than the
+// per-stream fetch the caller already performs.
 func (s *Server) headSourceFlows(ctx context.Context, streamID, wireLevel string, msgs []*flow.Flow) ([]*flow.Flow, error) {
 	if wireLevel == "" || wireLevel == flow.WireLevelSemantic {
 		return msgs, nil
@@ -953,6 +961,8 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			return nil, nil, fmt.Errorf("get messages for flow %s: %w", fl.ID, err)
 		}
 
+		// Overlay-only wire_level adds one semantic GetFlows per stream on
+		// this page (bounded by the page size); see headSourceFlows.
 		headMsgs, err := s.headSourceFlows(ctx, fl.ID, wireLevel, msgs)
 		if err != nil {
 			return nil, nil, fmt.Errorf("get semantic messages for flow %s: %w", fl.ID, err)
