@@ -10,6 +10,7 @@ import { buildHar, downloadHar } from "../../lib/export/har.js";
 import {
   isStreamingFlow,
   pickFlowDetailKind,
+  protocolVariant,
 } from "../../lib/mcp/dispatch.js";
 import { useManage, useQuery } from "../../lib/mcp/hooks.js";
 import type {
@@ -22,7 +23,7 @@ import "./FlowDetailPage.css";
 import { FlowDetailRawMessage } from "./FlowDetailRawMessage.js";
 import { FlowDetailSSEMessage } from "./FlowDetailSSEMessage.js";
 import { FlowDetailWSMessage } from "./FlowDetailWSMessage.js";
-import { Http2Badge, Http2Info, Http2StreamGroups } from "./Http2Info.js";
+import { HttpVersionMeta } from "./HttpVersionMeta.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,29 +33,6 @@ import { Http2Badge, Http2Info, Http2StreamGroups } from "./Http2Info.js";
 function shortId(id: string): string {
   if (!id) return "";
   return id.length > 8 ? id.slice(0, 8) : id;
-}
-
-/** Get the Badge variant for a protocol. */
-function protocolVariant(
-  protocol: string,
-): "default" | "success" | "warning" | "danger" | "info" {
-  switch (protocol) {
-    case "HTTP/1.x":
-      return "default";
-    case "HTTPS":
-      return "success";
-    case "WebSocket":
-      return "info";
-    case "HTTP/2":
-      return "info";
-    case "gRPC":
-    case "gRPC-Web":
-      return "warning";
-    case "TCP":
-      return "danger";
-    default:
-      return "default";
-  }
 }
 
 /** Get the CSS class for a status code. */
@@ -332,8 +310,8 @@ export function FlowDetailPage() {
             <Badge variant={protocolVariant(flowSafe.protocol ?? "")}>
               {flowSafe.protocol || "unknown"}
             </Badge>
-            {flowSafe.protocol === "HTTP/2" && <Http2Badge flow={flowSafe} />}
           </div>
+          <HttpVersionMeta flow={flowSafe} />
           {responseStatus > 0 && (
             <div className="sd-meta-item">
               <span className="sd-meta-label">Status</span>
@@ -460,9 +438,6 @@ export function FlowDetailPage() {
             </div>
           )}
 
-        {/* HTTP/2 specific info */}
-        {flowSafe.protocol === "HTTP/2" && <Http2Info flow={flowSafe} />}
-
         {/* Connection info */}
         {flowSafe.conn_info && (
           <div className="sd-conn-info">
@@ -501,13 +476,6 @@ export function FlowDetailPage() {
           </div>
         )}
       </div>
-
-      {/* HTTP/2 Stream Grouping (for multi-stream message previews) */}
-      {flowSafe.protocol === "HTTP/2" && messages.length > 0 && (
-        <div className="sd-section">
-          <Http2StreamGroups messages={messages} />
-        </div>
-      )}
 
       {/* Per-protocol body dispatch */}
       {flowKind === "ws" && (

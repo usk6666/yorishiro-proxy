@@ -12,6 +12,12 @@ import {
   grpcDataPayloadWithFallback,
 } from "../../lib/grpcPayload.js";
 import { useMcpContext } from "../../lib/mcp/context.js";
+import {
+  isGrpcProtocol,
+  isHttp2,
+  isRawProtocol,
+  isWsProtocol,
+} from "../../lib/mcp/dispatch.js";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import type {
   BodyPatch,
@@ -200,26 +206,17 @@ function statusBadgeVariant(
 
 /** Detect whether a flow uses TCP/raw protocol. */
 function isTcpFlow(flow: FlowDetailResult): boolean {
-  const proto = (flow.protocol || "").toLowerCase();
-  return proto === "tcp" || proto === "raw";
-}
-
-/** Check if a flow is HTTP/2, gRPC, or gRPC-Web (no raw bytes stored). */
-function isHttp2Flow(flow: FlowDetailResult): boolean {
-  const proto = (flow.protocol || "").toLowerCase();
-  return proto === "http/2" || proto === "h2" || proto === "grpc" || proto === "grpc-web";
+  return isRawProtocol(flow.protocol);
 }
 
 /** Detect whether a flow is gRPC / gRPC-Web (uses resend_grpc dispatch). */
 function isGrpcFlow(flow: FlowDetailResult): boolean {
-  const proto = (flow.protocol || "").toLowerCase();
-  return proto === "grpc" || proto === "grpc-web";
+  return isGrpcProtocol(flow.protocol);
 }
 
 /** Detect whether a flow is a WebSocket flow (uses resend_ws dispatch). */
 function isWsFlow(flow: FlowDetailResult): boolean {
-  const proto = (flow.protocol || "").toLowerCase();
-  return proto === "ws" || proto === "websocket";
+  return isWsProtocol(flow.protocol);
 }
 
 /**
@@ -634,7 +631,7 @@ export function ResendPage() {
   // Determine protocol mode from flow data.
   const flow = flowData as FlowDetailResult | null;
   const isTcp = useMemo(() => flow != null && isTcpFlow(flow), [flow]);
-  const isH2 = useMemo(() => flow != null && isHttp2Flow(flow), [flow]);
+  const isH2 = useMemo(() => isHttp2(flow), [flow]);
   const isGrpc = useMemo(() => flow != null && isGrpcFlow(flow), [flow]);
   const isWs = useMemo(() => flow != null && isWsFlow(flow), [flow]);
 
@@ -896,7 +893,7 @@ export function ResendPage() {
       setHttpResponse(adaptedResult);
       recordResendSuccess({
         id: typedResult.stream_id,
-        protocol: flow.protocol ?? "HTTP",
+        protocol: flow.protocol ?? "http",
         method,
         url,
         statusCode: typedResult.status_code,
@@ -981,7 +978,7 @@ export function ResendPage() {
 
       recordResendSuccess({
         id: typedResult.stream_id,
-        protocol: flow?.protocol ?? "Raw",
+        protocol: flow?.protocol ?? "raw",
         method: "RAW",
         url: rawTargetAddr.trim(),
         durationMs: typedResult.duration_ms,
@@ -1092,7 +1089,7 @@ export function ResendPage() {
       setTcpResponse(adapted);
       recordResendSuccess({
         id: typedResult.stream_id,
-        protocol: flow?.protocol ?? "TCP",
+        protocol: flow?.protocol ?? "raw",
         method: "RAW",
         url: targetAddr.trim(),
         durationMs: typedResult.duration_ms,
@@ -1156,7 +1153,7 @@ export function ResendPage() {
       setGrpcResponse(result);
       recordResendSuccess({
         id: result.stream_id,
-        protocol: flow?.protocol ?? "gRPC",
+        protocol: flow?.protocol ?? "grpc",
         method: flow?.method ?? "POST",
         url: flow?.url ?? `${grpcState.service}/${grpcState.method}`,
         statusCode: result.end?.status,
@@ -1225,7 +1222,7 @@ export function ResendPage() {
       setWsResponse(result);
       recordResendSuccess({
         id: result.stream_id,
-        protocol: flow?.protocol ?? "WebSocket",
+        protocol: flow?.protocol ?? "ws",
         method: result.opcode.toUpperCase(),
         url: flow?.url ?? wsState.path,
         durationMs: result.duration_ms,
@@ -1303,7 +1300,7 @@ export function ResendPage() {
 
       recordResendSuccess({
         id: typedResult.stream_id,
-        protocol: flow?.protocol ?? "TCP",
+        protocol: flow?.protocol ?? "raw",
         method: "REPLAY",
         url: targetAddr.trim(),
         durationMs: typedResult.duration_ms,
@@ -1395,7 +1392,9 @@ export function ResendPage() {
             <div className="resend-panel-header">
               <span className="resend-panel-title">Request</span>
               <Badge variant="info">{activeFlowId.slice(0, 8)}</Badge>
-              <Badge variant="default">{isH2 ? "HTTP/2" : "HTTP"}</Badge>
+              <Badge variant={isH2 ? "info" : "default"}>
+                {flow?.http_version || "HTTP"}
+              </Badge>
               {httpEditorMode === "raw" && (
                 <Badge variant="warning">RAW</Badge>
               )}
@@ -1705,7 +1704,7 @@ export function ResendPage() {
             <div className="resend-panel-header">
               <span className="resend-panel-title">gRPC Request</span>
               <Badge variant="info">{activeFlowId.slice(0, 8)}</Badge>
-              <Badge variant="default">{flow?.protocol ?? "gRPC"}</Badge>
+              <Badge variant="default">{flow?.protocol ?? "grpc"}</Badge>
             </div>
 
             <div className="resend-tag-row">

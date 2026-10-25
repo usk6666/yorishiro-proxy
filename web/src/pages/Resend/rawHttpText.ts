@@ -3,12 +3,16 @@
  * it can be tested against recorded `query resource=flow` fixtures.
  */
 
+import { isGrpcProtocol, isHttp2 } from "../../lib/mcp/dispatch.js";
 import type { FlowDetailResult } from "../../lib/mcp/types.js";
 
-/** Check if a flow is HTTP/2, gRPC, or gRPC-Web (no raw bytes stored). */
-function isHttp2Flow(flow: FlowDetailResult): boolean {
-  const proto = (flow.protocol || "").toLowerCase();
-  return proto === "http/2" || proto === "h2" || proto === "grpc" || proto === "grpc-web";
+/**
+ * Whether a flow's raw_request is HTTP/2 framing (HEADERS / CONTINUATION
+ * frame block) rather than HTTP/1.x text: h2 / h2c flows and gRPC /
+ * gRPC-Web, which ride on HTTP/2.
+ */
+function hasBinaryRawRequest(flow: FlowDetailResult): boolean {
+  return isHttp2(flow) || isGrpcProtocol(flow.protocol);
 }
 
 /**
@@ -26,7 +30,8 @@ function decodeRawRequest(base64Data: string): string | null {
 
 /**
  * Reconstruct an HTTP/1.1 raw message from parsed flow data.
- * Used for HTTP/2, gRPC, and gRPC-Web flows that don't store raw bytes.
+ * Used for HTTP/2, gRPC, and gRPC-Web flows, whose raw bytes are binary
+ * frames, and for flows with no raw bytes.
  *
  * Format:
  *   {Method} {RequestURI} HTTP/1.1\r\n
@@ -93,7 +98,7 @@ export function reconstructHttp11(flow: FlowDetailResult): string {
  * reconstruction from the parsed fields.
  */
 export function initialRawHttpText(flow: FlowDetailResult): string {
-  if (!isHttp2Flow(flow) && flow.raw_request) {
+  if (!hasBinaryRawRequest(flow) && flow.raw_request) {
     // HTTP/1.x: decode the recorded raw bytes.
     const decoded = decodeRawRequest(flow.raw_request);
     return decoded ?? reconstructHttp11(flow);

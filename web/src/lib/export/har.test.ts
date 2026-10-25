@@ -12,7 +12,7 @@ function makeFlow(
   return {
     id: "test-id",
     conn_id: "conn-1",
-    protocol: "HTTP/1.x",
+    protocol: "http",
     flow_type: "http",
     state: "complete",
     method: "GET",
@@ -97,7 +97,8 @@ describe("buildHar", () => {
   it("strips request pseudo-headers from HTTP/2 request.headers[]", () => {
     const har = buildHar(
       makeFlow({
-        protocol: "HTTP/2",
+        protocol: "http",
+        http_version: "h2",
         method: "POST",
         url: "https://example.com/api",
         request_headers: {
@@ -123,7 +124,8 @@ describe("buildHar", () => {
   it("strips :status from HTTP/2 response.headers[]", () => {
     const har = buildHar(
       makeFlow({
-        protocol: "HTTP/2",
+        protocol: "http",
+        http_version: "h2",
         response_status_code: 200,
         response_headers: {
           ":status": ["200"],
@@ -142,7 +144,8 @@ describe("buildHar", () => {
   it("strips pseudo-headers regardless of casing", () => {
     const har = buildHar(
       makeFlow({
-        protocol: "HTTP/2",
+        protocol: "http",
+        http_version: "h2",
         request_headers: {
           ":METHOD": ["GET"],
           ":Path": ["/api"],
@@ -159,7 +162,8 @@ describe("buildHar", () => {
   it("populates request.method / request.url / response.status from top-level fields even when pseudo-headers are filtered", () => {
     const har = buildHar(
       makeFlow({
-        protocol: "HTTP/2",
+        protocol: "http",
+        http_version: "h2",
         method: "DELETE",
         url: "https://example.com/items/42",
         response_status_code: 204,

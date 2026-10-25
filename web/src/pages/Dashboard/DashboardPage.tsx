@@ -3,7 +3,9 @@ import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { useMcpContext } from "../../lib/mcp/context.js";
+import { protocolVariant } from "../../lib/mcp/dispatch.js";
 import { useQuery, useSecurity } from "../../lib/mcp/hooks.js";
+import { PROTOCOL_BREAKDOWN } from "../../lib/mcp/protocols.js";
 import type {
   FlowsResult,
   ListenerStatusEntry,
@@ -19,8 +21,6 @@ import "./DashboardPage.css";
 // ---------------------------------------------------------------------------
 
 const POLL_INTERVAL = 5000;
-
-const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "gRPC-Web", "TCP"] as const;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,20 +50,6 @@ function parseTarget(value: string): { host: string; port: string } {
   return { host: value.slice(0, lastColon), port: value.slice(lastColon + 1) };
 }
 
-/** Get badge variant for protocol. */
-function protocolVariant(protocol: string): "default" | "success" | "warning" | "danger" | "info" {
-  switch (protocol) {
-    case "HTTP/1.x": return "default";
-    case "HTTPS": return "success";
-    case "WebSocket": return "info";
-    case "HTTP/2": return "info";
-    case "gRPC": return "warning";
-    case "gRPC-Web": return "warning";
-    case "TCP": return "danger";
-    default: return "default";
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -84,42 +70,25 @@ export function DashboardPage() {
     refetch: refetchFlows,
   } = useQuery("flows", { pollInterval: POLL_INTERVAL, limit: 0 });
 
-  // Fetch per-protocol flow counts
-  const { data: httpFlows } = useQuery("flows", {
+  // Fetch per-protocol flow counts: one query per PROTOCOL_BREAKDOWN row,
+  // in its order. Hooks cannot run in a loop, so each row is listed
+  // explicitly; keep this list in step with PROTOCOL_BREAKDOWN.
+  const breakdownQuery = (i: number) => ({
     pollInterval: POLL_INTERVAL,
     limit: 0,
-    filter: { protocol: "HTTP/1.x" },
+    filter: PROTOCOL_BREAKDOWN[i].filter,
   });
-  const { data: httpsFlows } = useQuery("flows", {
-    pollInterval: POLL_INTERVAL,
-    limit: 0,
-    filter: { protocol: "HTTPS" },
-  });
-  const { data: wsFlows } = useQuery("flows", {
-    pollInterval: POLL_INTERVAL,
-    limit: 0,
-    filter: { protocol: "WebSocket" },
-  });
-  const { data: h2Flows } = useQuery("flows", {
-    pollInterval: POLL_INTERVAL,
-    limit: 0,
-    filter: { protocol: "HTTP/2" },
-  });
-  const { data: grpcFlows } = useQuery("flows", {
-    pollInterval: POLL_INTERVAL,
-    limit: 0,
-    filter: { protocol: "gRPC" },
-  });
-  const { data: grpcWebFlows } = useQuery("flows", {
-    pollInterval: POLL_INTERVAL,
-    limit: 0,
-    filter: { protocol: "gRPC-Web" },
-  });
-  const { data: tcpFlows } = useQuery("flows", {
-    pollInterval: POLL_INTERVAL,
-    limit: 0,
-    filter: { protocol: "TCP" },
-  });
+  const breakdownResults: (FlowsResult | null)[] = [
+    useQuery("flows", breakdownQuery(0)).data,
+    useQuery("flows", breakdownQuery(1)).data,
+    useQuery("flows", breakdownQuery(2)).data,
+    useQuery("flows", breakdownQuery(3)).data,
+    useQuery("flows", breakdownQuery(4)).data,
+    useQuery("flows", breakdownQuery(5)).data,
+    useQuery("flows", breakdownQuery(6)).data,
+    useQuery("flows", breakdownQuery(7)).data,
+    useQuery("flows", breakdownQuery(8)).data,
+  ];
 
   // Fetch intercept queue count
   const {
@@ -225,21 +194,12 @@ export function DashboardPage() {
 
   // Build protocol breakdown
   const protocolCounts: Record<string, number> = {};
-  const protocolResults: Record<string, FlowsResult | null> = {
-    "HTTP/1.x": httpFlows,
-    "HTTPS": httpsFlows,
-    "WebSocket": wsFlows,
-    "HTTP/2": h2Flows,
-    "gRPC": grpcFlows,
-    "gRPC-Web": grpcWebFlows,
-    "TCP": tcpFlows,
-  };
-  for (const proto of PROTOCOLS) {
-    const result = protocolResults[proto];
+  PROTOCOL_BREAKDOWN.forEach((row, i) => {
+    const result = breakdownResults[i];
     if (result) {
-      protocolCounts[proto] = result.total;
+      protocolCounts[row.label] = result.total;
     }
-  }
+  });
 
   const totalFlows = flowsData?.total ?? statusData?.total_flows ?? 0;
   const maxProtocolCount = Math.max(1, ...Object.values(protocolCounts));
@@ -420,18 +380,18 @@ export function DashboardPage() {
           <div className="dashboard-empty">No flows captured yet.</div>
         ) : (
           <div className="dashboard-protocol-chart">
-            {PROTOCOLS.map((proto) => {
+            {PROTOCOL_BREAKDOWN.map(({ label: proto, filter }) => {
               const count = protocolCounts[proto] ?? 0;
               if (count === 0) return null;
               const pct = Math.round((count / maxProtocolCount) * 100);
               return (
                 <div key={proto} className="dashboard-protocol-row">
                   <div className="dashboard-protocol-label">
-                    <Badge variant={protocolVariant(proto)}>{proto}</Badge>
+                    <Badge variant={protocolVariant(filter.protocol)}>{proto}</Badge>
                   </div>
                   <div className="dashboard-protocol-bar-container">
                     <div
-                      className={`dashboard-protocol-bar dashboard-protocol-bar--${protocolVariant(proto)}`}
+                      className={`dashboard-protocol-bar dashboard-protocol-bar--${protocolVariant(filter.protocol)}`}
                       style={{ width: `${Math.max(pct, 2)}%` }}
                     />
                   </div>

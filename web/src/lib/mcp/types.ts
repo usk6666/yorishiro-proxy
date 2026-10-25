@@ -738,53 +738,11 @@ export interface CACertResult {
   install_hint?: string;
 }
 
-// ---------------------------------------------------------------------------
-// Per-protocol Message-typed flow shapes (light-touch discriminated union).
-//
-// These types layer over the existing FlowDetailResult wire shape for callers
-// that want to narrow on `flow.protocol`. The MCP wire format is unchanged;
-// these types provide compile-time discrimination and explicit field maps for
-// per-protocol UI components.
-// ---------------------------------------------------------------------------
-
 /** Ordered header pair preserving wire case/order/duplicates. */
 export interface HeaderKV {
   name: string;
   value: string;
 }
-
-/** HTTP/1.x or HTTP/2 (and HTTPS) Message-typed flow shape. */
-export interface HTTPMessageFlow extends FlowDetailResult {
-  protocol: "HTTP/1.x" | "HTTP/2" | "HTTPS";
-}
-
-/** WebSocket Message-typed flow shape. */
-export interface WSMessageFlow extends FlowDetailResult {
-  protocol: "WebSocket";
-}
-
-/** gRPC / gRPC-Web Message-typed flow shape (covers Start / Data / End frames). */
-export interface GRPCMessageFlow extends FlowDetailResult {
-  protocol: "gRPC" | "gRPC-Web";
-}
-
-/** SSE (Server-Sent Events) Message-typed flow shape. */
-export interface SSEMessageFlow extends FlowDetailResult {
-  protocol: "SSE";
-}
-
-/** Raw / TCP Message-typed flow shape. */
-export interface RawMessageFlow extends FlowDetailResult {
-  protocol: "TCP" | "Raw";
-}
-
-/** Discriminated Message-typed flow union. */
-export type MessageFlow =
-  | HTTPMessageFlow
-  | WSMessageFlow
-  | GRPCMessageFlow
-  | SSEMessageFlow
-  | RawMessageFlow;
 
 /**
  * `protocol` of an intercept queue entry: names which per-Message-type view
