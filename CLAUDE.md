@@ -157,6 +157,7 @@ make test           # fast tier: ensure-ui → go test -race -v ./... (unit test
 make test-fast      # alias for `make test`; explicit naming for the fast tier (USK-728)
 make test-pkg PKG=./internal/<pkg>/... [RUN=<regexp>] [TAGS=e2e]
                     # one package/pattern only — the TDD red/green loop
+make test-ui        # web/ only: pnpm install --frozen-lockfile → vitest run
 make test-depsec    # tools/depsec module only: gofmt check + go vet + go test -race (no UI needed)
 make test-e2e-smoke # smoke tier (merge gate): ensure-ui → tools/smokeselect → go test -race -v -tags 'e2e e2e_smoke'
                     #   -run <smoke tests only> <smoke packages>  (untagged tests are NOT re-run; USK-1209)
@@ -165,6 +166,7 @@ make test-cover     # ensure-ui → test with coverage report
 make vet            # ensure-ui → go vet ./...
 make fmt            # Format all files with gofmt -w .
 make lint           # gofmt check + golangci-lint (govet/staticcheck/unused/ineffassign/gocyclo)
+make lint-ui        # web/ only: eslint with --max-warnings 0 (`make lint` stays Go-only)
 make lint-workflows # .github/ checks: status-check needs + job permissions guards (yq), pinact, ghalint, actionlint+shellcheck
                     #   (needs network; tools pinned + sha256-verified in .workflow-lint-tools)
 make bench          # ensure-ui → run benchmarks
