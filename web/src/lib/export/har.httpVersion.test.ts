@@ -6,11 +6,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { FlowDetailResult } from "../mcp/types.js";
+import type { FlowDetailResult, FlowEntry, FlowsResult } from "../mcp/types.js";
 import h1Text from "../../pages/FlowDetail/__fixtures__/h1-flow.response.json?raw";
 import h2Text from "../../pages/FlowDetail/__fixtures__/h2-flow.response.json?raw";
 import h2cText from "../../pages/FlowDetail/__fixtures__/h2c-flow.response.json?raw";
-import { buildHar } from "./har.js";
+import flowsText from "../../pages/Flows/__fixtures__/flows-all-protocols.response.json?raw";
+import { buildHar, buildHarFromList } from "./har.js";
 
 const h1 = JSON.parse(h1Text) as FlowDetailResult;
 const h2 = JSON.parse(h2Text) as FlowDetailResult;
@@ -37,5 +38,38 @@ describe("buildHar httpVersion", () => {
   it("mirrors harHTTPVersion for http/1.0 and an empty version", () => {
     expect(versions({ ...h1, http_version: "http/1.0" })).toEqual(["HTTP/1.0", "HTTP/1.0"]);
     expect(versions({ ...h1, http_version: undefined })).toEqual(["HTTP/1.1", "HTTP/1.1"]);
+  });
+});
+
+describe("buildHarFromList httpVersion", () => {
+  const list = JSON.parse(flowsText) as FlowsResult;
+
+  function row(id: string): FlowEntry {
+    const f = list.flows.find((e) => e.id === id);
+    if (!f) throw new Error(`fixture has no row ${id}`);
+    return f;
+  }
+
+  function listVersions(flow: FlowEntry): [string, string] {
+    const entry = buildHarFromList([flow]).log.entries[0];
+    return [entry.request.httpVersion, entry.response.httpVersion];
+  }
+
+  it("list rows carry the recorded http_version", () => {
+    expect(row("stream-http-h2").http_version).toBe("h2");
+    expect(row("stream-http-h2c").http_version).toBe("h2c");
+    expect(row("stream-http-h1").http_version).toBe("http/1.1");
+  });
+
+  it("writes h2 / h2c / HTTP/1.1 for recorded list rows", () => {
+    expect(listVersions(row("stream-http-h2"))).toEqual(["h2", "h2"]);
+    expect(listVersions(row("stream-http-h2c"))).toEqual(["h2c", "h2c"]);
+    expect(listVersions(row("stream-http-h1"))).toEqual(["HTTP/1.1", "HTTP/1.1"]);
+  });
+
+  it("keys on http_version, falling back to HTTP/1.1 when absent", () => {
+    const h1Row = row("stream-http-h1");
+    expect(listVersions({ ...h1Row, http_version: "h2" })).toEqual(["h2", "h2"]);
+    expect(listVersions({ ...h1Row, http_version: undefined })).toEqual(["HTTP/1.1", "HTTP/1.1"]);
   });
 });
