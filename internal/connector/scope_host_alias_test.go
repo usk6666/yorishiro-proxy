@@ -139,8 +139,11 @@ func TestCheckTarget_HostAliasAllowSymmetry(t *testing.T) {
 		wantAllow bool
 	}{
 		{"allow ipv4 admits mapped", "10.0.0.5", "::ffff:10.0.0.5", true},
-		{"allow ipv4 admits legacy decimal", "10.0.0.5", "167772165", true},
-		{"allow ipv4 admits legacy short", "10.0.0.5", "10.5", true}, // last part fills three bytes
+		// USK-1273: a legacy IPv4 spelling is refused as a dial host
+		// whenever rules exist, so an allow no longer admits it (Go's pure
+		// resolver may send it to DNS and land on another host).
+		{"allow ipv4 refuses legacy decimal", "10.0.0.5", "167772165", false},
+		{"allow ipv4 refuses legacy short", "10.0.0.5", "10.5", false}, // last part fills three bytes
 		{"allow name admits trailing dot", "example.com", "example.com.", true},
 		{"allow wildcard admits trailing dot", "*.example.com", "a.example.com.", true},
 		{"allow mapped rule admits ipv4", "::ffff:10.0.0.5", "10.0.0.5", true},
@@ -265,6 +268,7 @@ func TestCanonicalScopeHost_GarbageNoPanic(t *testing.T) {
 	scope.SetPolicyRules(nil, []TargetRule{{Hostname: "127.0.0.1"}})
 	for _, in := range inputs {
 		_ = canonicalScopeHost(in)
+		_ = legacyIPv4Spelling(in)
 		_, _ = scope.CheckTarget("https", in, 443, "")
 		_ = hostnameCoveredBy(in, in)
 		_ = matchHostname(in, in)

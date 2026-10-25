@@ -41,9 +41,13 @@ var targetRuleSchemes = map[string]bool{
 //     unmaps IPv4-mapped IPv6 in both directions (a "::ffff:10.0.0.5"
 //     rule is accepted and equals "10.0.0.5"), strips one trailing dot
 //     from the target, and reads legacy inet_aton IPv4 target spellings
-//     ("2130706433", "127.1") as dotted-quad (USK-1250). Those legacy
-//     spellings are still rejected as rule hostnames ("invalid IPv4
-//     address"): the dotted-quad rule already matches them. A wildcard
+//     ("2130706433", "127.1") as dotted-quad (USK-1250); as a dial target
+//     such a spelling is refused whenever any rule exists (USK-1273), so
+//     the fold only matters for Host / :authority name legs. The all-digit
+//     legacy spellings ("2130706433", "127.1", "0177.0.0.1") are rejected
+//     as rule hostnames ("invalid IPv4 address"): the dotted-quad rule
+//     already matches them. A hex spelling ("0x7f.0.0.1") is not: it loads
+//     as a domain name and folds to its IPv4 address on the rule side. A wildcard
 //     over an IP literal ("*.::1", "*.[::1]", "*.10.0.0.1") is rejected:
 //     no host ends with ".::1".
 //     Labels may contain letters, digits, '-' and '_'.

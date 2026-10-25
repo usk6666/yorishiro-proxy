@@ -686,8 +686,10 @@ type TargetRuleConfig struct {
 	// compared in a canonical form, so a rule matches every spelling that
 	// dials the same host: IPv6 text forms with or without a zone,
 	// IPv4-mapped IPv6 and its IPv4 address, one trailing dot, and legacy
-	// IPv4 spellings ("127.1") (USK-1250). When empty, the rule matches any
-	// host.
+	// IPv4 spellings ("127.1") (USK-1250). A legacy IPv4 spelling (and a
+	// trailing-dot IPv4) is matched only in a Host / :authority value: as a
+	// dial target it is refused whenever any rule is set (USK-1273). When
+	// empty, the rule matches any host.
 	// See ValidateTargetRule for the accepted forms (bare "*", "host:port",
 	// URLs and wildcards over IP literals are rejected).
 	Hostname string `json:"hostname"`
