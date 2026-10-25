@@ -399,7 +399,9 @@ func (r *bodyBufRegistry) drain() {
 // normalize it before returning (pipeline.adoptForward): release the
 // substitute's own reference on every buffer it shares with the input, and
 // release the input's BodyBuffer reference itself when the substitute no
-// longer points at it. Pointer identity alone cannot tell an owning
+// longer points at it. A plugin substitute only aliases, so the plugin
+// dispatcher just does the latter (pipeline.releaseDroppedBody) when a hook
+// replaced the body. Pointer identity alone cannot tell an owning
 // substitute from an aliasing one, so the accounting cannot be inferred
 // here after the fact.
 //
