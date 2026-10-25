@@ -117,6 +117,18 @@ type proxyStartInput struct {
 	// Required when socks5_auth is "password".
 	SOCKS5Password string `json:"socks5_password,omitempty" jsonschema:"password for SOCKS5 password authentication"`
 
+	// TransparentMode selects the listener mode (USK-1316): omitted
+	// inherits the config-file default (off when none), "none" is the
+	// explicit proxy, "redirect" accepts connections an nftables REDIRECT
+	// rule diverted to the listener and routes every TCP connection to
+	// its original destination by its first bytes (Linux only).
+	TransparentMode string `json:"transparent_mode,omitempty" jsonschema:"listener mode: none (explicit proxy, default) or redirect (transparent egress gateway: accept nftables-REDIRECTed TCP and relay each connection to its original destination; plain HTTP via the L7 pipeline, TLS and everything else as metadata-only passthrough; Linux only). Incompatible with tcp_forwards and socks5_auth=password. Full reference: call docs(topic=\"proxy_start\")"`
+
+	// TransparentPeekTimeoutMs is how long a transparent listener waits
+	// for the client's first bytes before treating the connection as
+	// server-first (passthrough). Default 1000.
+	TransparentPeekTimeoutMs *int `json:"transparent_peek_timeout_ms,omitempty" jsonschema:"transparent mode only: milliseconds to wait for the client's first bytes before relaying as server-first passthrough (100-600000; default: 1000)"`
+
 	// TLSFingerprint selects the TLS ClientHello fingerprint profile for upstream connections.
 	// Valid values: "firefox" (default), "chrome", "safari", "edge", "random", "none" (standard crypto/tls).
 	// If omitted, defaults to "firefox" (camoufox coherence, USK-1013).
@@ -229,6 +241,9 @@ type proxyStartResult struct {
 	Status string `json:"status"`
 	// TCPForwards is the configured TCP forwarding map (if any).
 	TCPForwards map[string]*config.ForwardConfig `json:"tcp_forwards,omitempty"`
+	// TransparentMode is "redirect" for a transparent listener, omitted
+	// for an explicit-proxy listener (USK-1316).
+	TransparentMode string `json:"transparent_mode,omitempty"`
 }
 
 // registerProxyStart registers the proxy_start MCP tool.
@@ -297,10 +312,18 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		return nil, nil, err
 	}
 
+	// USK-1316: transparent mode, validated after the config-file
+	// defaults were merged so a config-file transparent_mode conflicts
+	// with a call's tcp_forwards / socks5_auth too.
+	listenerOpts, err := transparentListenerOptions(&input)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// Start the listener BEFORE resetting/applying settings.
 	// This ensures a failed start (already running, bind error) does not
 	// clear the active configuration (USK-407).
-	if err := s.connector.manager.StartNamed(s.misc.appCtx, listenerName, input.ListenAddr); err != nil {
+	if err := s.connector.manager.StartNamedWithOptions(s.misc.appCtx, listenerName, input.ListenAddr, listenerOpts); err != nil {
 		return nil, nil, fmt.Errorf("proxy start: %w", err)
 	}
 
@@ -340,12 +363,35 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	addr := s.resolveListenerAddr(listenerName)
 
 	result := &proxyStartResult{
-		Name:        listenerName,
-		ListenAddr:  addr,
-		Status:      "running",
-		TCPForwards: parsedForwards,
+		Name:            listenerName,
+		ListenAddr:      addr,
+		Status:          "running",
+		TCPForwards:     parsedForwards,
+		TransparentMode: listenerOpts.TransparentMode,
 	}
 	return nil, result, nil
+}
+
+// transparentListenerOptions validates the transparent-mode inputs
+// (USK-1316) and returns the listener options they select.
+func transparentListenerOptions(input *proxyStartInput) (proxybuild.ListenerOptions, error) {
+	if err := config.ValidateTransparentMode(input.TransparentMode, len(input.TCPForwards), input.SOCKS5Auth); err != nil {
+		return proxybuild.ListenerOptions{}, err
+	}
+	var opts proxybuild.ListenerOptions
+	if input.TransparentPeekTimeoutMs != nil {
+		ms := *input.TransparentPeekTimeoutMs
+		if ms < config.MinTransparentPeekTimeoutMs || ms > config.MaxTransparentPeekTimeoutMs {
+			return opts, fmt.Errorf("transparent_peek_timeout_ms must be between %d and %d, got %d",
+				config.MinTransparentPeekTimeoutMs, config.MaxTransparentPeekTimeoutMs, ms)
+		}
+		opts.TransparentPeekTimeout = time.Duration(ms) * time.Millisecond
+	}
+	if input.TransparentMode != config.TransparentModeRedirect {
+		return proxybuild.ListenerOptions{}, nil
+	}
+	opts.TransparentMode = config.TransparentModeRedirect
+	return opts, nil
 }
 
 // resetSettingsToDefaults resets all proxy configuration to default values.
@@ -945,6 +991,19 @@ func (s *Server) applyProxyDefaultStrings(input *proxyStartInput, d *config.Prox
 		input.SOCKS5Password = d.SOCKS5Password
 	}
 	s.applyProxyDefaultTLSStrings(input, d)
+	applyProxyDefaultTransparent(input, d)
+}
+
+// applyProxyDefaultTransparent merges the transparent-mode defaults
+// (USK-1316) from config into the input.
+func applyProxyDefaultTransparent(input *proxyStartInput, d *config.ProxyConfig) {
+	if input.TransparentMode == "" && d.TransparentMode != "" {
+		input.TransparentMode = d.TransparentMode
+	}
+	if input.TransparentPeekTimeoutMs == nil && d.TransparentPeekTimeoutMs != 0 {
+		ms := d.TransparentPeekTimeoutMs
+		input.TransparentPeekTimeoutMs = &ms
+	}
 }
 
 // applyProxyDefaultTLSStrings merges TLS-related string defaults from config into the input.

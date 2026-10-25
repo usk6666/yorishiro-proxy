@@ -288,6 +288,31 @@ func matchAllowLayerHost(rules []TargetRule, scheme, hostname string, port int) 
 	return conditional, conditional
 }
 
+// CheckDenyOnly applies only the refusing half of CheckTarget: the
+// fail-closed dial-host guard and both deny layers, with path matched as
+// CheckTarget does. Allow rules are not consulted. The transparent
+// listener (USK-1316) uses it for an original destination that a name
+// leg, not an allow rule, admits: the destination must still not be
+// denied.
+func (s *TargetScope) CheckDenyOnly(scheme, hostname string, port int, path string) (allowed bool, reason string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if reason, blocked := s.dialHostFailClosedLocked(hostname, port); blocked {
+		return false, reason
+	}
+	for _, rule := range s.policyDenies {
+		if matchTargetRule(rule, scheme, hostname, port, path) {
+			return false, "blocked by policy deny rule"
+		}
+	}
+	for _, rule := range s.agentDenies {
+		if matchTargetRule(rule, scheme, hostname, port, path) {
+			return false, "blocked by agent deny rule"
+		}
+	}
+	return true, ""
+}
+
 // CheckOpaqueTarget is the gate check for a route on which no HTTP request
 // path is ever observed (USK-1130): it is CheckTarget with an empty path,
 // so a path-scoped allow does not admit the target. When the target is

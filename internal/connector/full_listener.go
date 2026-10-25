@@ -80,6 +80,21 @@ type FullListenerConfig struct {
 	// because MaxConnections was saturated (USK-1142). It runs on the
 	// reject goroutine and must be O(1), non-blocking, and I/O-free.
 	OnReject func(RejectInfo)
+
+	// OriginalDst, when non-nil together with OnTransparent, makes the
+	// listener a transparent (REDIRECT) listener (USK-1316): protocol
+	// detection and the PeekTimeout deadline are skipped; each accepted
+	// connection's original destination is resolved through it before a
+	// byte is read, and a connection without a usable one — the resolver
+	// failed, or it names an unspecified address, port 0 or the
+	// connection's own local address — is closed with a Warn log and
+	// OnTransparent is not called. The admitted destination reaches
+	// OnTransparent via OriginalDstFromContext.
+	OriginalDst OriginalDstResolver
+
+	// OnTransparent handles every admitted connection of a transparent
+	// listener (see OriginalDst).
+	OnTransparent HandlerFunc
 }
 
 // FullListener accepts TCP connections, performs two-stage protocol detection,
@@ -106,6 +121,11 @@ type FullListener struct {
 	// nil keeps the log-only behaviour.
 	onReject func(RejectInfo)
 
+	// originalDst / onTransparent are the transparent-mode resolver and
+	// handler (USK-1316); both nil on an explicit-proxy listener.
+	originalDst   OriginalDstResolver
+	onTransparent HandlerFunc
+
 	// now is the clock used for rejection timestamps and the Warn
 	// rate limiter. Overridable in tests (before Start).
 	now func() time.Time
@@ -118,6 +138,11 @@ type FullListener struct {
 	// rejectWarn rate-limits the capacity-rejection Warn log. Its clock
 	// reads fl.now on every call so a test clock is honoured.
 	rejectWarn *RejectWarnLimiter
+
+	// origDstWarn rate-limits the transparent "no usable original
+	// destination" Warn log the same way (direct clients, health checks
+	// and scans must not flood it).
+	origDstWarn *RejectWarnLimiter
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -160,12 +185,15 @@ func NewFullListener(cfg FullListenerConfig) *FullListener {
 		onHTTP2:        cfg.OnHTTP2,
 		onTCP:          cfg.OnTCP,
 		onReject:       cfg.OnReject,
+		originalDst:    cfg.OriginalDst,
+		onTransparent:  cfg.OnTransparent,
 		now:            time.Now,
 
 		rejectPeekTimeout: defaultRejectPeekTimeout,
 		ready:             make(chan struct{}),
 	}
 	fl.rejectWarn = NewRejectWarnLimiter(func() time.Time { return fl.now() })
+	fl.origDstWarn = NewRejectWarnLimiter(func() time.Time { return fl.now() })
 	fl.peekTimeoutNs.Store(int64(peekTimeout))
 	return fl
 }
@@ -273,6 +301,11 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 	ctx = ContextWithListenerName(ctx, fl.name)
 	ctx = ContextWithLogger(ctx, connLogger)
 
+	if fl.originalDst != nil && fl.onTransparent != nil {
+		fl.handleTransparentConn(ctx, conn, pc, connLogger, connStart)
+		return
+	}
+
 	// Bound protocol detection by the peek deadline (Slowloris protection).
 	peekTimeout := time.Duration(fl.peekTimeoutNs.Load())
 	if peekTimeout > 0 {
@@ -317,6 +350,40 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 	if connLogger.Enabled(ctx, slog.LevelDebug) {
 		connLogger.Debug("connection closed",
 			"protocol", kind.String(),
+			"duration_ms", time.Since(connStart).Milliseconds(),
+		)
+	}
+}
+
+// handleTransparentConn is handleConn for a transparent listener
+// (USK-1316): no protocol detection and no peek deadline (the transparent
+// handler peeks with its own short deadline and treats silence as a
+// server-first protocol). The original destination is resolved on the raw
+// conn before a byte is read; an unusable one closes the connection with
+// a Warn and the handler is not called.
+func (fl *FullListener) handleTransparentConn(ctx context.Context, conn net.Conn, pc *PeekConn, connLogger *slog.Logger, connStart time.Time) {
+	dst, err := resolveTransparentDst(fl.originalDst, conn)
+	if err != nil {
+		attrs := []any{"local_addr", netAddrString(conn.LocalAddr()), "reason", err.Error()}
+		connLogger.Debug("transparent connection rejected: no usable original destination", attrs...)
+		warn, suppressed := true, int64(0)
+		if fl.origDstWarn != nil {
+			warn, suppressed = fl.origDstWarn.observe()
+		}
+		if warn {
+			connLogger.Warn("transparent connection rejected: no usable original destination",
+				append(attrs, "suppressed", suppressed)...)
+		}
+		return
+	}
+	ctx = ContextWithOriginalDst(ctx, dst)
+	if err := fl.onTransparent(ctx, pc); err != nil && !errors.Is(err, context.Canceled) {
+		connLogger.Debug("transparent handler ended with error", "original_dst", dst.String(), "error", err)
+	}
+	if connLogger.Enabled(ctx, slog.LevelDebug) {
+		connLogger.Debug("connection closed",
+			"protocol", "transparent",
+			"original_dst", dst.String(),
 			"duration_ms", time.Since(connStart).Milliseconds(),
 		)
 	}

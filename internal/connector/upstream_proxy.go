@@ -178,6 +178,7 @@ func dialViaHTTPProxy(ctx context.Context, proxyURL *url.URL, targetAddr string,
 	if err != nil {
 		return nil, fmt.Errorf("dial HTTP proxy %s: %w", proxyURL.Host, err)
 	}
+	notifyDialSocket(ctx, conn)
 
 	connectReq := buildCONNECTRequest(targetAddr, proxyURL)
 
@@ -276,7 +277,7 @@ func dialViaSOCKS5Proxy(ctx context.Context, proxyURL *url.URL, targetAddr strin
 		}
 	}
 
-	dialer, err := proxy.SOCKS5("tcp", proxyURL.Host, auth, &net.Dialer{Timeout: timeout})
+	dialer, err := proxy.SOCKS5("tcp", proxyURL.Host, auth, hookedDialer{d: &net.Dialer{Timeout: timeout}, ctx: ctx})
 	if err != nil {
 		return nil, fmt.Errorf("create SOCKS5 dialer for %s: %w", proxyURL.Host, err)
 	}

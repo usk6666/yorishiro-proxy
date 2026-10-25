@@ -60,6 +60,13 @@ type ManagerConfig struct {
 	// All other Deps fields the factory must source from its closure.
 	StackFactory func(ctx context.Context, name, addr string) (*Stack, error)
 
+	// StackFactoryWithOptions, when non-nil, builds the per-listener
+	// Stack with the ListenerOptions given to StartNamedWithOptions
+	// (USK-1316) and takes precedence over StackFactory. With only
+	// StackFactory set, StartNamedWithOptions refuses non-default
+	// options.
+	StackFactoryWithOptions func(ctx context.Context, name, addr string, opts ListenerOptions) (*Stack, error)
+
 	// BuildConfig, when non-nil, is the connector.BuildConfig instance
 	// shared by every Stack produced by StackFactory. The Manager mutates
 	// its dynamic upstream-proxy slot when SetUpstreamProxy is called so
@@ -115,8 +122,10 @@ type ManagerConfig struct {
 //     and tls=true are deferred to a follow-up issue and rejected at
 //     start time.
 type Manager struct {
-	logger         *slog.Logger
-	factory        func(ctx context.Context, name, addr string) (*Stack, error)
+	logger  *slog.Logger
+	factory func(ctx context.Context, name, addr string) (*Stack, error)
+	// factoryOpts is ManagerConfig.StackFactoryWithOptions (USK-1316).
+	factoryOpts    func(ctx context.Context, name, addr string, opts ListenerOptions) (*Stack, error)
 	buildCfg       *connector.BuildConfig
 	peekTimeout    time.Duration
 	requestTimeout time.Duration
@@ -180,7 +189,7 @@ type upstreamProxyRotationEntry struct {
 // returns an error so the bug surfaces at construction rather than at
 // the first StartNamed call.
 func NewManager(cfg ManagerConfig) (*Manager, error) {
-	if cfg.StackFactory == nil {
+	if cfg.StackFactory == nil && cfg.StackFactoryWithOptions == nil {
 		return nil, fmt.Errorf("proxybuild: NewManager: StackFactory is required")
 	}
 	logger := cfg.Logger
@@ -207,13 +216,14 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		rejections = NewConnectionRejections(ConnectionRejectionsConfig{Logger: logger})
 	}
 	return &Manager{
-		logger:     logger,
-		factory:    cfg.StackFactory,
-		buildCfg:   cfg.BuildConfig,
-		listeners:  make(map[string]*listenerEntry),
-		h1Upstream: h1Metrics,
-		h2Upstream: h2Metrics,
-		rejections: rejections,
+		logger:      logger,
+		factory:     cfg.StackFactory,
+		factoryOpts: cfg.StackFactoryWithOptions,
+		buildCfg:    cfg.BuildConfig,
+		listeners:   make(map[string]*listenerEntry),
+		h1Upstream:  h1Metrics,
+		h2Upstream:  h2Metrics,
+		rejections:  rejections,
 	}, nil
 }
 
@@ -290,6 +300,11 @@ func (m *Manager) Start(ctx context.Context, listenAddr string) error {
 // ErrBindConflict before the bind. A listener bound to a non-loopback
 // address logs one Warn line.
 func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string) error {
+	return m.startNamed(ctx, name, listenAddr, ListenerOptions{})
+}
+
+// startNamed is StartNamed with per-listener options.
+func (m *Manager) startNamed(ctx context.Context, name string, listenAddr string, opts ListenerOptions) error {
 	if name == "" {
 		name = DefaultListenerName
 	}
@@ -313,7 +328,7 @@ func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string
 		return fmt.Errorf("start proxy %q: %w", name, err)
 	}
 
-	stack, err := m.factory(ctx, name, listenAddr)
+	stack, err := m.buildStack(ctx, name, listenAddr, opts)
 	if err != nil {
 		return fmt.Errorf("proxybuild: build live stack %q: %w", name, err)
 	}
@@ -497,6 +512,37 @@ type ListenerStatus struct {
 	UpstreamProxy               string `json:"upstream_proxy,omitempty"`
 	UpstreamProxyTemplate       string `json:"upstream_proxy_template,omitempty"`
 	UpstreamProxyRotationPolicy string `json:"upstream_proxy_rotation_policy,omitempty"`
+	// TransparentMode is the listener's transparent mode ("redirect"),
+	// empty for an explicit-proxy listener (USK-1316).
+	TransparentMode string `json:"transparent_mode,omitempty"`
+}
+
+// ListenerOptions carries per-listener settings for StartNamedWithOptions
+// (USK-1316). The zero value is the explicit-proxy listener StartNamed
+// starts.
+type ListenerOptions struct {
+	// TransparentMode is Deps.TransparentMode for the listener: "" /
+	// "none" (explicit proxy) or "redirect".
+	TransparentMode string
+	// TransparentPeekTimeout is Deps.TransparentPeekTimeout.
+	TransparentPeekTimeout time.Duration
+}
+
+// StartNamedWithOptions is StartNamed with per-listener options.
+func (m *Manager) StartNamedWithOptions(ctx context.Context, name, listenAddr string, opts ListenerOptions) error {
+	return m.startNamed(ctx, name, listenAddr, opts)
+}
+
+// buildStack builds a listener Stack through the options-aware factory
+// when configured. Without one, only the zero options are accepted.
+func (m *Manager) buildStack(ctx context.Context, name, addr string, opts ListenerOptions) (*Stack, error) {
+	if m.factoryOpts != nil {
+		return m.factoryOpts(ctx, name, addr, opts)
+	}
+	if opts != (ListenerOptions{}) {
+		return nil, fmt.Errorf("listener options (transparent_mode %q) need ManagerConfig.StackFactoryWithOptions", opts.TransparentMode)
+	}
+	return m.factory(ctx, name, addr)
 }
 
 // ListenerStatuses returns a snapshot of every running listener. Returns
@@ -521,6 +567,7 @@ func (m *Manager) ListenerStatuses() []ListenerStatus {
 			ActiveConnections: entry.stack.Listener.ActiveConnections(),
 			UptimeSeconds:     uptime,
 			UpstreamProxy:     m.upstreamProxyPerListener[name],
+			TransparentMode:   entry.stack.TransparentMode,
 		}
 		if rot := m.upstreamProxyRotationPerListener[name]; rot != nil {
 			status.UpstreamProxyTemplate = rot.Template

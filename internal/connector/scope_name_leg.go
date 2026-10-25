@@ -231,6 +231,35 @@ func (s *TargetScope) CheckAuthority(scheme, authority, path, dialTarget string)
 	return s.checkNameValueLocked(scheme, authority, host, port, path, dialTarget)
 }
 
+// CheckAuthorityDenyOnly applies only the refusing half of
+// CheckAuthority: the uninterpretable-form guard and the name-leg deny
+// side (every reading, on the authority's port or the dial port). Allow
+// rules are not consulted. The transparent listener (USK-1316) uses it
+// for the SNI of a late ClientHello on a connection its original
+// destination admitted by itself, where names are deny-only legs.
+func (s *TargetScope) CheckAuthorityDenyOnly(scheme, authority, path, dialTarget string) (allowed bool, reason string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.hasRulesLocked() {
+		return true, ""
+	}
+	if !authorityFormInterpretable(scheme, authority) {
+		return false, ReasonAuthorityUninterpretable
+	}
+	host, port := splitAuthorityLenient(scheme, authority)
+	dialPort := 0
+	if dialTarget != "" {
+		var dialOK bool
+		if _, dialPort, dialOK = splitDialTarget(scheme, dialTarget); !dialOK {
+			return false, ReasonDialTargetUninterpretable
+		}
+	}
+	if ok, reason := s.extraReadingsDenyLocked(scheme, authority, path, dialPort); !ok {
+		return false, reason
+	}
+	return s.nameDenyLocked(scheme, host, port, dialPort, path)
+}
+
 // authorityFormInterpretable reports whether authority's host:port form
 // is one CheckHostHeader accepts, ignoring the port's value: either
 // splitHostHeaderValue accepts it outright, or net.SplitHostPort splits it

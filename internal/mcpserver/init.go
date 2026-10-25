@@ -476,13 +476,14 @@ func assembleLiveManager(
 	hostTLSRegistry *transport.HostTLSRegistry,
 	socks5Negotiator *connector.SOCKS5Negotiator,
 	recordScope *flow.RecordScope,
+	liveOpts LiveManagerOptions,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
 	buildCfg := NewLiveBuildConfig(cfg, proxyCfg, issuer, pluginv2Engine, hostTLSRegistry)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine, sseInterceptEngine,
 		httpTransformEngine, sseTransformEngine, passthrough, targetScope, liveConns, rateLimiter, budgetManager, safetyEngine, perProtoSafety, buildCfg,
-		socks5Negotiator, recordScope, logger)
+		socks5Negotiator, recordScope, liveOpts, logger)
 }
 
 // NewLiveBuildConfig assembles the connector.BuildConfig consumed by every
@@ -549,6 +550,15 @@ func NewLiveBuildConfig(
 	return bc
 }
 
+// LiveManagerOptions carries optional seams for NewLiveManager
+// (USK-1316): the transparent listener's original-destination resolver
+// and the name-binding resolver. The zero value uses the platform
+// resolvers.
+type LiveManagerOptions struct {
+	OriginalDstResolver connector.OriginalDstResolver
+	NameResolver        connector.NameResolver
+}
+
 // NewLiveManager constructs the live RFC-001 proxybuild.Manager. The
 // StackFactory closure captures the per-process singletons (logger,
 // store, build config, plugin engine, hold queue, rate limiter,
@@ -583,6 +593,7 @@ func NewLiveManager(
 	buildCfg *connector.BuildConfig,
 	socks5Negotiator *connector.SOCKS5Negotiator,
 	recordScope *flow.RecordScope,
+	liveOpts LiveManagerOptions,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
 	// PassthroughList, RateLimiter, and TargetScope come straight from
@@ -623,8 +634,13 @@ func NewLiveManager(
 	if store != nil {
 		store.OnClose(rejections.Close)
 	}
-	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
+	factoryOpts := func(ctx context.Context, name, addr string, lo proxybuild.ListenerOptions) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
+			// USK-1316: per-listener transparent mode + test seams.
+			TransparentMode:         lo.TransparentMode,
+			TransparentPeekTimeout:  lo.TransparentPeekTimeout,
+			OriginalDstResolver:     liveOpts.OriginalDstResolver,
+			NameResolver:            liveOpts.NameResolver,
 			Logger:                  logger,
 			ListenerName:            name,
 			ListenAddr:              addr,
@@ -668,9 +684,13 @@ func NewLiveManager(
 			ConnectionRejections: rejections,
 		})
 	}
+	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
+		return factoryOpts(ctx, name, addr, proxybuild.ListenerOptions{})
+	}
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{
-		Logger:       logger,
-		StackFactory: factory,
+		Logger:                  logger,
+		StackFactory:            factory,
+		StackFactoryWithOptions: factoryOpts,
 		// BuildConfig is the process-singleton handed to every Stack via
 		// the factory closure. Sharing the same pointer with the Manager
 		// lets Manager.SetUpstreamProxy mutate the live dial-path's

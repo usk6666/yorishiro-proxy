@@ -43,6 +43,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/mcpserver"
 )
 
@@ -120,6 +121,16 @@ type HarnessOptions struct {
 	// sets -export-dir, Harness.ExportDir reports that value instead of
 	// the harness-provided temp directory.
 	ExtraArgs []string
+
+	// OriginalDstResolver, when non-nil, is passed as
+	// mcpserver.RunOptions.OriginalDstResolver so a transparent listener
+	// (proxy_start transparent_mode="redirect") resolves each accepted
+	// connection's original destination through it instead of
+	// getsockopt(SO_ORIGINAL_DST) (USK-1316).
+	OriginalDstResolver connector.OriginalDstResolver
+
+	// NameResolver, when non-nil, is passed as mcpserver.RunOptions.NameResolver.
+	NameResolver connector.NameResolver
 }
 
 // Harness is the value returned by StartHarness. It owns a running MCP
@@ -260,7 +271,7 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 	addrCh := make(chan string, 1)
 	runErrCh := make(chan error, 1)
 	reload := newPolicyReloadDriver()
-	go runMCPServer(runCtx, args, addrCh, runErrCh, reload)
+	go runMCPServer(runCtx, args, addrCh, runErrCh, reload, opts)
 
 	addr := waitForListening(t, addrCh, runErrCh, runCancel, upstream)
 	baseURL := fmt.Sprintf("http://%s/", addr)
@@ -593,13 +604,15 @@ func buildHTTP1Upstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, 
 // builds a fresh flag.FlagSet (per the mcpserver.Run contract) and
 // publishes the resolved listen address through addrCh; the final
 // return value of Run lands in runErrCh.
-func runMCPServer(ctx context.Context, args []string, addrCh chan<- string, runErrCh chan<- error, reload *policyReloadDriver) {
+func runMCPServer(ctx context.Context, args []string, addrCh chan<- string, runErrCh chan<- error, reload *policyReloadDriver, hopts HarnessOptions) {
 	fs := flag.NewFlagSet("mcptest", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	runErrCh <- mcpserver.Run(ctx, fs, args, mcpserver.RunOptions{
-		Version:        "mcptest",
-		PolicyReload:   reload.install,
-		OnPolicyReload: reload.report,
+		Version:             "mcptest",
+		OriginalDstResolver: hopts.OriginalDstResolver,
+		NameResolver:        hopts.NameResolver,
+		PolicyReload:        reload.install,
+		OnPolicyReload:      reload.report,
 		OnHTTPListening: func(addr string) {
 			// Non-blocking send: addrCh is buffered to size 1.
 			// Guard with select so a misbehaving caller cannot

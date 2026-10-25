@@ -111,6 +111,17 @@ type RunOptions struct {
 	// with its result (nil = the new Policy Layer is installed). Intended
 	// for the mcptest harness, which needs to know when a reload finished.
 	OnPolicyReload func(err error)
+
+	// OriginalDstResolver, when non-nil, replaces the platform REDIRECT
+	// resolver (getsockopt SO_ORIGINAL_DST) of every transparent listener
+	// (proxy_start transparent_mode="redirect", USK-1316). Test-only: a
+	// real REDIRECT needs root and an nftables rule, so the mcptest
+	// harness injects a fake that names its upstream test server.
+	OriginalDstResolver connector.OriginalDstResolver
+
+	// NameResolver, when non-nil, replaces net.DefaultResolver for the
+	// transparent name-binding check (USK-1316). Test-only.
+	NameResolver connector.NameResolver
 }
 
 // PolicyReloadTrigger is a source of Policy Layer reload requests, returned
@@ -513,7 +524,7 @@ func assembleAndRunMCPServer(
 	manager, err := assembleLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine, sseInterceptEngine,
 		httpTransformEngine, sseTransformEngine, passthrough, targetScope, liveConns, rateLimiter, budgetManager, safetyEngine, perProtoSafety, hostTLSRegistry,
-		socks5Negotiator, recordScope, logger)
+		socks5Negotiator, recordScope, LiveManagerOptions{OriginalDstResolver: hooks.OriginalDstResolver, NameResolver: hooks.NameResolver}, logger)
 	if err != nil {
 		return err
 	}

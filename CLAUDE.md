@@ -47,6 +47,8 @@ Each connection is an explicit stack of `Layer`s (RFC-001 §3.3); each Layer yie
 | TLS handshake | YES (observation) | N/A | `TLSHandshakeMessage` envelope; SNI / ALPN / JA3 / JA4 visible to plugins |
 | HTTP/3 / QUIC | NO | NO | Out of scope (USK-1016). No UDP listener; ALPN advertises only `h2` / `http/1.1`. Proxied Firefox does not use h3 (h3 cannot traverse a `CONNECT` proxy), so absence is a weak bot signal. See [RFC-001 §11](docs/rfc/envelope.md#11-acceptance-record-and-deferred-items). |
 
+> **Transparent mode (USK-1316)**: `transparent_mode: "redirect"` (Linux, nftables REDIRECT) routes every accepted TCP connection to its `SO_ORIGINAL_DST` by its first bytes: plain HTTP/1.x → the L7 path pinned to the original destination; TLS / server-first / anything else → metadata-only passthrough (no payload bytes recorded — a documented deviation from L4-capable; TLS MITM on this path is a follow-up). See `internal/connector/transparent_handler.go`.
+
 > **TCP forward L7 dispatch (USK-911~917)**: All L7-supported protocols above are also usable through TCP forward mode (`tcp_forwards`) with independent client-side (`tls`) and upstream-side (`upstream_tls`) TLS axes. See `internal/proxybuild/tcp_forward.go` for the dispatch matrix and [RFC-001 §3.4.2](docs/rfc/envelope.md#342-tcp-forward-l7-dispatch).
 
 ### Design Principles
