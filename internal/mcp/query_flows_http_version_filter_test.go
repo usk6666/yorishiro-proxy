@@ -46,13 +46,13 @@ var noHTTPVersionStreamIDs = []string{"stream-grpc", "stream-grpc-web", "stream-
 // lower sequence than the semantic row it precedes.
 func recordH2PairWithFrameOverlays(t *testing.T, r *webUIFixtureRecorder, streamID string) {
 	t.Helper()
-	reqFrame := h2HeadersFrame(t,
+	reqFrame := h2HeadersFrameOn(t, 1,
 		hpack.HeaderField{Name: ":method", Value: "GET"},
 		hpack.HeaderField{Name: ":scheme", Value: "https"},
 		hpack.HeaderField{Name: ":authority", Value: "h2frames.example.com"},
 		hpack.HeaderField{Name: ":path", Value: "/frames"},
 	)
-	respFrame := h2HeadersFrame(t, hpack.HeaderField{Name: ":status", Value: "200"})
+	respFrame := h2HeadersFrameOn(t, 1, hpack.HeaderField{Name: ":status", Value: "200"})
 	r.run(streamID,
 		&envelope.Envelope{
 			Direction: envelope.Send,
