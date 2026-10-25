@@ -14,6 +14,11 @@ export interface FlowsFilterInputs {
   host: string;
   /** resend_* / fuzz_* tag; sent verbatim (the server matches exactly). */
   tag: string;
+  /**
+   * Client connection ID (`?conn_id=` on the Flows route); sent verbatim
+   * as filter.conn_id (the server matches exactly).
+   */
+  connId: string;
 }
 
 /**
@@ -56,6 +61,9 @@ export function buildFlowsFilter(inputs: FlowsFilterInputs): QueryFilter | undef
   }
   if (inputs.tag) {
     f.tag = inputs.tag;
+  }
+  if (inputs.connId) {
+    f.conn_id = inputs.connId;
   }
   return Object.keys(f).length > 0 ? f : undefined;
 }

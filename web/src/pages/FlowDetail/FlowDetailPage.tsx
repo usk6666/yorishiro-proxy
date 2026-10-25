@@ -23,6 +23,7 @@ import "./FlowDetailPage.css";
 import { FlowDetailRawMessage } from "./FlowDetailRawMessage.js";
 import { FlowDetailSSEMessage } from "./FlowDetailSSEMessage.js";
 import { FlowDetailWSMessage } from "./FlowDetailWSMessage.js";
+import { ConnectionMeta } from "./ConnectionMeta.js";
 import { HttpVersionMeta } from "./HttpVersionMeta.js";
 
 // ---------------------------------------------------------------------------
@@ -380,6 +381,7 @@ export function FlowDetailPage() {
               <span className="sd-meta-value">{flowSafe.message_count}</span>
             </div>
           )}
+          <ConnectionMeta flow={flowSafe} />
         </div>
 
         {/* Anomalies */}

@@ -104,6 +104,23 @@
   color: var(--text-secondary);
 }
 
+.sd-conn-id {
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sd-conn-link {
+  font-size: var(--font-size-xs);
+  color: var(--accent-primary);
+  text-decoration: none;
+}
+
+.sd-conn-link:hover {
+  text-decoration: underline;
+}
+
 .sd-timing-breakdown {
   display: inline-flex;
   gap: var(--space-sm);

@@ -35,6 +35,7 @@ const updateWebUIHTTPFixtureEnv = "UPDATE_WEBUI_HTTP_FIXTURE"
 var (
 	webUIFlowDetailFixtureDir = filepath.Join("..", "..", "web", "src", "pages", "FlowDetail", "__fixtures__")
 	webUIFlowsFixture         = filepath.Join("..", "..", "web", "src", "pages", "Flows", "__fixtures__", "flows-all-protocols.response.json")
+	webUISameConnFlowsFixture = filepath.Join("..", "..", "web", "src", "pages", "Flows", "__fixtures__", "flows-same-conn.response.json")
 	webUIFilterEnumsFixture   = filepath.Join("..", "..", "web", "src", "lib", "mcp", "__fixtures__", "query-filter-enums.json")
 )
 
@@ -73,10 +74,10 @@ func (r *webUIFixtureRecorder) run(streamID string, envs ...*envelope.Envelope) 
 	}
 }
 
-// h2HeadersFrame builds a single HEADERS frame (END_HEADERS|END_STREAM on
-// stream 1) whose block HPACK-encodes fields in order — the bytes the h2
-// Layer records as Envelope.Raw for a semantic HTTPMessage.
-func h2HeadersFrame(t *testing.T, fields ...hpack.HeaderField) []byte {
+// h2HeadersFrameOn builds a single HEADERS frame (END_HEADERS|END_STREAM
+// on h2 stream h2StreamID) whose block HPACK-encodes fields in order — the
+// bytes the h2 Layer records as Envelope.Raw for a semantic HTTPMessage.
+func h2HeadersFrameOn(t *testing.T, h2StreamID uint32, fields ...hpack.HeaderField) []byte {
 	t.Helper()
 	var block bytes.Buffer
 	enc := hpack.NewEncoder(&block)
@@ -90,7 +91,7 @@ func h2HeadersFrame(t *testing.T, fields ...hpack.HeaderField) []byte {
 	frame[0], frame[1], frame[2] = byte(n>>16), byte(n>>8), byte(n)
 	frame[3] = 0x1     // HEADERS
 	frame[4] = 0x4 | 1 // END_HEADERS | END_STREAM
-	binary.BigEndian.PutUint32(frame[5:], 1)
+	binary.BigEndian.PutUint32(frame[5:], h2StreamID)
 	return append(frame, block.Bytes()...)
 }
 
@@ -99,8 +100,18 @@ func h2HeadersFrame(t *testing.T, fields ...hpack.HeaderField) []byte {
 // fields (never in Headers) and HTTPVersion is derived from the scheme.
 func recordH2Pair(t *testing.T, r *webUIFixtureRecorder, streamID, scheme string) {
 	t.Helper()
+	recordH2PairOn(t, r, streamID, scheme, "", 1)
+}
+
+// recordH2PairOn is recordH2Pair on h2 stream h2StreamID of client
+// connection connID. The h2 Layer copies its EnvelopeContext template
+// onto every envelope of every stream it multiplexes, so streams that
+// share connID model one TCP connection. An empty connID keeps the
+// recorder's per-stream default.
+func recordH2PairOn(t *testing.T, r *webUIFixtureRecorder, streamID, scheme, connID string, h2StreamID uint32) {
+	t.Helper()
 	version := envelope.HTTPVersionFromH2Scheme(scheme)
-	reqCtx := envelope.EnvelopeContext{}
+	reqCtx := envelope.EnvelopeContext{ConnID: connID}
 	if scheme == "https" {
 		reqCtx.TLS = &envelope.TLSSnapshot{SNI: "h2.example.com", ALPN: "h2", Version: tls.VersionTLS13}
 	}
@@ -109,7 +120,7 @@ func recordH2Pair(t *testing.T, r *webUIFixtureRecorder, streamID, scheme string
 			Direction: envelope.Send,
 			Protocol:  envelope.ProtocolHTTP,
 			Context:   reqCtx,
-			Raw: h2HeadersFrame(t,
+			Raw: h2HeadersFrameOn(t, h2StreamID,
 				hpack.HeaderField{Name: ":method", Value: "GET"},
 				hpack.HeaderField{Name: ":scheme", Value: scheme},
 				hpack.HeaderField{Name: ":authority", Value: "h2.example.com"},
@@ -132,7 +143,8 @@ func recordH2Pair(t *testing.T, r *webUIFixtureRecorder, streamID, scheme string
 		&envelope.Envelope{
 			Direction: envelope.Receive,
 			Protocol:  envelope.ProtocolHTTP,
-			Raw: h2HeadersFrame(t,
+			Context:   envelope.EnvelopeContext{ConnID: connID},
+			Raw: h2HeadersFrameOn(t, h2StreamID,
 				hpack.HeaderField{Name: ":status", Value: "200"},
 				hpack.HeaderField{Name: "content-type", Value: "application/json"},
 			),
@@ -522,4 +534,57 @@ func TestQueryFlow_StreamingProtocolsMatchWebUIFixtures(t *testing.T) {
 			checkWebUIFixture(t, filepath.Join(webUIFlowDetailFixtureDir, proto+"-flow.response.json"), got)
 		})
 	}
+}
+
+// TestQueryFlows_SameConnectionMatchesWebUIFixture pins the query
+// resource=flows response behind the WebUI's "Flows on this connection"
+// view: two h2 streams (h2 stream ids 1 and 3) multiplexed on one client
+// connection, filtered by filter.conn_id, must both be listed, while
+// streams on other connections — another h2 connection and an HTTP/1.1
+// one — must not.
+func TestQueryFlows_SameConnectionMatchesWebUIFixture(t *testing.T) {
+	const sharedConn = "conn-h2-multiplexed"
+	store := newTestStore(t)
+	r := newWebUIFixtureRecorder(t, store)
+	// Stream IDs differ in their first 8 characters: the Flows list
+	// displays only that prefix.
+	recordH2PairOn(t, r, "s1-sameconn-h2", "https", sharedConn, 1)
+	recordH2PairOn(t, r, "s3-sameconn-h2", "https", sharedConn, 3)
+	recordH2PairOn(t, r, "decoy-otherconn-h2", "https", "conn-h2-other", 1)
+	recordH1Pair(r, "decoy-otherconn-h1")
+	cs := setupQueryTestSession(t, store)
+
+	res := queryJSON(t, cs, map[string]any{
+		"resource": "flows",
+		"filter":   map[string]any{"conn_id": sharedConn},
+	})
+	if total := int(res["total"].(float64)); total != 2 {
+		t.Fatalf("filter.conn_id=%q total = %d, want 2", sharedConn, total)
+	}
+	flows, ok := res["flows"].([]any)
+	if !ok {
+		t.Fatalf("flows = %T, want array", res["flows"])
+	}
+	sort.Slice(flows, func(i, j int) bool {
+		return flows[i].(map[string]any)["id"].(string) < flows[j].(map[string]any)["id"].(string)
+	})
+	var ids []string
+	for _, f := range flows {
+		ids = append(ids, f.(map[string]any)["id"].(string))
+	}
+	if want := []string{"s1-sameconn-h2", "s3-sameconn-h2"}; !reflect.DeepEqual(ids, want) {
+		t.Fatalf("filter.conn_id=%q ids = %v, want %v", sharedConn, ids, want)
+	}
+
+	// Both listed streams really were recorded on the shared connection.
+	for _, id := range ids {
+		got := queryJSON(t, cs, map[string]any{"resource": "flow", "id": id})
+		if got["conn_id"] != sharedConn {
+			t.Errorf("flow %s conn_id = %v, want %s", id, got["conn_id"], sharedConn)
+		}
+	}
+
+	res["flows"] = flows
+	normalizeWebUIFixture(res)
+	checkWebUIFixture(t, webUISameConnFlowsFixture, res)
 }
