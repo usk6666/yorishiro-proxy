@@ -240,11 +240,6 @@ type Config struct {
 	// for mTLS authentication with upstream servers (global default).
 	ClientKeyPath string `json:"client_key"`
 
-	// HostTLS maps hostnames to per-host TLS configurations.
-	// Each entry can specify client certificates, TLS verification, and CA bundles.
-	// Wildcard patterns (e.g. "*.example.com") are supported.
-	HostTLS map[string]*HostTLSEntry `json:"host_tls"`
-
 	// CAEphemeral forces in-memory-only CA generation with no file persistence.
 	// When true, a new CA is generated on each startup.
 	CAEphemeral bool `json:"ca_ephemeral"`
