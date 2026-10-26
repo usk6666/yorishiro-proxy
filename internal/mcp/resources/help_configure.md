@@ -384,6 +384,7 @@ Configures the intercept queue behavior.
 ### max_connections (integer, optional)
 Dynamically changes the maximum number of concurrent proxy connections. Range: 1-100000.
 Connections refused at the cap are reported in `query` `status` → `connection_rejections` and as flows with `blocked_by: "capacity"`.
+Keep the cap within the process's file-descriptor limit (`RLIMIT_NOFILE`); see the proxy_start help's "Connection cap and file descriptors".
 
 ### max_concurrent_streams (integer, optional)
 Dynamically changes the HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS` advertised to clients on the inbound (proxy-acting-as-server) Layer. Range: 1-65535. Default (when neither `configure` nor the config file sets it): `500` (USK-862).
