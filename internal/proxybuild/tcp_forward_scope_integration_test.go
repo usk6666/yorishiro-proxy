@@ -41,9 +41,12 @@ type scopeForwardFixture struct {
 	logs      *testutil.CaptureLogger
 	store     *flowStoreCapture
 	fwdAddr   string
+	mgr       *proxybuild.Manager
 }
 
-func startScopeForward(t *testing.T, fc *config.ForwardConfig) *scopeForwardFixture {
+// startScopeForward starts the fixture; opts adjust the parent listener's
+// Deps (e.g. withRateLimiter).
+func startScopeForward(t *testing.T, fc *config.ForwardConfig, opts ...func(*proxybuild.Deps)) *scopeForwardFixture {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -65,7 +68,7 @@ func startScopeForward(t *testing.T, fc *config.ForwardConfig) *scopeForwardFixt
 		Logger:      logger,
 		BuildConfig: buildCfg,
 		StackFactory: func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
-			return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
+			d := proxybuild.Deps{
 				Logger:       logger,
 				ListenerName: name,
 				ListenAddr:   addr,
@@ -73,7 +76,11 @@ func startScopeForward(t *testing.T, fc *config.ForwardConfig) *scopeForwardFixt
 				BuildConfig:  buildCfg,
 				Scope:        scope,
 				LiveConns:    liveConns,
-			})
+			}
+			for _, o := range opts {
+				o(&d)
+			}
+			return proxybuild.BuildLiveStack(ctx, d)
 		},
 	})
 	if err != nil {
@@ -92,7 +99,7 @@ func startScopeForward(t *testing.T, fc *config.ForwardConfig) *scopeForwardFixt
 	if fwdAddr == "" {
 		t.Fatal("forward listener not bound")
 	}
-	return &scopeForwardFixture{scope: scope, liveConns: liveConns, logs: logs, store: store, fwdAddr: fwdAddr}
+	return &scopeForwardFixture{scope: scope, liveConns: liveConns, logs: logs, store: store, fwdAddr: fwdAddr, mgr: mgr}
 }
 
 // deny installs a Policy deny on the target's host:port, optionally only

@@ -304,6 +304,15 @@ const (
 	connectRateLimitDenyDetail = "yorishiro-proxy: target blocked by rate limit"
 )
 
+// RateLimitRefusalResponse returns the canned answer of every live
+// rate-limit gate that can still speak HTTP/1.1 to the client: the CONNECT
+// and plain-HTTP forward gates, the transparent listener's plain-HTTP
+// route and the plaintext http / websocket / sse tcp_forwards arms. It is
+// the single source of those bytes. Each call returns a fresh slice.
+func RateLimitRefusalResponse() []byte {
+	return forwardErrorResponse(429, "Too Many Requests", connectRateLimitDenyDetail)
+}
+
 // connectPolicyReject runs the scope and rate-limit gates. It returns nil
 // when the target is admitted, otherwise the response the caller must send
 // before closing — 403 for a scope denial, 429 for a rate-limit denial
@@ -326,7 +335,7 @@ func connectPolicyReject(cfg CONNECTHandlerConfig, target string, opaque bool, l
 			logger.Info("CONNECT target blocked by rate limit",
 				"limit_type", denial.LimitType,
 				"effective_rps", denial.EffectiveRPS)
-			return forwardErrorResponse(429, "Too Many Requests", connectRateLimitDenyDetail)
+			return RateLimitRefusalResponse()
 		}
 	}
 	return nil

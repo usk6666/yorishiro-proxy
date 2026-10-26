@@ -125,13 +125,15 @@ func buildOnTransparentHTTPStack(p *pipeline.Pipeline, deps Deps, headRecorder r
 // keys plus route, alpn_offers and original_dst). No payload byte is
 // ever recorded. Refusals, dial failures and TLS MITM handshake failures
 // (client_tls_error / upstream_tls_error, USK-1317) get a self-contained
-// error Stream. RecordScope is honoured like the passthrough recorder
-// does. MITM'd connections are recorded by the Pipeline's RecordStep.
+// error Stream through the shared blockedConnRecorder. RecordScope is
+// honoured like the passthrough recorder does. MITM'd connections are
+// recorded by the Pipeline's RecordStep.
 type transparentRecorder struct {
 	store        flow.Writer
 	listenerName string
 	logger       *slog.Logger
 	scope        *flow.RecordScope
+	blocked      *blockedConnRecorder
 
 	pending sync.Map // observationKey → pendingState
 }
@@ -141,7 +143,10 @@ func newTransparentRecorder(store flow.Writer, listenerName string, logger *slog
 	if store == nil {
 		return nil
 	}
-	return &transparentRecorder{store: store, listenerName: listenerName, logger: logger, scope: scope}
+	return &transparentRecorder{
+		store: store, listenerName: listenerName, logger: logger, scope: scope,
+		blocked: newBlockedConnRecorder(store, listenerName, logger, scope),
+	}
 }
 
 // transparentProtocol is the Stream protocol / scheme of a route.
@@ -266,13 +271,9 @@ func (r *transparentRecorder) OnComplete(_ context.Context, obs connector.Transp
 // "error", the client's JA3 / JA4 on ConnInfo). No upstream socket was
 // handed to a Layer, so ServerAddr stays empty.
 func (r *transparentRecorder) OnBlocked(ctx context.Context, b connector.TransparentBlock) {
-	streamID := uuid.New().String()
-	obs := connector.PassthroughObservation{RemoteAddr: b.RemoteAddr, TargetHost: hostOfAddr(b.OriginalDst)}
+	var sni string
 	if b.Route == connector.TransparentRouteTLS {
-		obs.SNI = b.Name
-	}
-	if r.filtered(streamID, obs) {
-		return
+		sni = b.Name
 	}
 	protocol, scheme := transparentProtocol(b.Route)
 	tags := map[string]string{
@@ -293,29 +294,18 @@ func (r *transparentRecorder) OnBlocked(ctx context.Context, b connector.Transpa
 	for k, v := range b.Tags {
 		tags[k] = v
 	}
-	st := &flow.Stream{
-		ID:            streamID,
-		ConnID:        connector.ConnIDFromContext(ctx),
+	r.blocked.record(ctx, blockedConn{
 		Protocol:      protocol,
 		Scheme:        scheme,
-		State:         "error",
-		FailureReason: b.FailureReason,
+		ClientAddr:    b.RemoteAddr,
+		ScopeHost:     hostOfAddr(b.OriginalDst),
+		SNI:           sni,
 		BlockedBy:     b.BlockedBy,
-		Timestamp:     time.Now(),
-		Origin:        flow.OriginProxy,
-		ConnInfo: &flow.ConnectionInfo{
-			ClientAddr:   b.RemoteAddr,
-			TLSClientJA3: b.ClientJA3,
-			TLSClientJA4: b.ClientJA4,
-		},
-		ListenerName: r.listenerName,
-		Tags:         tags,
-	}
-	saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := r.store.SaveStream(saveCtx, st); err != nil {
-		r.logger.Error("transparent recorder: audit stream save failed", "stream_id", streamID, "error", err)
-	}
+		FailureReason: b.FailureReason,
+		ClientJA3:     b.ClientJA3,
+		ClientJA4:     b.ClientJA4,
+		Tags:          tags,
+	})
 }
 
 // hostOfAddr returns the host of "host:port".

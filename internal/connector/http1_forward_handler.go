@@ -222,8 +222,7 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 				connLogger.Info("plain HTTP target blocked by rate limit",
 					"limit_type", denial.LimitType,
 					"effective_rps", denial.EffectiveRPS)
-				writeForwardErrorResponse(pc, 429, "Too Many Requests",
-					"yorishiro-proxy: target blocked by rate limit")
+				writeForwardResponse(pc, RateLimitRefusalResponse())
 				return nil
 			}
 		}
