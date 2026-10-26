@@ -274,7 +274,6 @@ func buildTransparentNoALPNStack(
 	if ut.isRawPassthrough(cfg) {
 		return BuildConnectionStack(ctx, clientConn, ut, cfg, peeked)
 	}
-	ctx = ContextWithDialTarget(ctx, ut.Dial)
 	host, err := ut.validate()
 	if err != nil {
 		return nil, nil, nil, err
@@ -324,9 +323,10 @@ func buildTransparentNoALPNStack(
 // needs a ClientHello without the ALPN extension — at the cost of
 // tls_fingerprint on this leg only.
 //
-// ctx is used as given (plus the dial target), so a socket hook the caller
-// attached (the transparent listener's own-dial tracking) sees the socket.
+// ctx is used as given, so a socket hook the caller attached (the
+// transparent listener's own-dial tracking) sees the socket; dialUpstreamTLS
+// stamps the dial target the rotation resolver keys on.
 func dialUpstreamStandardNoALPN(ctx context.Context, ut UpstreamTarget, host string, hostTLS *resolvedTLS, cfg *BuildConfig) (net.Conn, *envelope.TLSSnapshot, error) {
-	return dialUpstreamTLS(ContextWithDialTarget(ctx, ut.Dial), ut.Dial, host,
+	return dialUpstreamTLS(ctx, ut.Dial, host,
 		nil, "", hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
 }

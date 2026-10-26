@@ -789,6 +789,9 @@ func BuildConnectionStack(
 	// host. Idempotent — re-stamping the same key on a child ctx is
 	// harmless. USK-1315: the stamp is the dial target — the value the
 	// rotation resolver's per_target_host slot is keyed on.
+	// USK-1382: dialUpstreamTLS stamps for itself, but this stamp is still
+	// load-bearing for the resolver reads outside it — the raw-passthrough
+	// upstream dial and the h2 pool key (poolKeyForH2).
 	ctx = ContextWithDialTarget(ctx, ut.Dial)
 	if cfg.Issuer == nil {
 		return nil, nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil issuer")
