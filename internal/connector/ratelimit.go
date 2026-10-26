@@ -171,21 +171,7 @@ func (rl *RateLimiter) Check(hostname string) *RateLimitDenial {
 
 	// Check per-host limiter.
 	if rl.effectiveHostRPS > 0 {
-		key := strings.ToLower(hostname)
-		limiter, ok := rl.hostLimiters[key]
-		if !ok {
-			// Evict all entries when the map exceeds the cap to prevent
-			// unbounded memory growth from unique subdomain flooding.
-			if len(rl.hostLimiters) >= maxHostLimiters {
-				rl.hostLimiters = make(map[string]*rate.Limiter)
-			}
-			burst := int(rl.effectiveHostRPS) + 1
-			if burst < 1 {
-				burst = 1
-			}
-			limiter = rate.NewLimiter(rate.Limit(rl.effectiveHostRPS), burst)
-			rl.hostLimiters[key] = limiter
-		}
+		limiter := rl.hostLimiterLocked(hostname)
 		if !limiter.Allow() {
 			return &RateLimitDenial{
 				LimitType:    "per_host",
@@ -231,22 +217,7 @@ func (rl *RateLimiter) Wait(ctx context.Context, hostname string) error {
 	globalLim := rl.globalLimiter
 	var hostLim *rate.Limiter
 	if rl.effectiveHostRPS > 0 {
-		key := strings.ToLower(hostname)
-		limiter, ok := rl.hostLimiters[key]
-		if !ok {
-			// Mirror Check's eviction policy to bound memory under
-			// adversarial unique-host flooding (CWE-400).
-			if len(rl.hostLimiters) >= maxHostLimiters {
-				rl.hostLimiters = make(map[string]*rate.Limiter)
-			}
-			burst := int(rl.effectiveHostRPS) + 1
-			if burst < 1 {
-				burst = 1
-			}
-			limiter = rate.NewLimiter(rate.Limit(rl.effectiveHostRPS), burst)
-			rl.hostLimiters[key] = limiter
-		}
-		hostLim = limiter
+		hostLim = rl.hostLimiterLocked(hostname)
 	}
 	rl.mu.Unlock()
 
@@ -261,6 +232,35 @@ func (rl *RateLimiter) Wait(ctx context.Context, hostname string) error {
 		}
 	}
 	return nil
+}
+
+// hostLimiterLocked returns the per-host limiter for hostname, creating it
+// on first use. Buckets are keyed on canonicalScopeHost(hostname), so every
+// spelling the dial treats as one host — case, one trailing dot, brackets,
+// IPv6 text forms, IPv4-mapped IPv6, the zone, and legacy inet_aton IPv4 —
+// shares one bucket (USK-1263). Folding legacy IPv4 is safe here because
+// the limiter is deny-like: more spellings on one key only make the limit
+// stricter. The fold is for the map key only; callers keep logging,
+// tagging and dialing the host as written (MITM Principle 1).
+//
+// When the map reaches maxHostLimiters it is cleared to bound memory under
+// adversarial unique-host flooding (CWE-400). Must be called with rl.mu
+// held and rl.effectiveHostRPS > 0.
+func (rl *RateLimiter) hostLimiterLocked(hostname string) *rate.Limiter {
+	key := canonicalScopeHost(hostname)
+	if limiter, ok := rl.hostLimiters[key]; ok {
+		return limiter
+	}
+	if len(rl.hostLimiters) >= maxHostLimiters {
+		rl.hostLimiters = make(map[string]*rate.Limiter)
+	}
+	burst := int(rl.effectiveHostRPS) + 1
+	if burst < 1 {
+		burst = 1
+	}
+	limiter := rate.NewLimiter(rate.Limit(rl.effectiveHostRPS), burst)
+	rl.hostLimiters[key] = limiter
+	return limiter
 }
 
 // HasLimits reports whether any rate limits are configured (either policy or agent).
