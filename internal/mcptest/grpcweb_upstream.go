@@ -28,6 +28,12 @@ import (
 type GRPCWebHitCounter struct {
 	total atomic.Int64
 
+	// requests counts every request the handler receives, before any
+	// content-type or LPM validation. total only moves for well-formed
+	// calls, so a malformed request leaking upstream (e.g. one stripped of
+	// its payload) is visible only here.
+	requests atomic.Int64
+
 	mu      sync.Mutex
 	methods map[string]int64
 }
@@ -44,6 +50,17 @@ func (c *GRPCWebHitCounter) Total() int64 {
 		return 0
 	}
 	return c.total.Load()
+}
+
+// Requests returns the cumulative number of requests that arrived at the
+// harness gRPC-Web handler, well-formed or not. Use it to assert that a
+// blocked call sent nothing upstream at all; Total only counts calls that
+// decoded to at least one data frame.
+func (c *GRPCWebHitCounter) Requests() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.requests.Load()
 }
 
 // PerMethod returns the number of invocations for the given path
@@ -67,6 +84,15 @@ func (c *GRPCWebHitCounter) record(fullMethod string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.methods[fullMethod]++
+}
+
+// recordRequest is invoked from inside the gRPC-Web handler for every
+// request, before validation.
+func (c *GRPCWebHitCounter) recordRequest() {
+	if c == nil {
+		return
+	}
+	c.requests.Add(1)
 }
 
 // GRPCWebSafetyServiceName is the gRPC-Web service name registered on
@@ -108,6 +134,8 @@ func buildGRPCWebUpstream(tb testing.TB) (*httptest.Server, *FingerprintObserver
 
 	hits := NewGRPCWebHitCounter()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.recordRequest()
+
 		// Accept both binary (application/grpc-web[+proto]) and
 		// base64/text (application/grpc-web-text[+proto]) wire formats.
 		// USK-780 acceptance criterion #4: smoke must exercise both.

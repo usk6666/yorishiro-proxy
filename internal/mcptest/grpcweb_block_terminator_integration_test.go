@@ -189,6 +189,9 @@ func TestE2E_GRPCWebSafetyBlock_H2_DataTerminator(t *testing.T) {
 	if got := h.GRPCWebObservedHits.Total(); got != 1 {
 		t.Fatalf("upstream hits after the benign call = %d, want 1", got)
 	}
+	if got := h.GRPCWebObservedHits.Requests(); got != 1 {
+		t.Fatalf("upstream requests after the benign call = %d, want 1", got)
+	}
 
 	sqlFrame := grpcweb.EncodeFrame(false, false, []byte("DROP TABLE users"))
 	for i, tc := range []struct {
@@ -220,8 +223,18 @@ func TestE2E_GRPCWebSafetyBlock_H2_DataTerminator(t *testing.T) {
 			if got := h.GRPCWebObservedHits.Total(); got != 1 {
 				t.Errorf("upstream hits = %d, want 1 — the blocked request reached the upstream", got)
 			}
+			// Total only counts well-formed calls; a payload-stripped
+			// request leaking upstream shows up only in Requests.
+			if got := h.GRPCWebObservedHits.Requests(); got != 1 {
+				t.Errorf("upstream requests = %d, want 1 — the blocked request (possibly payload-stripped) reached the upstream", got)
+			}
 			waitBlockedStreamsBy(t, h, "grpc-web", "safety_filter", i+1)
 		})
+	}
+	// Re-check once the audit Streams are recorded, so a leak that lands
+	// after the client already has its terminator is still caught.
+	if got := h.GRPCWebObservedHits.Requests(); got != 1 {
+		t.Errorf("upstream requests after the blocked calls = %d, want 1", got)
 	}
 }
 

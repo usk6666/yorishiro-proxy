@@ -226,6 +226,9 @@ func TestE2E_GRPCRequestScope_GRPCWebH2_DeniedAuthority(t *testing.T) {
 	if got := h.GRPCWebObservedHits.Total(); got != 1 {
 		t.Fatalf("upstream hits after the allowed call = %d, want 1", got)
 	}
+	if got := h.GRPCWebObservedHits.Requests(); got != 1 {
+		t.Fatalf("upstream requests after the allowed call = %d, want 1", got)
+	}
 
 	resp, err := sendGRPCWebAs(proxyAddr, up, "denied.example:"+port, mcptest.GRPCWebSafetyEchoMethod)
 	if err != nil {
@@ -242,6 +245,11 @@ func TestE2E_GRPCRequestScope_GRPCWebH2_DeniedAuthority(t *testing.T) {
 		t.Errorf("upstream hits = %d, want 1 — the denied :authority reached the upstream", got)
 	}
 	waitBlockedStream(t, h, "grpc-web")
+	// Total only counts well-formed calls; checked after the audit Stream
+	// lands so a payload-stripped leak arriving late is still caught.
+	if got := h.GRPCWebObservedHits.Requests(); got != 1 {
+		t.Errorf("upstream requests = %d, want 1 — the denied :authority (possibly payload-stripped) reached the upstream", got)
+	}
 }
 
 // writeProxyRequestNoWait writes one raw request to the forward proxy and
