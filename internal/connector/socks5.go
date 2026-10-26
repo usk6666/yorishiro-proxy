@@ -72,6 +72,17 @@ func (e *SOCKS5RateLimitError) Error() string { return ErrSOCKS5BlockedByRateLim
 // Unwrap returns ErrSOCKS5BlockedByRateLimit.
 func (e *SOCKS5RateLimitError) Unwrap() error { return ErrSOCKS5BlockedByRateLimit }
 
+// SOCKS5ScopeError is what Negotiate returns on a scope refusal (USK-1403).
+type SOCKS5ScopeError struct {
+	Reason string
+}
+
+// Error returns ErrSOCKS5BlockedByScope's message.
+func (e *SOCKS5ScopeError) Error() string { return ErrSOCKS5BlockedByScope.Error() }
+
+// Unwrap returns ErrSOCKS5BlockedByScope.
+func (e *SOCKS5ScopeError) Unwrap() error { return ErrSOCKS5BlockedByScope }
+
 // socks5HandshakeTimeout bounds the entire SOCKS5 handshake phase so a
 // lingering client cannot stall a negotiator goroutine.
 const socks5HandshakeTimeout = 30 * time.Second

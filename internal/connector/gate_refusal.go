@@ -11,6 +11,10 @@ import (
 // does not import pipeline).
 const GateRefusalBlockedByRateLimit = "rate_limit"
 
+// GateRefusalBlockedByTargetScope is the GateRefusal.BlockedBy value of a
+// scope refusal (USK-1403). It equals pipeline.BlockedByTargetScope.
+const GateRefusalBlockedByTargetScope = "target_scope"
+
 // GateRefusal describes a connection a connector-level gate (CONNECT,
 // plain-HTTP forward, SOCKS5) refused before any Layer or Envelope
 // existed (USK-1381). The refusal bytes have already been written to the
@@ -69,4 +73,8 @@ func reportRateLimitRefusal(ctx context.Context, fn OnGateRefusalFunc, via, targ
 		BlockedBy:  GateRefusalBlockedByRateLimit,
 		Tags:       tags,
 	})
+}
+
+// reportScopeRefusal hands a scope refusal to fn (USK-1403).
+func reportScopeRefusal(ctx context.Context, fn OnGateRefusalFunc, via, target string, remote net.Addr, reason string) {
 }

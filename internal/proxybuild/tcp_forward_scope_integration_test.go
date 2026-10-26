@@ -29,6 +29,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
@@ -222,8 +223,66 @@ func TestProxybuild_TCPForwardScope_AcceptGateAllArms(t *testing.T) {
 				if got := settleAccepts(accepts, 0, 300*time.Millisecond); got != 0 {
 					t.Errorf("denied upstream accepted %d connections, want 0", got)
 				}
+				// USK-1403: the refusal leaves one target_scope Stream.
+				checkTCPForwardScopeRefusalStream(t, f, target, proto)
 			})
 		}
+	}
+}
+
+// checkTCPForwardScopeRefusalStream waits for the one target_scope Stream
+// a denied forward connection leaves and checks its shape (USK-1403).
+func checkTCPForwardScopeRefusalStream(t *testing.T, f *scopeForwardFixture, target, proto string) {
+	t.Helper()
+	var streams []*flow.Stream
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		streams = streams[:0]
+		for _, st := range f.store.Streams() {
+			if st.BlockedBy == "target_scope" {
+				streams = append(streams, st)
+			}
+		}
+		if len(streams) >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(streams) != 1 {
+		t.Fatalf("%d target_scope Streams, want 1; streams=%v", len(streams), f.store.Streams())
+	}
+	st := streams[0]
+	if st.State != "error" || st.FailureReason != "target_scope" {
+		t.Errorf("Stream State=%q FailureReason=%q, want error / target_scope", st.State, st.FailureReason)
+	}
+	if st.ConnID == "" {
+		t.Error("Stream ConnID is empty")
+	}
+	if st.ConnInfo == nil || st.ConnInfo.ClientAddr == "" || st.ConnInfo.ServerAddr != "" {
+		t.Errorf("Stream ConnInfo = %+v, want a ClientAddr and no ServerAddr", st.ConnInfo)
+	}
+	want := map[string]string{
+		"via":              "tcp-forward",
+		"target":           target,
+		"forward_protocol": proto,
+		"reason":           "blocked by policy deny rule",
+	}
+	for k, v := range want {
+		if st.Tags[k] != v {
+			t.Errorf("Tags[%s] = %q, want %q (tags %v)", k, st.Tags[k], v, st.Tags)
+		}
+	}
+	if st.Tags["forward_port"] == "" {
+		t.Errorf("Tags[forward_port] is empty (tags %v)", st.Tags)
+	}
+	n := 0
+	for _, fl := range f.store.Flows() {
+		if fl.StreamID == st.ID {
+			n++
+		}
+	}
+	if n != 0 {
+		t.Errorf("target_scope Stream has %d Flow rows, want 0", n)
 	}
 }
 
