@@ -14,8 +14,12 @@
 //
 // Wire fidelity:
 //   - The synthetic response is a NEW envelope (Sequence = original.Sequence+1,
-//     Direction = Receive). RecordStep records it as a distinct variant. The
-//     original held Send envelope is still recorded unchanged.
+//     Direction = Receive). A policy block is recorded only as the
+//     metadata-only audit Stream the session's OnPipelineDrop recorder
+//     writes: the Pipeline stops before RecordStep, so neither the blocked
+//     request nor this 403 becomes a Flow row. (Plugin DROP / RESPOND set
+//     Result.Record and are recorded with Flow rows — USK-1393; policy
+//     Steps deliberately do not.)
 //   - Raw is intentionally left nil. The HTTP/1.x sendResponseSynthetic path
 //     and HTTP/2 aggregator both re-serialize HTTPMessage on Send when Opaque
 //     is absent — no per-protocol divergence is required at the Pipeline

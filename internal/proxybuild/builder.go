@@ -2549,6 +2549,11 @@ func dropStreamListenerName(ctx context.Context, configured string) string {
 // drops on Send), the Stream's Scheme is populated so MCP query tools can
 // distinguish https vs http audit Streams. Flow rows are never written
 // from this path: blocked envelopes are recorded for audit, not for replay.
+// The exception is upstream of this recorder: a plugin DROP
+// (blocked_by="plugin") is recorded with Flow rows by RecordStep inside
+// Pipeline.RunDetailed before this callback runs (USK-1393), so its Stream
+// already exists and the UpdateStream fallback below stamps the
+// attribution (and re-tags an h2-overlay "http" row to grpc / grpc-web).
 //
 // The recorder always overwrites an existing Stream identified by env.StreamID
 // — Pipeline-Drop emits the audit Stream BEFORE the live path would have

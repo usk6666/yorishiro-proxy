@@ -2247,10 +2247,11 @@ func emitSSESyntheticEventTooLarge(
 		// chain (see internal/proxybuild/builder.go: HostScope →
 		// HTTPScope → Budget → Safety → PluginPre → Intercept →
 		// Transform → PluginPost → Record → UpgradeStep) a Drop emitted
-		// by Intercept / PluginPre / PluginPost short-circuits
-		// pipeline.RunWithBlockedBy BEFORE RecordStep runs, so the
-		// synthetic-event Flow row will be omitted on Drop. That is
-		// acceptable: the synthetic envelope is an emergency operator
+		// by Intercept short-circuits pipeline.RunWithBlockedBy BEFORE
+		// RecordStep runs, so the synthetic-event Flow row will be
+		// omitted on that Drop; a plugin DROP still records the event
+		// (Result.Record, USK-1393). That is acceptable: the synthetic
+		// envelope is an emergency operator
 		// signal — its primary contract is the client-visible wire
 		// notification and the StreamError return, both of which still
 		// fire on Drop because the caller emits the framing terminator
@@ -3082,8 +3083,11 @@ func clientToUpstream(
 		// client.Send below. The recorder fires synchronously so the
 		// audit Stream is persisted while the goroutine is still
 		// scheduled. Respond carries blockedBy only when emitted by a
-		// policy Step (Intercept / HostScope / HTTPScope / Safety);
-		// plugin-driven Respond passes blockedBy="" through unchanged.
+		// policy Step (Intercept / HostScope / HTTPScope / Safety); a
+		// plugin RESPOND passes blockedBy="" through unchanged, a plugin
+		// DROP carries "plugin". A plugin outcome's request and response
+		// rows were already written by RecordStep inside RunDetailed
+		// (USK-1393); the recorder then only stamps state / blocked_by.
 		if blockedBy != "" && onDrop != nil &&
 			(action == pipeline.Drop || action == pipeline.Respond) {
 			onDrop(pipeline.WithBlockAnnotations(ctx, blockTags), env, blockedBy)

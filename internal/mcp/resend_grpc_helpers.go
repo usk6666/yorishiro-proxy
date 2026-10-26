@@ -1014,20 +1014,18 @@ func (s *Server) buildResendGRPCPipeline(encoders *pipeline.WireEncoderRegistry)
 // frame — callers surface this in the result as "end omitted" and may
 // inspect the Channel's terminal Err() via the Layer.
 //
-// responded is true when the Start envelope's pipeline pass returned
-// Respond (plugin custom response). The pipeline then stopped before
-// RecordStep saw the Start, so no Stream row exists for plan.streamID; an
-// unlabelled Start Drop returns errSendDroppedByPipeline for the same
-// reason. resend_grpc and fuzz_grpc use both to blank the returned
-// stream_id (USK-1371, USK-1375).
+// When the Start envelope's pipeline pass returns Respond (plugin custom
+// response) the custom End is returned as endEnv without a dial. A plugin
+// Drop / Respond on the Start is recorded by the pipeline itself
+// (USK-1393), so plan.streamID names a Stream on every path.
 //
 // origin is the caller's flow.Origin (flow.OriginResend from resend_grpc,
 // flow.OriginFuzz from fuzz_grpc). It stamps the budget audit Stream left
 // when BudgetStep drops the Start envelope, so it must match the
 // WithOrigin value of the caller's pipeline.
-func (s *Server) runResendGRPCDispatch(ctx context.Context, plan *resendGRPCPlan, p *pipeline.Pipeline, origin flow.Origin) (endEnv *envelope.Envelope, recvData []*envelope.Envelope, recvStartMeta []envelope.KeyValue, responded bool, err error) {
+func (s *Server) runResendGRPCDispatch(ctx context.Context, plan *resendGRPCPlan, p *pipeline.Pipeline, origin flow.Origin) (endEnv *envelope.Envelope, recvData []*envelope.Envelope, recvStartMeta []envelope.KeyValue, err error) {
 	if p == nil {
-		return nil, nil, nil, false, errors.New("resend pipeline is nil")
+		return nil, nil, nil, errors.New("resend pipeline is nil")
 	}
 
 	startEnv := buildResendGRPCStartEnvelope(plan)
@@ -1038,26 +1036,18 @@ func (s *Server) runResendGRPCDispatch(ctx context.Context, plan *resendGRPCPlan
 	postStart, action, custom, blockedBy := p.RunWithBlockedBy(ctx, startEnv)
 	switch action {
 	case pipeline.Drop:
-		if blockedBy == pipeline.BlockedByBudget {
-			recordBudgetBlockedStream(ctx, s.flowStore.store, postStart, plan.streamID, origin)
-			return nil, nil, nil, false, errBudgetExhausted
-		}
-		return nil, nil, nil, false, errSendDroppedByPipeline
+		return nil, nil, nil, s.resendSendDropError(ctx, postStart, plan.streamID, blockedBy, origin)
 	case pipeline.Respond:
 		if custom == nil {
-			return nil, nil, nil, true, errors.New("pipeline returned Respond with nil response envelope")
+			return nil, nil, nil, errors.New("pipeline returned Respond with nil response envelope")
 		}
-		custom.StreamID = postStart.StreamID
-		custom.Sequence = 1
-		_, _, _ = p.Run(ctx, custom)
 		// Synthesise a result shape: the custom response is the End
-		// envelope from the caller's perspective. No data envelopes; no
-		// real receive metadata.
-		return custom, nil, nil, true, nil
+		// envelope from the caller's perspective (the pipeline already
+		// recorded it). No data envelopes; no real receive metadata.
+		return custom, nil, nil, nil
 	}
 
-	endEnv, recvData, recvStartMeta, err = s.exchangeResendGRPC(ctx, plan, p, postStart)
-	return endEnv, recvData, recvStartMeta, false, err
+	return s.exchangeResendGRPC(ctx, plan, p, postStart)
 }
 
 // exchangeResendGRPC is the wire half of runResendGRPCDispatch: it dials,

@@ -727,7 +727,7 @@ func (s *Server) runResendWS(ctx context.Context, plan *resendWSPlan, sendEnv *e
 		return nil, err
 	}
 
-	postSendEnv, short, err := runResendWSPreSend(ctx, sendEnv, p)
+	postSendEnv, short, err := s.runResendWSPreSend(ctx, sendEnv, p, origin)
 	if err != nil {
 		return nil, err
 	}
@@ -764,19 +764,19 @@ func (s *Server) runResendWS(ctx context.Context, plan *resendWSPlan, sendEnv *e
 // runResendWSPreSend runs the synthetic Send envelope through the
 // resend Pipeline. Returns (postEnv, nil, nil) on the normal path that
 // proceeds to dial; (nil, customRespEnv, nil) when the pipeline
-// short-circuits via Respond; (nil, nil, err) on Drop.
-func runResendWSPreSend(ctx context.Context, sendEnv *envelope.Envelope, p *pipeline.Pipeline) (*envelope.Envelope, *envelope.Envelope, error) {
-	postSendEnv, action, custom := p.Run(ctx, sendEnv)
+// short-circuits via Respond; (nil, nil, err) on Drop. A plugin Drop /
+// Respond is recorded by the pipeline itself (USK-1393); a plugin Drop
+// also gets blocked_by="plugin" (resendSendDropError).
+func (s *Server) runResendWSPreSend(ctx context.Context, sendEnv *envelope.Envelope, p *pipeline.Pipeline, origin flow.Origin) (*envelope.Envelope, *envelope.Envelope, error) {
+	postSendEnv, action, custom, blockedBy := p.RunWithBlockedBy(ctx, sendEnv)
 	switch action {
 	case pipeline.Drop:
-		return nil, nil, errors.New("send envelope dropped by pipeline")
+		return nil, nil, s.resendSendDropError(ctx, postSendEnv, sendEnv.StreamID, blockedBy, origin)
 	case pipeline.Respond:
 		if custom == nil {
 			return nil, nil, errors.New("pipeline returned Respond with nil response envelope")
 		}
-		custom.StreamID = postSendEnv.StreamID
-		custom.Sequence = 1
-		_, _, _ = p.Run(ctx, custom)
+		// The pipeline already recorded the synthetic reply (USK-1393).
 		return nil, custom, nil
 	}
 	return postSendEnv, nil, nil

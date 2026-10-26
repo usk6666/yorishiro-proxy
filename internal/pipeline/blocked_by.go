@@ -25,9 +25,8 @@ const (
 
 	// BlockedByInterceptDrop attributes a Drop to an explicit user
 	// `drop` action against a held envelope, including a hold timeout
-	// under auto_drop. Plugin ActionDrop and the context-cancelled hold
-	// path are intentionally NOT attributed to this label (USK-782 design
-	// scope guards); the latter is BlockedByInterceptCancelled.
+	// under auto_drop. A plugin action.DROP is BlockedByPlugin and the
+	// context-cancelled hold path is BlockedByInterceptCancelled.
 	BlockedByInterceptDrop = "intercept_drop"
 
 	// BlockedByInterceptCancelled attributes a Drop to an intercept hold
@@ -65,6 +64,12 @@ const (
 	BlockedByCapacity = "capacity"
 
 	// BlockedByPlugin attributes a Drop to a plugin hook returning
-	// action.DROP (USK-1393).
+	// action.DROP, in either direction and phase (USK-1393). Emitted by
+	// PluginStepPre / PluginStepPost together with Result.Record, so the
+	// dropped envelope is recorded as a Flow row before the session's
+	// OnPipelineDrop recorder marks the Stream state="error". Which plugin
+	// and hook dropped it is carried on the Stream's tags (plugin,
+	// plugin_hook, plugin_phase), not in this label. A plugin RESPOND is
+	// an answer, not a block, and carries no BlockedBy.
 	BlockedByPlugin = "plugin"
 )

@@ -63,13 +63,31 @@ type Result struct {
 	// the session loop can record an audit Stream for the blocked envelope
 	// (USK-782 / USK-829). It is surfaced by RunWithBlockedBy for both Drop
 	// and Respond and may be empty when a Step short-circuits without an
-	// attribution (e.g. plugin ActionDrop / RESPOND — explicitly out of
-	// scope per USK-782 design). It is ignored for Continue.
+	// attribution — a plugin RESPOND is an answer, not a block, and carries
+	// none; a plugin DROP carries "plugin" (USK-1393). It is ignored for
+	// Continue.
 	//
 	// Canonical values are the same set accepted by the MCP query tool's
 	// blocked_by filter: "target_scope", "intercept_drop",
-	// "intercept_cancelled", "rate_limit", "safety_filter", "budget".
+	// "intercept_cancelled", "rate_limit", "safety_filter", "budget",
+	// "capacity", "plugin".
 	BlockedBy string
+
+	// Record asks RunDetailed to run the Pipeline's RecordStep(s) that
+	// follow the terminating Step on a Drop / Respond: first on the
+	// terminating envelope (under the Run's snapshot, so earlier
+	// modifications become an original / modified variant pair), then on
+	// Response when it is non-nil (with no snapshot — the response is a
+	// new message, not a modification of the request). Ignored for
+	// Continue.
+	//
+	// Only the plugin dispatcher sets it (USK-1393): a plugin DROP /
+	// RESPOND is a decision about a message the proxy observed, so the
+	// message and the plugin's answer are recorded like any exchange.
+	// Policy Steps (scope, safety, intercept, budget) leave it false;
+	// their blocks stay metadata-only audit Streams written by the
+	// session's OnPipelineDrop recorder.
+	Record bool
 
 	// Annotations are Stream tags a Step asks RecordStep to append to the
 	// recorded Stream (USK-1109). Only honoured on Continue: Run merges
@@ -77,12 +95,14 @@ type Result struct {
 	// collision) and RecordStep appends the merged set to the Stream via
 	// flow.StreamUpdate.AppendTags, after the Stream row exists. They are
 	// metadata about the observation, never wire data — setting them does
-	// not modify the Envelope. A Drop / Respond Step's own Annotations
-	// are ignored; the annotations of the continuing Steps before it are
-	// surfaced as RunOutcome.Annotations for the block recorder.
+	// not modify the Envelope. A Drop / Respond Step's own Annotations are
+	// merged after those of the continuing Steps before it (USK-1393) and
+	// surfaced together as RunOutcome.Annotations for the block recorder;
+	// a Record terminating Step's RecordStep pass also appends them.
 	//
-	// Current producer: SafetyStep in log_only mode
-	// ("safety_log_only:<rule_id>" = matched target).
+	// Producers: SafetyStep in log_only mode ("safety_log_only:<rule_id>"
+	// = matched target) on Continue, and the plugin dispatcher on a
+	// DROP / RESPOND ("plugin", "plugin_hook", "plugin_phase").
 	Annotations map[string]string
 }
 
@@ -134,8 +154,8 @@ func (p *Pipeline) Run(ctx context.Context, env *envelope.Envelope) (*envelope.E
 // receives a clean terminator rather than hanging until its read
 // timeout. Audit Stream attribution must travel with that Respond so
 // the recorder still sees the block reason. Continue actions return
-// the empty string; plugin-driven Respond (no BlockedBy set) returns
-// the empty string verbatim.
+// the empty string; a plugin RESPOND (no BlockedBy set) returns the
+// empty string verbatim, a plugin DROP returns "plugin" (USK-1393).
 func (p *Pipeline) RunWithBlockedBy(ctx context.Context, env *envelope.Envelope) (*envelope.Envelope, Action, *envelope.Envelope, string) {
 	o := p.RunDetailed(ctx, env)
 	return o.Envelope, o.Action, o.Response, o.BlockedBy
@@ -151,29 +171,34 @@ type RunOutcome struct {
 	BlockedBy string
 
 	// Annotations are the merged Result.Annotations of the Steps that
-	// returned Continue before the chain ended (USK-1109). Populated only
-	// when the chain ended with Drop / Respond — on Continue RecordStep
-	// has already consumed them. The non-continuing Step's own
-	// Annotations are never included. The session forwards them to the
-	// block recorder via WithBlockAnnotations so an earlier log_only
-	// safety observation survives a later Drop. Owned by the caller.
+	// returned Continue before the chain ended (USK-1109), followed by the
+	// terminating Step's own (USK-1393: the plugin identity tags of a
+	// plugin DROP / RESPOND). Populated only when the chain ended with
+	// Drop / Respond — on Continue RecordStep has already consumed them.
+	// The session forwards them to the block recorder via
+	// WithBlockAnnotations so an earlier log_only safety observation
+	// survives a later Drop. Owned by the caller.
 	Annotations map[string]string
 }
 
-// RunDetailed is RunWithBlockedBy plus the Annotations of the continuing
-// Steps that preceded a Drop / Respond (USK-1109 review F-2).
+// RunDetailed is RunWithBlockedBy plus the Annotations of the Steps that
+// ran before and at a Drop / Respond (USK-1109 review F-2, USK-1393).
 func (p *Pipeline) RunDetailed(ctx context.Context, env *envelope.Envelope) RunOutcome {
 	snapshot := env.Clone()
 	ctx = withSnapshot(ctx, snapshot)
 	ctx = withWireEncodedState(ctx)
 	ctx = withAnnotations(ctx)
 
-	for _, step := range p.steps {
+	for i, step := range p.steps {
 		r := step.Process(ctx, env)
 		if r.Action != Continue {
 			o := RunOutcome{Envelope: env, Action: r.Action, Response: r.Response}
 			switch r.Action {
 			case Drop, Respond:
+				mergeAnnotations(ctx, r.Annotations)
+				if r.Record {
+					p.recordTerminated(ctx, i, env, r.Response)
+				}
 				o.BlockedBy = r.BlockedBy
 				o.Annotations = copyAnnotations(annotationsFromContext(ctx))
 			}
@@ -185,6 +210,26 @@ func (p *Pipeline) RunDetailed(ctx context.Context, env *envelope.Envelope) RunO
 		}
 	}
 	return RunOutcome{Envelope: env, Action: Continue}
+}
+
+// recordTerminated runs every RecordStep positioned after the Step at
+// index from on env, and then on resp when it is non-nil (Result.Record,
+// USK-1393). env keeps the Run's snapshot in ctx, so modifications made
+// before the terminating Step are recorded as an original / modified
+// variant pair exactly as on Continue. resp is recorded with no snapshot:
+// it is a new message, not a modified copy of env. Other Steps after the
+// terminating one (Intercept, Transform, UpgradeStep, ...) do not run.
+func (p *Pipeline) recordTerminated(ctx context.Context, from int, env, resp *envelope.Envelope) {
+	for _, step := range p.steps[from+1:] {
+		rs, ok := step.(*RecordStep)
+		if !ok {
+			continue
+		}
+		rs.Process(ctx, env)
+		if resp != nil {
+			rs.Process(withSnapshot(ctx, nil), resp)
+		}
+	}
 }
 
 // Without returns a new Pipeline that excludes all Steps whose concrete type

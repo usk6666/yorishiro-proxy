@@ -32,7 +32,6 @@ package mcp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -192,19 +191,14 @@ func (s *Server) handleResendHTTP(ctx context.Context, _ *gomcp.CallToolRequest,
 		return nil, nil, fmt.Errorf("resend_http: %w", err)
 	}
 
-	respEnv, responded, err := s.runResendHTTP(rtCtx, env, dial, pipe)
-	// USK-1375: a plugin Drop / Respond on the Send side exits the
-	// pipeline before RecordStep opens the Stream and carries no
-	// blocked_by attribution, so nothing is recorded. Blank the ID rather
-	// than return one that names no Stream.
+	respEnv, err := s.runResendHTTP(rtCtx, env, dial, pipe)
+	// USK-1393: a plugin Drop / Respond on the Send side is recorded by
+	// the pipeline, so env.StreamID names a Stream on every path.
 	streamID := env.StreamID
-	if responded || errors.Is(err, errSendDroppedByPipeline) {
-		streamID = ""
-	}
 	// USK-789: resend bypasses session.RunSession so the proxy path's
 	// OnComplete-driven Stream finalisation never fires. Mirror the
 	// contract here so the new Stream transitions out of State="active"
-	// before the MCP result returns. finalize no-ops on a blanked ID.
+	// before the MCP result returns.
 	finalizeResendStream(ctx, s.flowStore.store, streamID, input.Tag, err)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resend_http: %w", err)

@@ -397,11 +397,13 @@ type EnvelopeContext struct {
 	AbsoluteFormAuthority string
 
 	// Synthetic is true when this Envelope was synthesized by the proxy
-	// (not observed on the wire). The first and currently only producer is
-	// the USK-854 WS hold-window keepalive injection path in
-	// internal/session/session.go, which synthesizes WS Ping frames toward
-	// the upstream while a frame is held in the intercept queue so the
-	// upstream's idle timer does not expire.
+	// (not observed on the wire). Producers: the USK-854 WS hold-window
+	// keepalive injection path in internal/session/session.go, which
+	// synthesizes WS Ping frames toward the upstream while a frame is held
+	// in the intercept queue so the upstream's idle timer does not expire;
+	// and the plugin dispatcher's RESPOND response (USK-1393). RecordStep
+	// projects the flag onto the recorded Flow as Metadata["synthetic"] =
+	// "true".
 	//
 	// Pipeline Steps that mutate wire observation MUST NOT re-trigger on a
 	// Synthetic Envelope:

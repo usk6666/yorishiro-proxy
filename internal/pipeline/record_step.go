@@ -1373,6 +1373,12 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 		// thread the constant explicitly.
 		WireLevel: env.Context.WireLevel,
 	}
+	// USK-1393: a proxy-synthesized envelope (EnvelopeContext.Synthetic —
+	// today a plugin RESPOND response; the WS hold keepalive Ping is not
+	// recorded) is marked so it is never mistaken for wire-observed data.
+	if env.Context.Synthetic {
+		fl.Metadata["synthetic"] = "true"
+	}
 
 	switch m := env.Message.(type) {
 	case *envelope.HTTPMessage:
