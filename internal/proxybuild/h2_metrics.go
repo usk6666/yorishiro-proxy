@@ -56,7 +56,11 @@ type H2UpstreamMetrics struct {
 	// OpenStream return *layer.StreamError{Code: ErrorRefused} on the
 	// FIRST attempt. Counted BEFORE the retry attempt fires, so every
 	// Refused observation contributes exactly once regardless of
-	// retry outcome.
+	// retry outcome. Not counted when that attempt's own reactive
+	// redial failed (USK-1404): the refusal is then the stale Layer's,
+	// no retry follows, and the failure is already counted once as
+	// redialFailedReactive — so refused still equals the sum of the
+	// retry_* outcomes.
 	refused atomic.Int64
 
 	// redialPrewarm counts successful redials initiated by the pre-warm

@@ -654,8 +654,9 @@ func (c *channel) Close() error {
 //     verbatim, whatever its value (RFC 9113 §7: unknown codes trigger no
 //     special behavior) — USK-1269;
 //   - the upstream refused the stream without processing it (GOAWAY above
-//     the stream, or an OpenStream refusal): REFUSED_STREAM, so the peer
-//     may retry it (RFC 9113 §8.7) — USK-1157.
+//     the stream, or an OpenStream refusal the upstream caused — not one
+//     left behind by a failed proxy redial, USK-1404): REFUSED_STREAM, so
+//     the peer may retry it (RFC 9113 §8.7) — USK-1157.
 //
 // REFUSED_STREAM promises the request was not processed, which no longer
 // holds once this endpoint queued any HEADERS on the stream (a 1xx

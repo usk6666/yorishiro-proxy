@@ -1933,10 +1933,13 @@ func (c *redialChain) closeAll() {
 //
 // The chain.mu serialises the fresh-dial attempt so concurrent streams
 // observing staleness produce one upstream conn (not N). On dial
-// failure, the previous (stale) Layer is returned — OpenStream will
-// then surface the underlying error to the caller, so failure
-// propagates naturally (state=error / failure_reason=refused). The
-// failed dial is NOT cached, so the next call retries cleanly.
+// failure, the previous (stale) Layer is returned — never nil, so the
+// caller always has a Layer to OpenStream on. The failed dial is NOT
+// cached, so the next call retries cleanly. selectUpstreamForDial
+// drops the dial error; openUpstreamStreamWithRetryFn uses
+// selectUpstreamForDialWithTrigger, which returns it, so a failed
+// redial is reported as itself rather than as the stale Layer's
+// refusal (USK-1404).
 func selectUpstreamForDial(
 	dctx context.Context,
 	target string,
@@ -1945,9 +1948,10 @@ func selectUpstreamForDial(
 	dialFresh redialFunc,
 	logger *slog.Logger,
 ) *http2.Layer {
-	return selectUpstreamForDialWithTrigger(
+	l, _ := selectUpstreamForDialWithTrigger(
 		dctx, target, upstreamH2, chain, dialFresh, dialTriggerReactive, logger,
 	)
+	return l
 }
 
 // dialTrigger discriminates the call-site context for
@@ -1980,6 +1984,12 @@ const (
 // selectUpstreamForDial — see that function's doc comment for
 // active-Layer selection, browser-equivalent semantics, and the
 // chain.mu single-flight discussion.
+//
+// dialErr is non-nil only when THIS call attempted a fresh dial and it
+// failed; the returned Layer is then the stale active Layer. It is nil
+// when no dial was needed, when a concurrent goroutine (or the pre-warm
+// worker) had already swapped in a healthy head, and when the dial
+// succeeded.
 func selectUpstreamForDialWithTrigger(
 	dctx context.Context,
 	target string,
@@ -1988,7 +1998,7 @@ func selectUpstreamForDialWithTrigger(
 	dialFresh redialFunc,
 	trigger dialTrigger,
 	logger *slog.Logger,
-) *http2.Layer {
+) (_ *http2.Layer, dialErr error) {
 	// Fast path: lock-free read of the active Layer. current.Load() is
 	// either nil (no redial yet — use pooled) or points to a Layer that
 	// was appended to chain.layers under chain.mu prior to the swap, so
@@ -1998,7 +2008,7 @@ func selectUpstreamForDialWithTrigger(
 		active = l
 	}
 	if !isStaleH2(active) {
-		return active
+		return active, nil
 	}
 
 	// USK-1001: count GOAWAY observations at the CONSUMER (slow-path
@@ -2028,7 +2038,7 @@ func selectUpstreamForDialWithTrigger(
 		active = l
 	}
 	if !isStaleH2(active) {
-		return active
+		return active, nil
 	}
 
 	// Generation = number of fresh Layers already appended + 1. The
@@ -2048,13 +2058,16 @@ func selectUpstreamForDialWithTrigger(
 		}
 		logger.Warn("proxybuild: upstream h2 redial failed",
 			"target", target, "generation", nextGen, "error", err)
-		// Return the (stale) active Layer. The caller's OpenStream will
-		// surface the underlying ErrorRefused so the session records
-		// state=error / failure_reason=refused — the failure mode is
-		// then visible to the operator rather than silently swallowed.
-		// The failed dial is NOT appended to chain.layers, so the next
-		// call retries cleanly.
-		return active
+		// Return the (stale) active Layer together with the dial error.
+		// OpenStream on the stale Layer will refuse, but that refusal is
+		// a symptom of this proxy-local failure, not an upstream
+		// signal: openUpstreamStreamWithRetryFn reports the dial error
+		// instead (USK-1404), so the session resets the client stream
+		// with CANCEL rather than the retryable REFUSED_STREAM and
+		// records state=error with the dial error text. The failed dial
+		// is NOT appended to chain.layers, so the next call retries
+		// cleanly.
+		return active, err
 	}
 	chain.layers = append(chain.layers, fresh)
 	chain.current.Store(fresh)
@@ -2071,7 +2084,7 @@ func selectUpstreamForDialWithTrigger(
 	}
 	logger.Debug("proxybuild: upstream h2 redialed after stale-conn detection",
 		"target", target, "generation", nextGen)
-	return fresh
+	return fresh, nil
 }
 
 // isStaleH2 returns true when the layer has emitted GOAWAY-close or
@@ -2109,6 +2122,20 @@ func http2OpenStream(ctx context.Context, l *http2.Layer) (layer.Channel, error)
 //     returned verbatim — session records state=error / failure_reason=
 //     refused, matching the pre-fix observable. The retry budget is
 //     stack-local, so it cannot accumulate across requests.
+//   - Failed redial (USK-1404): when the selection for an attempt tried a
+//     fresh dial and it failed, the Layer handed to OpenStream is the
+//     stale one and its refusal says nothing about the upstream. The
+//     helper then returns a plain error wrapping the dial error
+//     (redialFailedError) instead of the Refused StreamError, so the
+//     session resets the client stream with CANCEL rather than the
+//     retryable REFUSED_STREAM (which made clients loop on the dead
+//     target until their own timeout) and records state=error with an
+//     empty failure_reason and the dial error in tags["error"]. If that
+//     failed dial happened on the FIRST attempt, no retry follows — the
+//     request dials exactly once. The retry still runs (and may redial)
+//     when the first attempt's refusal came without a failed dial in
+//     this call: the OpenStream-side race, or a head another goroutine
+//     swapped in.
 //
 // Idempotency:
 //   - OpenStream returns ErrorRefused before any HEADERS frame is
@@ -2167,13 +2194,25 @@ func openUpstreamStreamWithRetryFn(
 ) (*http2.Layer, layer.Channel, error) {
 	// First attempt: reactive-trigger selectUpstreamForDial. Stale-conn
 	// observations attributed to {goaway_observed,redial,redial_failed}_reactive.
-	upL := selectUpstreamForDial(dctx, target, upstreamH2, chain, dialFresh, logger)
+	upL, dialErr := selectUpstreamForDialWithTrigger(
+		dctx, target, upstreamH2, chain, dialFresh, dialTriggerReactive, logger,
+	)
 	upCh, err := openStream(dctx, upL)
 	if err == nil {
 		return upL, upCh, nil
 	}
 	if !isRefusedStreamError(err) {
 		return nil, nil, err
+	}
+	if dialErr != nil {
+		// USK-1404: this call already tried to redial the stale head
+		// and failed; the refusal is the stale Layer's, a consequence
+		// of that failure rather than the OpenStream-side race the
+		// retry below recovers from. Re-dialing a target that just
+		// refused us only doubles the dead dials, so report the dial
+		// failure now. Not counted as refused / retry_*: the failure is
+		// already counted once as redial_failed_reactive.
+		return nil, nil, redialFailedError(target, dialErr, err)
 	}
 	// USK-1001: count every observed Refused at the FIRST OpenStream
 	// attempt. Counted before the retry decision so retry-success vs
@@ -2193,7 +2232,7 @@ func openUpstreamStreamWithRetryFn(
 	// status surface keeps them distinct.
 	logger.Debug("proxybuild: OpenStream refused, retrying after fresh dial",
 		"target", target, "reason", refusedReason(err))
-	upL2 := selectUpstreamForDialWithTrigger(
+	upL2, dialErr2 := selectUpstreamForDialWithTrigger(
 		dctx, target, upstreamH2, chain, dialFresh, dialTriggerRefusedStream, logger,
 	)
 	upCh2, err2 := openStream(dctx, upL2)
@@ -2227,9 +2266,27 @@ func openUpstreamStreamWithRetryFn(
 		chain.metrics.incRetryFailRedial()
 	}
 	if err2 != nil {
+		if dialErr2 != nil && isRefusedStreamError(err2) {
+			// The retry's own redial failed and the stale Layer refused:
+			// report the dial failure, not the refusal (USK-1404).
+			return nil, nil, redialFailedError(target, dialErr2, err2)
+		}
 		return nil, nil, err2
 	}
 	return upL2, upCh2, nil
+}
+
+// redialFailedError reports a failed upstream h2 redial. It wraps dialErr
+// (so errors.Is / errors.As reach the dial error) and only quotes
+// openErr, the stale Layer's refusal, as text: openErr must NOT be
+// wrapped, otherwise isRefusedStreamError / session.ClassifyError would
+// still see an upstream ErrorRefused and the session would reset the
+// client stream with the retryable REFUSED_STREAM. A plain error makes
+// the session reset it with CANCEL (the RFC-001 rule for proxy-local
+// failures) and record state=error with this text in tags["error"].
+func redialFailedError(target string, dialErr, openErr error) error {
+	return fmt.Errorf("proxybuild: upstream h2 redial to %s failed: %w (stale upstream connection: %v)",
+		target, dialErr, openErr)
 }
 
 // isRefusedStreamError reports whether err is a *layer.StreamError whose

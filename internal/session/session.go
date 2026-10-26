@@ -521,9 +521,11 @@ type upstreamHolder struct {
 
 // refused reports whether the UPSTREAM declared the stream unprocessed —
 // GOAWAY with a last_stream_id below it, RST_STREAM(REFUSED_STREAM), or an
-// OpenStream refusal that outlived the dial's retry — as opposed to a
-// refusal the client sent or a local failure. Only valid after the
-// errgroup's Wait.
+// OpenStream refusal the upstream caused that outlived the dial's retry —
+// as opposed to a refusal the client sent or a local failure. A failed
+// upstream redial is a local failure: the dial closure returns it as a
+// plain error, not the stale connection's refusal (USK-1404). Only valid
+// after the errgroup's Wait.
 //
 // uh.ch.Err() covers the mid-request Send path, where the upstream Send
 // fails with a plain error but the Channel's terminal error is the
