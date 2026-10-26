@@ -379,35 +379,6 @@ func TestInitHostTLSRegistry_EmptyConfig(t *testing.T) {
 	}
 }
 
-func TestInitHostTLSRegistry_PerHostFromCLIConfig(t *testing.T) {
-	logger := testLogger(t)
-
-	verify := true
-	cfg := &config.Config{
-		HostTLS: map[string]*config.HostTLSEntry{
-			"api.example.com": {
-				TLSVerify: &verify,
-			},
-		},
-	}
-
-	reg, err := InitHostTLSRegistry(cfg, &config.ProxyConfig{}, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	hosts := reg.Hosts()
-	if len(hosts) != 1 {
-		t.Fatalf("expected 1 host, got %d", len(hosts))
-	}
-	hostCfg := reg.Lookup("api.example.com")
-	if hostCfg == nil {
-		t.Fatal("expected host config for api.example.com")
-	}
-	if hostCfg.TLSVerify == nil || !*hostCfg.TLSVerify {
-		t.Error("expected TLSVerify=true for api.example.com")
-	}
-}
-
 func TestInitHostTLSRegistry_PerHostFromProxyConfig(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()

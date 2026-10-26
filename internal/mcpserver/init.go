@@ -733,9 +733,11 @@ func NewLiveManager(
 	return mgr, nil
 }
 
-// InitHostTLSRegistry builds a transport.HostTLSRegistry from the CLI
-// config and proxy config file. CLI config settings take precedence;
-// proxy config file settings are applied as fallbacks.
+// InitHostTLSRegistry builds a transport.HostTLSRegistry. The global
+// mTLS client certificate comes from cfg.ClientCertPath / cfg.ClientKeyPath
+// when both are set, otherwise from proxyCfg.ClientCertPath /
+// proxyCfg.ClientKeyPath when both of those are set. Per-host entries come
+// only from proxyCfg.HostTLS (the -config file's host_tls).
 func InitHostTLSRegistry(cfg *config.Config, proxyCfg *config.ProxyConfig, logger *slog.Logger) (*transport.HostTLSRegistry, error) {
 	reg := transport.NewHostTLSRegistry()
 
@@ -750,10 +752,6 @@ func InitHostTLSRegistry(cfg *config.Config, proxyCfg *config.ProxyConfig, logge
 		reg.SetGlobal(globalTLS)
 		logger.Info("global mTLS client certificate configured",
 			"cert", cfg.ClientCertPath, "key", cfg.ClientKeyPath)
-	}
-
-	if err := applyHostTLSEntries(reg, cfg.HostTLS, "", logger); err != nil {
-		return nil, err
 	}
 
 	if proxyCfg.ClientCertPath != "" && proxyCfg.ClientKeyPath != "" && reg.Global() == nil {
