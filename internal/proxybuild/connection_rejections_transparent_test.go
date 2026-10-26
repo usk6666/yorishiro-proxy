@@ -24,8 +24,11 @@ import (
 // capacityRejectStack builds and starts a MaxConnections=1 Stack whose
 // only slot is held by a silent connection, then sends an HTTP/1.1 request
 // on an over-cap connection. It returns the audit Streams written and the
-// aggregator.
-func capacityRejectStack(t *testing.T, transparent bool, r connector.OriginalDstResolver) ([]*flow.Stream, *ConnectionRejections) {
+// aggregator. holderReady, when non-nil, is polled after the holder is
+// accepted and must report true before the over-cap dial: the active count
+// rises at accept, before the holder's handler has resolved its original
+// dst, so a test whose resolver answers by call order must wait on it.
+func capacityRejectStack(t *testing.T, transparent bool, r connector.OriginalDstResolver, holderReady func() bool) ([]*flow.Stream, *ConnectionRejections) {
 	t.Helper()
 	store := &recordingFlowStore{}
 	rej := NewConnectionRejections(ConnectionRejectionsConfig{Store: store, Logger: silentLogger()})
@@ -74,6 +77,12 @@ func capacityRejectStack(t *testing.T, transparent bool, r connector.OriginalDst
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	for holderReady != nil && !holderReady() {
+		if time.Now().After(deadline) {
+			t.Fatal("holder connection never became ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	over, err := net.Dial("tcp4", addr)
 	if err != nil {
@@ -101,7 +110,7 @@ func TestConnectionRejections_TransparentListener_TagsOriginalDst(t *testing.T) 
 	r := connector.OriginalDstFunc(func(net.Conn) (netip.AddrPort, error) {
 		return netip.MustParseAddrPort("192.0.2.10:80"), nil
 	})
-	streams, rej := capacityRejectStack(t, true, r)
+	streams, rej := capacityRejectStack(t, true, r, nil)
 
 	if got := streams[0].Tags[connector.TagOriginalDst]; got != "192.0.2.10:80" {
 		t.Errorf("Tags[%s] = %q, want 192.0.2.10:80", connector.TagOriginalDst, got)
@@ -121,7 +130,7 @@ func TestConnectionRejections_ExplicitListener_NoOriginalDst(t *testing.T) {
 		calls.Add(1)
 		return netip.MustParseAddrPort("192.0.2.10:80"), nil
 	})
-	streams, rej := capacityRejectStack(t, false, r)
+	streams, rej := capacityRejectStack(t, false, r, nil)
 
 	if got, ok := streams[0].Tags[connector.TagOriginalDst]; ok {
 		t.Errorf("Tags[%s] = %q on an explicit listener, want no such key", connector.TagOriginalDst, got)
@@ -162,7 +171,10 @@ func TestConnectionRejections_TransparentListener_UnusableDstStillRecorded(t *te
 				}
 				return tt.overCap(conn)
 			})
-			streams, rej := capacityRejectStack(t, true, r)
+			// Dial the over-cap connection only once the holder has
+			// made the first resolver call, so the call order above holds.
+			holderResolved := func() bool { return calls.Load() >= 1 }
+			streams, rej := capacityRejectStack(t, true, r, holderResolved)
 
 			if got, ok := streams[0].Tags[connector.TagOriginalDst]; ok {
 				t.Errorf("Tags[%s] = %q for an unusable original dst, want no such key", connector.TagOriginalDst, got)
