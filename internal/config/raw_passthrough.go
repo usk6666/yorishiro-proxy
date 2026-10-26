@@ -1,46 +1,81 @@
 package config
 
-import "strings"
+import (
+	"net"
+	"strconv"
+	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/hostcanon"
+)
 
 // IsRawPassthrough reports whether the given host:port target is configured
-// for raw passthrough mode (no L7 parsing). Matching is case-insensitive
-// exact match on "host:port". Wildcard patterns are deferred to N4.
+// for raw passthrough mode (no L7 parsing). There are no wildcard patterns.
+//
+// Entry and target are compared in rawPassthroughKey form, so spellings
+// verified to dial the same destination match the same entry (USK-1385):
+// case, one trailing dot on a name, IPv6 RFC 5952 text, IPv4-mapped IPv6
+// and dotted quad, the IPv6 zone, and a leading-zero port
+// ("localhost.:443", "[::ffff:127.0.0.1]:443", "localhost:0443"). The raw
+// route skips the Safety / Intercept / Transform steps, so the list is
+// allow-like and legacy inet_aton IPv4 spellings ("127.1", "2130706433",
+// "0x7f.0.0.1") are compared as written (hostcanon.FoldDialEquivalent).
+// The fold is comparison-only: the dial target, the TLS name and the stored
+// entries stay as written (MITM Principle 1).
 func (c *ProxyConfig) IsRawPassthrough(target string) bool {
-	target = strings.ToLower(strings.TrimSpace(target))
-	if target == "" {
+	key := rawPassthroughKey(target)
+	if key == "" {
 		return false
 	}
 	for _, h := range c.RawPassthroughHosts {
-		if strings.ToLower(strings.TrimSpace(h)) == target {
+		if rawPassthroughKey(h) == key {
 			return true
 		}
 	}
 	return false
 }
 
-// RawPassthroughSet builds a pre-normalized set for O(1) lookups.
-// Use this when IsRawPassthrough will be called frequently (per-connection).
-type RawPassthroughSet struct {
-	hosts map[string]struct{}
+// rawPassthroughKey returns the comparison form of a raw_passthrough_hosts
+// entry or target. A well-formed "host:port" (net.SplitHostPort, non-empty
+// host) becomes JoinHostPort(FoldDialEquivalent(host), port), with the
+// port as a decimal integer when it is all ASCII digits in 1..65535 —
+// leading zeros allowed, as connector.SplitTargetHostPort accepts and the
+// dialer reads them — and as written otherwise. Anything else falls back to
+// the lowercased, trimmed literal, the pre-USK-1385 behaviour. An empty
+// input yields "", which never matches. It cannot panic.
+func rawPassthroughKey(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(s)
+	if err != nil || host == "" {
+		return s
+	}
+	if n, ok := parseRawPassthroughPort(port); ok {
+		port = strconv.Itoa(n)
+	}
+	return net.JoinHostPort(hostcanon.FoldDialEquivalent(host), port)
 }
 
-// NewRawPassthroughSet creates a set from a ProxyConfig's RawPassthroughHosts.
-func NewRawPassthroughSet(cfg *ProxyConfig) *RawPassthroughSet {
-	s := &RawPassthroughSet{
-		hosts: make(map[string]struct{}, len(cfg.RawPassthroughHosts)),
+// parseRawPassthroughPort parses a port of ASCII decimal digits (leading
+// zeros allowed) in 1..65535. Signs, spaces and service names are rejected.
+func parseRawPassthroughPort(p string) (int, bool) {
+	if p == "" {
+		return 0, false
 	}
-	for _, h := range cfg.RawPassthroughHosts {
-		normalized := strings.ToLower(strings.TrimSpace(h))
-		if normalized != "" {
-			s.hosts[normalized] = struct{}{}
+	n := 0
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+		if n > 65535 {
+			return 0, false
 		}
 	}
-	return s
-}
-
-// Contains reports whether the target is in the raw passthrough set.
-func (s *RawPassthroughSet) Contains(target string) bool {
-	target = strings.ToLower(strings.TrimSpace(target))
-	_, ok := s.hosts[target]
-	return ok
+	if n == 0 {
+		return 0, false
+	}
+	return n, true
 }
