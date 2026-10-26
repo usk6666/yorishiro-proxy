@@ -7,6 +7,7 @@ import type {
   UpstreamProxyRotationInput,
 } from "../../lib/mcp/types.js";
 import { UpstreamProxyEditor } from "./UpstreamProxyEditor.js";
+import { parseClientTimeoutMs } from "../../lib/clientTimeouts.js";
 import {
   type UpstreamProxyEditorValue,
   redactUpstreamProxyURL,
@@ -19,6 +20,11 @@ interface ConnectionSettingsProps {
 }
 
 const DEFAULT_LISTENER = "default";
+
+/** Input value for an optional numeric status field ("" when absent). */
+function optionalMs(ms: number | null | undefined): string {
+  return ms === null || ms === undefined ? "" : String(ms);
+}
 
 /**
  * Find the per-listener status entry matching `name`. Returns undefined
@@ -85,6 +91,9 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
   const [maxConnections, setMaxConnections] = useState(String(status.max_connections));
   const [peekTimeout, setPeekTimeout] = useState(String(status.peek_timeout_ms));
   const [requestTimeout, setRequestTimeout] = useState(String(status.request_timeout_ms));
+  const [clientIdleTimeout, setClientIdleTimeout] = useState(
+    optionalMs(status.client_idle_timeout_ms),
+  );
 
   // Listener scope for the Upstream Proxy card (USK-826/USK-959).
   // `configure({ name })` currently scopes only the upstream_proxy
@@ -115,6 +124,7 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
     setMaxConnections(String(status.max_connections));
     setPeekTimeout(String(status.peek_timeout_ms));
     setRequestTimeout(String(status.request_timeout_ms));
+    setClientIdleTimeout(optionalMs(status.client_idle_timeout_ms));
     setUpstreamProxy(deriveUpstreamProxyValue(status, selectedListener));
   }, [status, selectedListener]);
 
@@ -129,7 +139,6 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
   const handleSaveConnection = useCallback(async () => {
     const maxConn = parseInt(maxConnections, 10);
     const peekMs = parseInt(peekTimeout, 10);
-    const reqMs = parseInt(requestTimeout, 10);
 
     if (isNaN(maxConn) || maxConn < 1) {
       addToast({ type: "warning", message: "Max connections must be a positive number" });
@@ -139,16 +148,28 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
       addToast({ type: "warning", message: "Peek timeout must be at least 100ms" });
       return;
     }
-    if (isNaN(reqMs) || reqMs < 100) {
-      addToast({ type: "warning", message: "Request timeout must be at least 100ms" });
+    // USK-1185: 0 disables the client-side bound.
+    const reqMs = parseClientTimeoutMs(requestTimeout, "Request timeout");
+    if ("error" in reqMs) {
+      addToast({ type: "warning", message: reqMs.error });
       return;
+    }
+    let idleMs: number | undefined;
+    if (clientIdleTimeout.trim() !== "") {
+      const parsed = parseClientTimeoutMs(clientIdleTimeout, "Client idle timeout");
+      if ("error" in parsed) {
+        addToast({ type: "warning", message: parsed.error });
+        return;
+      }
+      idleMs = parsed.value;
     }
 
     try {
       await configure({
         max_connections: maxConn,
         peek_timeout_ms: peekMs,
-        request_timeout_ms: reqMs,
+        request_timeout_ms: reqMs.value,
+        ...(idleMs === undefined ? {} : { client_idle_timeout_ms: idleMs }),
       });
       addToast({ type: "success", message: "Connection settings updated" });
       onRefresh();
@@ -158,7 +179,15 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
         message: `Failed to update: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [maxConnections, peekTimeout, requestTimeout, configure, addToast, onRefresh]);
+  }, [
+    maxConnections,
+    peekTimeout,
+    requestTimeout,
+    clientIdleTimeout,
+    configure,
+    addToast,
+    onRefresh,
+  ]);
 
   const handleSaveUpstreamProxy = useCallback(async () => {
     // Trim string form before send; the editor already builds a
@@ -236,11 +265,18 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
               placeholder="30000"
             />
             <Input
-              label="Request Timeout (ms)"
+              label="Request Timeout (ms, 0 = disabled)"
               value={requestTimeout}
               onChange={(e) => setRequestTimeout(e.target.value)}
               type="number"
               placeholder="60000"
+            />
+            <Input
+              label="Client Idle Timeout (ms, 0 = disabled)"
+              value={clientIdleTimeout}
+              onChange={(e) => setClientIdleTimeout(e.target.value)}
+              type="number"
+              placeholder="120000"
             />
           </div>
         </div>

@@ -11,6 +11,7 @@ import type {
   SecurityGetBudgetResult,
   SecurityGetRateLimitsResult,
 } from "../../lib/mcp/types.js";
+import { formatClientTimeoutMs } from "../../lib/clientTimeouts.js";
 import { useBreakdownCounts } from "./breakdownCounts.js";
 import { BudgetWidget } from "./BudgetWidget.js";
 import { RateLimitWidget } from "./RateLimitWidget.js";
@@ -418,7 +419,15 @@ export function DashboardPage() {
             </div>
             <div className="dashboard-config-item">
               <span className="dashboard-config-label">Request Timeout</span>
-              <span className="dashboard-config-value">{statusData.request_timeout_ms}ms</span>
+              <span className="dashboard-config-value">
+                {formatClientTimeoutMs(statusData.request_timeout_ms)}
+              </span>
+            </div>
+            <div className="dashboard-config-item">
+              <span className="dashboard-config-label">Client Idle Timeout</span>
+              <span className="dashboard-config-value">
+                {formatClientTimeoutMs(statusData.client_idle_timeout_ms)}
+              </span>
             </div>
             <div className="dashboard-config-item">
               <span className="dashboard-config-label">CA Initialized</span>

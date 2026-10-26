@@ -213,6 +213,7 @@ func socks5ShouldRunTLSMITM(ctx context.Context, cfg SOCKS5HandlerConfig, pc *Pe
 	return dispatchInnerProtocol(ctx, pc, ut.Dial, innerDispatchConfig{
 		PeekTimeout:         cfg.InnerPeekTimeout,
 		PeekTimeoutProvider: cfg.InnerPeekTimeoutProvider,
+		PeekTimeoutDisabled: cfg.InnerPeekTimeoutDisabled,
 		BuildCfg:            cfg.BuildCfg,
 		OnStack:             cfg.OnStack,
 		OnHTTP2Stack:        cfg.OnHTTP2Stack,

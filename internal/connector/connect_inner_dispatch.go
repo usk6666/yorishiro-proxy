@@ -378,6 +378,8 @@ type innerDispatchConfig struct {
 
 // resolveInnerPeekTimeout returns the effective inner-byte peek deadline.
 // Precedence (USK-844):
+//  0. cfg.PeekTimeoutDisabled reporting true → 0: no deadline at all
+//     (request_timeout_ms: 0, USK-1185; peekInnerProtocol arms none for 0).
 //  1. cfg.PeekTimeoutProvider (runtime hot-reload via Manager).
 //  2. cfg.PeekTimeout (boot-time / static value).
 //  3. DefaultInnerPeekTimeout package default.
@@ -385,6 +387,9 @@ type innerDispatchConfig struct {
 // Non-positive values from the provider or the static field collapse to the
 // next tier so the "0 = default" wire shape is preserved end-to-end.
 func resolveInnerPeekTimeout(cfg innerDispatchConfig) time.Duration {
+	if cfg.PeekTimeoutDisabled != nil && cfg.PeekTimeoutDisabled() {
+		return 0
+	}
 	if cfg.PeekTimeoutProvider != nil {
 		if d := cfg.PeekTimeoutProvider(); d > 0 {
 			return d

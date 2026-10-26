@@ -161,8 +161,13 @@ func SetTransparentHeadTimeoutForTest(d time.Duration) (restore func()) {
 	return func() { transparentHeadTimeoutOverride.Store(prev) }
 }
 
-// transparentHeadBound returns the pre-dial request-head bound.
-func transparentHeadBound() time.Duration {
+// headBound returns the pre-dial request-head bound, or 0 (no deadline)
+// when request_timeout_ms is disabled (USK-1185). The enabled bound stays
+// the fixed transparentHeadTimeout, not request_timeout_ms.
+func (h *TransparentHandler) headBound() time.Duration {
+	if _, ok := h.cfg.BuildCfg.ClientRequestHeadDeadline(); !ok {
+		return 0
+	}
 	if d := time.Duration(transparentHeadTimeoutOverride.Load()); d > 0 {
 		return d
 	}
@@ -432,7 +437,7 @@ func (h *TransparentHandler) handleHTTP(ctx context.Context, pc *PeekConn, dst n
 	case !denyOK:
 		v = refuseScope(reason)
 	case !full:
-		head = readTransparentRequestHead(pc, transparentHeadBound())
+		head = readTransparentRequestHead(pc, h.headBound())
 		v = h.scopeHTTPNames(dst, head)
 		if v.allowed {
 			v = h.bindNames(ctx, dst, head.names())
@@ -443,7 +448,7 @@ func (h *TransparentHandler) handleHTTP(ctx context.Context, pc *PeekConn, dst n
 		// on the first request must still not get the target contacted.
 		// A head that cannot be read whole within the bound is left to
 		// HTTPScopeStep, which checks every request after the dial.
-		head = readTransparentRequestHead(pc, transparentHeadBound())
+		head = readTransparentRequestHead(pc, h.headBound())
 		if head.complete {
 			if ok, r := h.checkHTTPNames(dst, head); !ok {
 				v = refuseScope(r)

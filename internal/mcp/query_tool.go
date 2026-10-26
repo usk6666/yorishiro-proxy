@@ -30,6 +30,10 @@ import (
 // used when no protocol handler is registered.
 const defaultRequestTimeoutMs = 60000
 
+// defaultClientIdleTimeoutMs is the default client keep-alive idle timeout
+// in milliseconds (connector.DefaultClientIdleTimeout, USK-1185).
+const defaultClientIdleTimeoutMs = int64(connector.DefaultClientIdleTimeout / time.Millisecond)
+
 // oversizeAdvisoryThreshold is the per-message body byte length at which
 // the flow / messages handlers attach an Advisory hint suggesting that the
 // caller pass include_bodies=false or body_max_bytes=N to stay under the
@@ -2445,13 +2449,9 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 
 	s.populateManagerStatus(result)
 
-	// Report request timeout from the first registered handler.
-	if rt := s.currentRequestTimeout(); rt > 0 {
-		result.RequestTimeoutMs = rt.Milliseconds()
-	} else {
-		// Default request timeout when no handler is registered.
-		result.RequestTimeoutMs = defaultRequestTimeoutMs
-	}
+	// Report the client-side timeouts (0 = disabled, USK-1185).
+	result.RequestTimeoutMs = s.currentRequestTimeoutMs()
+	result.ClientIdleTimeoutMs = s.currentClientIdleTimeoutMs()
 
 	if s.flowStore.store != nil {
 		count, err := s.flowStore.store.CountStreams(ctx, flow.StreamListOptions{})
@@ -2685,12 +2685,9 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		result.SSEMaxEventsPerStream = s.connector.manager.SSEMaxEventsPerStream()
 	}
 
-	if rt := s.currentRequestTimeout(); rt > 0 {
-		result.RequestTimeoutMs = rt.Milliseconds()
-	} else {
-		// Default request timeout when no handler is registered.
-		result.RequestTimeoutMs = defaultRequestTimeoutMs
-	}
+	// Client-side timeouts (0 = disabled, USK-1185).
+	result.RequestTimeoutMs = s.currentRequestTimeoutMs()
+	result.ClientIdleTimeoutMs = s.currentClientIdleTimeoutMs()
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
 	result.CaptureScope = s.currentCaptureScope()

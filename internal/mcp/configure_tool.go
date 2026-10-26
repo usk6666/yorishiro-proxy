@@ -942,7 +942,7 @@ func (s *Server) configureTLSFingerprint(input configureInput, result *configure
 }
 
 // applyConnectionLimits validates and applies max_connections, peek_timeout_ms,
-// and request_timeout_ms from the configure input. It modifies the result to
+// request_timeout_ms and client_idle_timeout_ms from the configure input. It modifies the result to
 // include the new values. This is shared between merge and replace handlers
 // since these fields are scalar values, not collections.
 func (s *Server) applyConnectionLimits(input configureInput, result *configureResult) error {
@@ -969,14 +969,16 @@ func (s *Server) applyConnectionLimits(input configureInput, result *configureRe
 		msVal := int64(ms)
 		result.PeekTimeoutMs = &msVal
 	}
+	if err := s.applyClientTimeouts(input.RequestTimeoutMs, input.ClientIdleTimeoutMs); err != nil {
+		return err
+	}
 	if input.RequestTimeoutMs != nil {
-		ms := *input.RequestTimeoutMs
-		if ms < minTimeoutMs || ms > maxTimeoutMs {
-			return fmt.Errorf("request_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
-		}
-		s.applyRequestTimeout(time.Duration(ms) * time.Millisecond)
-		msVal := int64(ms)
+		msVal := int64(*input.RequestTimeoutMs)
 		result.RequestTimeoutMs = &msVal
+	}
+	if input.ClientIdleTimeoutMs != nil {
+		msVal := int64(*input.ClientIdleTimeoutMs)
+		result.ClientIdleTimeoutMs = &msVal
 	}
 	return s.applyConfigureMaxConcurrentStreams(input, result)
 }

@@ -101,7 +101,7 @@ Flow state indicates the lifecycle stage:
 - `"error"`: Failed (e.g. 502 error, upstream connection failure)
 
 HTTP/1.x request heads (including `CONNECT` requests) the proxy itself closed before the request was complete are recorded as `"error"` flows with `tags.closed_by = "proxy"` and one of these `failure_reason` values:
-- `request_head_timeout`: the request line + headers did not arrive within `request_timeout_ms` (`tags.request_timeout_ms` is the value in force). A keep-alive connection that closes or goes idle with zero bytes of a next request is not recorded.
+- `request_head_timeout`: the request line + headers did not arrive within `request_timeout_ms` (`tags.request_timeout_ms` is the value in force; never recorded while it is `0`, disabled). A keep-alive connection that closes or goes idle with zero bytes of a next request is not recorded.
 - `request_line_too_long`: the request line exceeded the parser limit; the proxy answered `414 URI Too Long`.
 - `request_header_too_large`: the header section exceeded the parser limit; the proxy answered `431 Request Header Fields Too Large`.
 
@@ -159,7 +159,7 @@ Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, u
 ### config
 Get current configuration including upstream proxy, TLS passthrough, TCP forwards, and runtime knobs. No additional parameters.
 
-Returns: upstream_proxy, tls_passthrough (patterns, count), tcp_forwards (port->target map), socks5_enabled, client_cert, safety_filter (enabled, input_rules, output_rules), max_connections, peek_timeout_ms, request_timeout_ms, tls_fingerprint, capture_scope (includes, excludes), export_dir (the directory `manage` export_flows / import_flows file paths are confined to).
+Returns: upstream_proxy, tls_passthrough (patterns, count), tcp_forwards (port->target map), socks5_enabled, client_cert, safety_filter (enabled, input_rules, output_rules), max_connections, peek_timeout_ms, request_timeout_ms, client_idle_timeout_ms (both `0` when disabled), tls_fingerprint, capture_scope (includes, excludes), export_dir (the directory `manage` export_flows / import_flows file paths are confined to).
 
 > Note: `target_scope` (transmission gate) is intentionally NOT echoed here — it is owned by the `security` MCP tool and queried via `security` with `action: "get_target_scope"`. `capture_scope` (recording-only filter, USK-776) IS echoed here.
 

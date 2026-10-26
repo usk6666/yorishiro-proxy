@@ -310,6 +310,18 @@ type BuildConfig struct {
 	// configure). Zero means "no override". Stored as nanoseconds.
 	requestHeaderTimeoutDynamic atomic.Int64
 
+	// requestHeaderTimeoutDisabled is the request_timeout_ms: 0 state
+	// (USK-1185): no client request-head deadline at all. Kept apart from
+	// the zero "unset" value above; resolved by ClientRequestHeadDeadline.
+	requestHeaderTimeoutDisabled atomic.Bool
+
+	// clientIdleTimeoutDynamic / clientIdleTimeoutDisabled hold
+	// client_idle_timeout_ms (USK-1185): the keep-alive wait for the first
+	// byte of a client's next request. Zero = DefaultClientIdleTimeout.
+	// Resolved by ClientIdleDeadline.
+	clientIdleTimeoutDynamic  atomic.Int64
+	clientIdleTimeoutDisabled atomic.Bool
+
 	// clientMITMHandshakes counts entries to performClientMITM (USK-813).
 	// Used by e2e tests to verify that the pool fast-path short-circuits
 	// before the wasted client TLS handshake when h2 is disabled at
@@ -922,6 +934,7 @@ func (c *BuildConfig) EffectiveRequestHeaderTimeout() time.Duration {
 
 // SetRequestHeaderTimeout installs a runtime override for
 // EffectiveRequestHeaderTimeout. Non-positive values clear the override.
+// Every call also clears a previous DisableRequestHeaderTimeout (USK-1185).
 // Safe on a nil receiver (no-op).
 func (c *BuildConfig) SetRequestHeaderTimeout(d time.Duration) {
 	if c == nil {
@@ -931,30 +944,93 @@ func (c *BuildConfig) SetRequestHeaderTimeout(d time.Duration) {
 		d = 0
 	}
 	c.requestHeaderTimeoutDynamic.Store(int64(d))
+	c.requestHeaderTimeoutDisabled.Store(false)
 }
 
-// DefaultClientIdleTimeout is the keep-alive wait for the first byte of a
-// client's next request (USK-1185).
-const DefaultClientIdleTimeout = 120 * time.Second
+// DefaultClientIdleTimeout is how long a client-facing HTTP/1.x
+// connection waits for the first byte of the next request when
+// client_idle_timeout_ms is not set (USK-1162 / USK-1185). 120s outlasts
+// the keep-alive idle timeout of mainstream browsers (Firefox: 115s), so
+// the proxy never races a browser that is about to reuse the connection.
+const DefaultClientIdleTimeout = http1.DefaultKeepAliveIdleTimeout
 
-// ClientRequestHeadDeadline is a USK-1185 scaffold.
-func (c *BuildConfig) ClientRequestHeadDeadline() (time.Duration, bool) {
+// ClientRequestHeadDeadline resolves the client request-head bound
+// (request_timeout_ms) at the consumption seam (USK-1185). ok=false means
+// the bound is disabled: the caller must arm no deadline at all — never
+// a zero one. Otherwise d is EffectiveRequestHeaderTimeout. Safe on a nil
+// receiver (default, enabled).
+func (c *BuildConfig) ClientRequestHeadDeadline() (d time.Duration, ok bool) {
+	if c != nil && c.requestHeaderTimeoutDisabled.Load() {
+		return 0, false
+	}
 	return c.EffectiveRequestHeaderTimeout(), true
 }
 
-// DisableRequestHeaderTimeout is a USK-1185 scaffold.
-func (c *BuildConfig) DisableRequestHeaderTimeout() {}
+// DisableRequestHeaderTimeout switches the client request-head bound off
+// (request_timeout_ms: 0, USK-1185) until the next SetRequestHeaderTimeout
+// call. The internal zero keeps meaning "unset / default"; disabled is a
+// state of its own. Safe on a nil receiver (no-op).
+func (c *BuildConfig) DisableRequestHeaderTimeout() {
+	if c == nil {
+		return
+	}
+	c.requestHeaderTimeoutDisabled.Store(true)
+}
 
-// ClientIdleDeadline is a USK-1185 scaffold.
-func (c *BuildConfig) ClientIdleDeadline() (time.Duration, bool) {
+// ClientHandshakeContext derives the context bounding a client-side TLS
+// MITM handshake by request_timeout_ms (USK-1162). When the bound is
+// disabled (USK-1185) the context carries no deadline. The caller must
+// call cancel.
+func (c *BuildConfig) ClientHandshakeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if d, ok := c.ClientRequestHeadDeadline(); ok {
+		return context.WithTimeout(ctx, d)
+	}
+	return context.WithCancel(ctx)
+}
+
+// ClientIdleDeadline resolves the keep-alive wait for the first byte of a
+// client's next request (client_idle_timeout_ms, USK-1185): the runtime
+// value from SetClientIdleTimeout when positive, else
+// DefaultClientIdleTimeout. ok=false means the bound is disabled. Safe on
+// a nil receiver (default, enabled). The HTTP/1.x Layer combines it with
+// the request-head bound as max(idle, header) when both are enabled.
+func (c *BuildConfig) ClientIdleDeadline() (d time.Duration, ok bool) {
+	if c == nil {
+		return DefaultClientIdleTimeout, true
+	}
+	if c.clientIdleTimeoutDisabled.Load() {
+		return 0, false
+	}
+	if dyn := time.Duration(c.clientIdleTimeoutDynamic.Load()); dyn > 0 {
+		return dyn, true
+	}
 	return DefaultClientIdleTimeout, true
 }
 
-// SetClientIdleTimeout is a USK-1185 scaffold.
-func (c *BuildConfig) SetClientIdleTimeout(time.Duration) {}
+// SetClientIdleTimeout sets the client keep-alive idle bound and clears a
+// previous DisableClientIdleTimeout. Non-positive values restore
+// DefaultClientIdleTimeout. Next-request semantics. Safe on a nil receiver
+// (no-op).
+func (c *BuildConfig) SetClientIdleTimeout(d time.Duration) {
+	if c == nil {
+		return
+	}
+	if d < 0 {
+		d = 0
+	}
+	c.clientIdleTimeoutDynamic.Store(int64(d))
+	c.clientIdleTimeoutDisabled.Store(false)
+}
 
-// DisableClientIdleTimeout is a USK-1185 scaffold.
-func (c *BuildConfig) DisableClientIdleTimeout() {}
+// DisableClientIdleTimeout switches the client keep-alive idle bound off
+// (client_idle_timeout_ms: 0) until the next SetClientIdleTimeout call.
+// Safe on a nil receiver (no-op).
+func (c *BuildConfig) DisableClientIdleTimeout() {
+	if c == nil {
+		return
+	}
+	c.clientIdleTimeoutDisabled.Store(true)
+}
 
 // resolvePerHostTLS resolves per-host TLS overrides from the BuildConfig.
 //
@@ -1721,7 +1797,7 @@ func performClientMITM(
 	// USK-1162: bound the client-side handshake by request_timeout_ms
 	// (net/http bounds its TLS handshake by ReadHeaderTimeout too). On
 	// expiry crypto/tls closes clientConn.
-	hsCtx, hsCancel := context.WithTimeout(ctx, cfg.EffectiveRequestHeaderTimeout())
+	hsCtx, hsCancel := cfg.ClientHandshakeContext(ctx)
 	tlsConn, clientSnap, err := tlslayer.Server(hsCtx, clientConn, serverTLSCfg)
 	hsCancel()
 	if err != nil {
@@ -1879,6 +1955,7 @@ func buildStackFromRoute(
 			http1.WithStateReleaser(cfg.PluginV2Engine),
 			// USK-1162: bound the client request head (request_timeout_ms).
 			http1.WithRequestHeaderTimeout(cfg.ClientRequestHeadDeadline),
+			http1.WithKeepAliveIdleTimeout(cfg.ClientIdleDeadline),
 		)
 		stack.PushClient(clientLayer)
 
@@ -2178,7 +2255,7 @@ func buildRawPassthroughStack(
 	// USK-1162: bound the client-side handshake by request_timeout_ms
 	// (net/http bounds its TLS handshake by ReadHeaderTimeout too). On
 	// expiry crypto/tls closes clientConn.
-	hsCtx, hsCancel := context.WithTimeout(ctx, cfg.EffectiveRequestHeaderTimeout())
+	hsCtx, hsCancel := cfg.ClientHandshakeContext(ctx)
 	clientTLSConn, clientSnap, err := tlslayer.Server(hsCtx, clientConn, serverTLSCfg)
 	hsCancel()
 	if err != nil {

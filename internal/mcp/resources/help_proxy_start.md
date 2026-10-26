@@ -136,9 +136,17 @@ Timeout in milliseconds for protocol detection on new connections.
 - Range: 100-600000
 
 ### request_timeout_ms (integer, optional)
-Timeout in milliseconds for receiving a client's request head: each HTTP/1.x request line + header section (from the request's first byte, on every keep-alive request), the `CONNECT` request, and the client-side TLS MITM handshake. The request body is not covered. A client that misses it is disconnected without a response (the plain-HTTP forward target peek answers 400); the event is recorded as an error flow with `failure_reason` `request_head_timeout` (HTTP/1.x request head or forward peek), `connect_request_timeout` (CONNECT request) or `client_tls_error` with `tags.phase = "tls_handshake"` (TLS handshake) — see `query`. Idle client keep-alive connections are closed after 120 seconds (or `request_timeout_ms`, if longer). See `configure` for the full list.
+Timeout in milliseconds for receiving a client's request head: each HTTP/1.x request line + header section (from the request's first byte, on every keep-alive request), the `CONNECT` request, and the client-side TLS MITM handshake. The request body is not covered. A client that misses it is disconnected without a response (the plain-HTTP forward target peek answers 400); the event is recorded as an error flow with `failure_reason` `request_head_timeout` (HTTP/1.x request head or forward peek), `connect_request_timeout` (CONNECT request) or `client_tls_error` with `tags.phase = "tls_handshake"` (TLS handshake) — see `query`. Idle client keep-alive connections are closed after `client_idle_timeout_ms` (or `request_timeout_ms`, if longer). See `configure` for the full list.
 - Default: `60000` (60 seconds)
-- Range: 100-600000
+- Range: `0` (disabled) or 100-600000
+- Omitted: the current value is kept (a value set by `configure` survives a restart). Before this change `proxy_start` reset it to 60000.
+
+`0` disables these deadlines (including the inner and forward peeks, which would otherwise fall back to their own 5 s / 30 s defaults) and, on the transparent plain-HTTP route, the fixed 30 s pre-dial read of the first request head. A disabled bound lets a slow or silent client hold its connection slot indefinitely, up to `max_connections`. `peek_timeout_ms` (protocol detection) is separate and stays in force — if you type requests by hand (e.g. `nc`), raise it too. HTTP/2 connections are not covered.
+
+### client_idle_timeout_ms (integer, optional)
+How long an HTTP/1.x client keep-alive connection waits for the first byte of the next request before the proxy closes it. Range: `0` (disabled) or 100-600000; default `120000` (120 s).
+
+When `request_timeout_ms` is also enabled the wait is the longer of the two; with only one of them enabled, each bounds only its own phase (this value the wait for the first byte, `request_timeout_ms` the rest of the head). Values below `115000` can race Firefox, which reuses keep-alive connections for up to 115 s: the proxy may close a connection just as the browser sends its next request on it. HTTP/2 connections are not covered yet. Omitted: the current value is kept. Changes apply to the next request.
 
 ### transparent_mode (string, optional)
 Listener mode.

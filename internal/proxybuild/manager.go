@@ -129,8 +129,16 @@ type Manager struct {
 	buildCfg       *connector.BuildConfig
 	peekTimeout    time.Duration
 	requestTimeout time.Duration
-	maxConns       int
-	upstreamProxy  string
+	// requestTimeoutDisabled is the request_timeout_ms: 0 state (USK-1185),
+	// replayed onto listeners started later.
+	requestTimeoutDisabled bool
+	// clientIdleTimeout / clientIdleDisabled mirror client_idle_timeout_ms
+	// (USK-1185) for reporting when no BuildConfig is bound; the data path
+	// reads BuildConfig.ClientIdleDeadline.
+	clientIdleTimeout  time.Duration
+	clientIdleDisabled bool
+	maxConns           int
+	upstreamProxy      string
 
 	// upstreamProxyPerListener tracks the upstream-proxy URL string for
 	// each listener (USK-826). The string form is preserved alongside the
@@ -344,6 +352,9 @@ func (m *Manager) startNamed(ctx context.Context, name string, listenAddr string
 	}
 	if m.requestTimeout > 0 {
 		stack.Listener.SetRequestTimeout(m.requestTimeout)
+	}
+	if m.requestTimeoutDisabled {
+		stack.Listener.DisableRequestTimeout()
 	}
 
 	listenerCtx, cancel := context.WithCancel(ctx)
@@ -707,6 +718,7 @@ func (m *Manager) PeekTimeout() time.Duration {
 func (m *Manager) SetRequestTimeout(d time.Duration) {
 	m.mu.Lock()
 	m.requestTimeout = d
+	m.requestTimeoutDisabled = false
 	listeners := make([]*Listener, 0, len(m.listeners))
 	for _, entry := range m.listeners {
 		listeners = append(listeners, entry.stack.Listener)
@@ -743,23 +755,91 @@ func (m *Manager) RequestTimeout() time.Duration {
 	return stored
 }
 
-// DisableRequestTimeout is a USK-1185 scaffold.
-func (m *Manager) DisableRequestTimeout() {}
+// DisableRequestTimeout switches off every client-side deadline that
+// request_timeout_ms governs (MCP value 0, USK-1185): the HTTP/1.x request
+// head, the CONNECT request, the client-side TLS MITM handshake, the
+// plain-HTTP forward peek and the CONNECT / SOCKS5 inner peek. Applies to
+// every running listener and to listeners started later, until the next
+// SetRequestTimeout. Disabled is a state of its own — SetRequestTimeout(0)
+// still means "fall back to defaults".
+func (m *Manager) DisableRequestTimeout() {
+	m.mu.Lock()
+	m.requestTimeout = 0
+	m.requestTimeoutDisabled = true
+	listeners := make([]*Listener, 0, len(m.listeners))
+	for _, entry := range m.listeners {
+		listeners = append(listeners, entry.stack.Listener)
+	}
+	bc := m.buildCfg
+	m.mu.Unlock()
+	for _, l := range listeners {
+		l.DisableRequestTimeout()
+	}
+	bc.DisableRequestHeaderTimeout()
+}
 
-// RequestTimeoutDisabled is a USK-1185 scaffold.
-func (m *Manager) RequestTimeoutDisabled() bool { return false }
+// RequestTimeoutDisabled reports whether request_timeout_ms is disabled
+// (USK-1185).
+func (m *Manager) RequestTimeoutDisabled() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.requestTimeoutDisabled
+}
 
-// SetClientIdleTimeout is a USK-1185 scaffold.
-func (m *Manager) SetClientIdleTimeout(time.Duration) {}
+// SetClientIdleTimeout sets client_idle_timeout_ms (USK-1185): how long a
+// client-facing HTTP/1.x keep-alive connection waits for the first byte of
+// the next request. Non-positive values restore
+// connector.DefaultClientIdleTimeout. Clears a previous
+// DisableClientIdleTimeout. Next-request semantics. HTTP/2 does not read it
+// yet.
+func (m *Manager) SetClientIdleTimeout(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	m.mu.Lock()
+	m.clientIdleTimeout = d
+	m.clientIdleDisabled = false
+	bc := m.buildCfg
+	m.mu.Unlock()
+	bc.SetClientIdleTimeout(d)
+}
 
-// ClientIdleTimeout is a USK-1185 scaffold.
-func (m *Manager) ClientIdleTimeout() time.Duration { return connector.DefaultClientIdleTimeout }
+// DisableClientIdleTimeout switches the client keep-alive idle bound off
+// (client_idle_timeout_ms: 0, USK-1185) until the next
+// SetClientIdleTimeout.
+func (m *Manager) DisableClientIdleTimeout() {
+	m.mu.Lock()
+	m.clientIdleTimeout = 0
+	m.clientIdleDisabled = true
+	bc := m.buildCfg
+	m.mu.Unlock()
+	bc.DisableClientIdleTimeout()
+}
 
-// DisableClientIdleTimeout is a USK-1185 scaffold.
-func (m *Manager) DisableClientIdleTimeout() {}
+// ClientIdleTimeout returns the effective client keep-alive idle bound
+// (connector.DefaultClientIdleTimeout when unset). Meaningless while
+// ClientIdleTimeoutDisabled reports true.
+func (m *Manager) ClientIdleTimeout() time.Duration {
+	m.mu.Lock()
+	stored, bc := m.clientIdleTimeout, m.buildCfg
+	m.mu.Unlock()
+	if bc != nil {
+		d, _ := bc.ClientIdleDeadline()
+		return d
+	}
+	if stored > 0 {
+		return stored
+	}
+	return connector.DefaultClientIdleTimeout
+}
 
-// ClientIdleTimeoutDisabled is a USK-1185 scaffold.
-func (m *Manager) ClientIdleTimeoutDisabled() bool { return false }
+// ClientIdleTimeoutDisabled reports whether client_idle_timeout_ms is
+// disabled (USK-1185).
+func (m *Manager) ClientIdleTimeoutDisabled() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.clientIdleDisabled
+}
 
 // SetUpstreamProxy stores an upstream proxy URL and, when ManagerConfig
 // supplied a BuildConfig, applies it to the default listener's per-listener

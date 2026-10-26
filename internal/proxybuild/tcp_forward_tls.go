@@ -221,8 +221,9 @@ func (m *Manager) handleTCPForwardTLSConn(
 		tlsCfg = mitmServerConfigForForward(parentStack.BuildConfig.Issuer, targetHost, alpnOffers)
 	}
 
-	// USK-1162: bound the client-side handshake by request_timeout_ms.
-	hsCtx, hsCancel := context.WithTimeout(connCtx, parentStack.BuildConfig.EffectiveRequestHeaderTimeout())
+	// USK-1162: bound the client-side handshake by request_timeout_ms
+	// (no deadline when it is disabled, USK-1185).
+	hsCtx, hsCancel := parentStack.BuildConfig.ClientHandshakeContext(connCtx)
 	tlsConn, clientSnap, err := tlslayer.Server(hsCtx, clientConn, tlsCfg)
 	hsCancel()
 	if err != nil {

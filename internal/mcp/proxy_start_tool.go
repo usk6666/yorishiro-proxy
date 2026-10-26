@@ -40,9 +40,6 @@ const (
 	// defaultPeekTimeout is the default protocol detection timeout.
 	// Must match connector.DefaultPeekTimeout (30s).
 	defaultPeekTimeout = 30 * time.Second
-	// defaultRequestTimeout is the default HTTP request header read timeout.
-	// Must match http.defaultRequestTimeout (60s).
-	defaultRequestTimeout = 60 * time.Second
 )
 
 // proxyStartInput is the input for the proxy_start tool.
@@ -155,7 +152,7 @@ type proxyStartInput struct {
 	MaxConcurrentStreams *int `json:"max_concurrent_streams,omitempty" jsonschema:"HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients (1-65535; default: 500)"`
 
 	// PeekTimeoutMs is the timeout in milliseconds for protocol detection on new connections.
-	// Defaults to 30000 (30s) if omitted or zero.
+	// 100-600000; an omitted value resets it to 30000 (30s).
 	PeekTimeoutMs *int `json:"peek_timeout_ms,omitempty" jsonschema:"protocol detection timeout in milliseconds (default: 30000)"`
 
 	// RequestTimeoutMs bounds receiving a client's request head (USK-1162).
@@ -469,8 +466,9 @@ func (s *Server) resetSettingsToDefaults(listenerName string) {
 		s.connector.manager.SetMaxConcurrentStreams(0)
 	}
 
-	// Reset request timeout to default.
-	s.applyRequestTimeout(defaultRequestTimeout)
+	// request_timeout_ms / client_idle_timeout_ms are deliberately NOT
+	// reset: an omitted value keeps what configure (or the config file)
+	// set, including the disabled state (USK-1185).
 
 	// Reset upstream proxy to direct (no upstream) — scoped to the
 	// (re)starting listener (USK-826). Restarting listener A must not
@@ -699,12 +697,8 @@ func (s *Server) applyProxyStartLimits(input *proxyStartInput) error {
 		}
 		s.connector.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
 	}
-	if input.RequestTimeoutMs != nil {
-		ms := *input.RequestTimeoutMs
-		if ms < minTimeoutMs || ms > maxTimeoutMs {
-			return fmt.Errorf("request_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
-		}
-		s.applyRequestTimeout(time.Duration(ms) * time.Millisecond)
+	if err := s.applyClientTimeouts(input.RequestTimeoutMs, input.ClientIdleTimeoutMs); err != nil {
+		return err
 	}
 	// USK-862: thread max_concurrent_streams into the process-singleton
 	// BuildConfig. Next-connection semantics — already-accepted H2
@@ -1325,11 +1319,47 @@ func (s *Server) currentTLSFingerprint() string {
 	return ""
 }
 
-// applyRequestTimeout updates the request timeout on all registered protocol handlers.
-func (s *Server) applyRequestTimeout(d time.Duration) {
-	for _, setter := range s.connector.requestTimeoutSetters {
-		setter.SetRequestTimeout(d)
+// validateClientTimeoutMs checks a client-side timeout from proxy_start /
+// configure (USK-1185): 0 (disabled) or minTimeoutMs-maxTimeoutMs.
+func validateClientTimeoutMs(name string, ms int) error {
+	if ms == 0 || (ms >= minTimeoutMs && ms <= maxTimeoutMs) {
+		return nil
 	}
+	return fmt.Errorf("%s must be 0 (disabled) or between %d and %d, got %d", name, minTimeoutMs, maxTimeoutMs, ms)
+}
+
+// applyClientTimeouts validates and applies request_timeout_ms and
+// client_idle_timeout_ms on every registered setter. A nil pointer leaves
+// that value as it is (USK-1185: proxy_start no longer resets it); 0
+// disables the bound. Both values are validated before either is applied.
+func (s *Server) applyClientTimeouts(requestMs, idleMs *int) error {
+	if requestMs != nil {
+		if err := validateClientTimeoutMs("request_timeout_ms", *requestMs); err != nil {
+			return err
+		}
+	}
+	if idleMs != nil {
+		if err := validateClientTimeoutMs("client_idle_timeout_ms", *idleMs); err != nil {
+			return err
+		}
+	}
+	for _, setter := range s.connector.requestTimeoutSetters {
+		if requestMs != nil {
+			if *requestMs == 0 {
+				setter.DisableRequestTimeout()
+			} else {
+				setter.SetRequestTimeout(time.Duration(*requestMs) * time.Millisecond)
+			}
+		}
+		if idleMs != nil {
+			if *idleMs == 0 {
+				setter.DisableClientIdleTimeout()
+			} else {
+				setter.SetClientIdleTimeout(time.Duration(*idleMs) * time.Millisecond)
+			}
+		}
+	}
+	return nil
 }
 
 // applyMaxConcurrentStreams threads the HTTP/2
@@ -1347,11 +1377,36 @@ func (s *Server) applyMaxConcurrentStreams(v uint32) {
 	s.connector.manager.SetMaxConcurrentStreams(v)
 }
 
-// currentRequestTimeout returns the effective request timeout from the first
-// registered handler, or 0 if none is registered.
-func (s *Server) currentRequestTimeout() time.Duration {
-	if len(s.connector.requestTimeoutSetters) > 0 {
-		return s.connector.requestTimeoutSetters[0].RequestTimeout()
+// currentRequestTimeoutMs reports request_timeout_ms from the first
+// registered setter: 0 when disabled (USK-1185), the default 60000 when no
+// setter is registered or the value is unset.
+func (s *Server) currentRequestTimeoutMs() int64 {
+	if len(s.connector.requestTimeoutSetters) == 0 {
+		return defaultRequestTimeoutMs
 	}
-	return 0
+	setter := s.connector.requestTimeoutSetters[0]
+	if setter.RequestTimeoutDisabled() {
+		return 0
+	}
+	if rt := setter.RequestTimeout(); rt > 0 {
+		return rt.Milliseconds()
+	}
+	return defaultRequestTimeoutMs
+}
+
+// currentClientIdleTimeoutMs reports client_idle_timeout_ms from the first
+// registered setter: 0 when disabled, the default 120000 when no setter is
+// registered or the value is unset (USK-1185).
+func (s *Server) currentClientIdleTimeoutMs() int64 {
+	if len(s.connector.requestTimeoutSetters) == 0 {
+		return defaultClientIdleTimeoutMs
+	}
+	setter := s.connector.requestTimeoutSetters[0]
+	if setter.ClientIdleTimeoutDisabled() {
+		return 0
+	}
+	if d := setter.ClientIdleTimeout(); d > 0 {
+		return d.Milliseconds()
+	}
+	return defaultClientIdleTimeoutMs
 }

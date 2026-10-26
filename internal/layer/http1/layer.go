@@ -154,37 +154,40 @@ type options struct {
 	afterInitialYield func()
 }
 
-// DefaultKeepAliveIdleTimeout is how long a Send-direction Layer with a
-// request header timeout waits for the first byte of the next request
-// (USK-1162). 120s outlasts the keep-alive idle timeout of mainstream
-// browsers (Firefox: 115s) so the proxy never races a browser that is about
-// to reuse the connection.
+// DefaultKeepAliveIdleTimeout is the default keep-alive idle bound the
+// proxy passes via WithKeepAliveIdleTimeout (USK-1162; the source of
+// connector.DefaultClientIdleTimeout). 120s outlasts the keep-alive idle
+// timeout of mainstream browsers (Firefox: 115s) so the proxy never races
+// a browser that is about to reuse the connection. The Layer itself
+// applies no idle bound unless the option is given.
 const DefaultKeepAliveIdleTimeout = 120 * time.Second
 
 // WithRequestHeaderTimeout bounds how long a Send-direction (client-facing)
-// Layer waits for one request's request line and header section — the
-// net/http ReadHeaderTimeout equivalent (USK-1162).
-//
-// The bound has two phases. While no byte of the next request has arrived,
-// the Layer waits up to max(keep-alive idle timeout, fn()) — see
-// WithKeepAliveIdleTimeout and DefaultKeepAliveIdleTimeout. Once the first
-// byte arrives, the rest of the request line and headers must arrive within
-// fn(). The deadline is cleared before the body is read, so slow bodies and
-// Expect: 100-continue are unaffected. On expiry the parse fails and the
-// connection is closed without a response; nothing is recorded.
+// Layer takes to receive one request's request line and header section
+// once its first byte has arrived — the net/http ReadHeaderTimeout
+// equivalent (USK-1162). The deadline is cleared before the body is read,
+// so slow bodies and Expect: 100-continue are unaffected. On expiry the
+// parse fails and the connection is closed without a response.
 //
 // fn is consulted at the start of every request parse so a runtime change
-// applies to the next request. A nil fn or a non-positive return disables
-// both phases. The option is ignored on Receive-direction Layers.
-func WithRequestHeaderTimeout(fn func() (time.Duration, bool)) Option {
+// applies to the next request. ok=false, a non-positive d, or a nil fn
+// disables the header bound (request_timeout_ms: 0, USK-1185). See
+// WithKeepAliveIdleTimeout for how the two bounds combine. The option is
+// ignored on Receive-direction Layers.
+func WithRequestHeaderTimeout(fn func() (d time.Duration, ok bool)) Option {
 	return func(o *options) { o.requestHeaderTimeout = fn }
 }
 
-// WithKeepAliveIdleTimeout overrides DefaultKeepAliveIdleTimeout for the
-// idle phase of WithRequestHeaderTimeout. A nil fn or a non-positive return
-// keeps the default. It has no effect unless WithRequestHeaderTimeout is
-// also active. Intended for tests.
-func WithKeepAliveIdleTimeout(fn func() (time.Duration, bool)) Option {
+// WithKeepAliveIdleTimeout bounds how long a Send-direction Layer waits
+// for the first byte of the next request while nothing is buffered
+// (client_idle_timeout_ms, USK-1185). ok=false, a non-positive d, or a nil
+// fn disables the idle bound.
+//
+// The two bounds are independent. With both enabled the first-byte wait is
+// max(idle, header) and the head must then complete within header. With
+// only one enabled, it applies to its own phase and the other phase has no
+// deadline. Pipelined requests already buffered skip the idle phase.
+func WithKeepAliveIdleTimeout(fn func() (d time.Duration, ok bool)) Option {
 	return func(o *options) { o.keepAliveIdleTimeout = fn }
 }
 
@@ -556,47 +559,67 @@ func (l *Layer) peekPending() *channel {
 	return l.pendingQ[0]
 }
 
-// awaitRequestHead applies the WithRequestHeaderTimeout bound before a
-// client-side request parse (USK-1162). It returns the header deadline
-// armed on l.conn (zero when none); the caller must clear it as soon as the
-// request line and header section have been parsed.
+// awaitRequestHead applies the WithRequestHeaderTimeout and
+// WithKeepAliveIdleTimeout bounds before a client-side request parse
+// (USK-1162, USK-1185). It returns the header deadline armed on l.conn
+// (zero when none); the caller must clear it as soon as the request line
+// and header section have been parsed.
 //
-// Phase 1 (idle): when no byte of the next request is buffered, wait up to
-// max(keep-alive idle, header timeout) for the first byte. Phase 2
-// (header): from the first byte, the request head must complete within the
-// header timeout. Pipelined requests already in the buffer skip phase 1.
+// Phase 1 (idle): when no byte of the next request is buffered, wait for
+// the first byte — up to max(idle, header) when both bounds are enabled,
+// up to idle when only idle is, without a deadline when idle is disabled.
+// Phase 2 (header): from the first byte, the request head must complete
+// within the header bound when it is enabled. Pipelined requests already
+// in the buffer skip phase 1.
 //
 // Returns the Peek error on idle expiry or peer close (io.EOF for a clean
-// keep-alive close). Not active on Receive Layers or without the option.
+// keep-alive close). Not active on Receive Layers or with both bounds off.
 func (l *Layer) awaitRequestHead() (armed time.Duration, err error) {
-	if l.direction != envelope.Send || l.opts.requestHeaderTimeout == nil {
+	if l.direction != envelope.Send {
 		return 0, nil
 	}
-	headerTimeout, _ := l.opts.requestHeaderTimeout()
-	if headerTimeout <= 0 {
+	header, headerOK := resolvePhaseBound(l.opts.requestHeaderTimeout)
+	idle, idleOK := resolvePhaseBound(l.opts.keepAliveIdleTimeout)
+	if !headerOK && !idleOK {
 		return 0, nil
 	}
 	if l.reader.Buffered() == 0 {
-		idle := DefaultKeepAliveIdleTimeout
-		if l.opts.keepAliveIdleTimeout != nil {
-			if v, _ := l.opts.keepAliveIdleTimeout(); v > 0 {
-				idle = v
+		if idleOK {
+			wait := idle
+			if headerOK && header > wait {
+				wait = header
 			}
+			_ = l.conn.SetReadDeadline(time.Now().Add(wait))
 		}
-		if idle < headerTimeout {
-			idle = headerTimeout
-		}
-		_ = l.conn.SetReadDeadline(time.Now().Add(idle))
-		if _, err := l.reader.Peek(1); err != nil {
+		_, perr := l.reader.Peek(1)
+		if idleOK {
 			_ = l.conn.SetReadDeadline(time.Time{})
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				l.logRequestHeadTimeout("keep-alive idle", err)
+		}
+		if perr != nil {
+			if errors.Is(perr, os.ErrDeadlineExceeded) {
+				l.logRequestHeadTimeout("keep-alive idle", perr)
 			}
-			return 0, err
+			return 0, perr
 		}
 	}
-	_ = l.conn.SetReadDeadline(time.Now().Add(headerTimeout))
-	return headerTimeout, nil
+	if !headerOK {
+		return 0, nil
+	}
+	_ = l.conn.SetReadDeadline(time.Now().Add(header))
+	return header, nil
+}
+
+// resolvePhaseBound reads one awaitRequestHead phase bound. A nil fn,
+// ok=false, or a non-positive value means the phase is disabled.
+func resolvePhaseBound(fn func() (time.Duration, bool)) (time.Duration, bool) {
+	if fn == nil {
+		return 0, false
+	}
+	d, ok := fn()
+	if !ok || d <= 0 {
+		return 0, false
+	}
+	return d, true
 }
 
 // logRequestHeadTimeout records a USK-1162 request-head deadline expiry at
