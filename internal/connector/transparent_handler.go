@@ -790,7 +790,7 @@ func (h *TransparentHandler) rateLimited(ctx context.Context, pc *PeekConn, dst 
 
 // transparentRateLimitResponse answers a rate-limited plain-HTTP
 // transparent connection with the CONNECT / forward gate's exact bytes.
-var transparentRateLimitResponse = forwardErrorResponse(429, "Too Many Requests", connectRateLimitDenyDetail)
+var transparentRateLimitResponse = RateLimitRefusalResponse()
 
 // writeTransparentRefusal writes a canned refusal response on the HTTP
 // route, half-closes and drains the client's unread request bytes so the

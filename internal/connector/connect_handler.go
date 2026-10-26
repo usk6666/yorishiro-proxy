@@ -310,7 +310,7 @@ const (
 // route and the plaintext http / websocket / sse tcp_forwards arms. It is
 // the single source of those bytes. Each call returns a fresh slice.
 func RateLimitRefusalResponse() []byte {
-	return nil
+	return forwardErrorResponse(429, "Too Many Requests", connectRateLimitDenyDetail)
 }
 
 // connectPolicyReject runs the scope and rate-limit gates. It returns nil
@@ -335,7 +335,7 @@ func connectPolicyReject(cfg CONNECTHandlerConfig, target string, opaque bool, l
 			logger.Info("CONNECT target blocked by rate limit",
 				"limit_type", denial.LimitType,
 				"effective_rps", denial.EffectiveRPS)
-			return forwardErrorResponse(429, "Too Many Requests", connectRateLimitDenyDetail)
+			return RateLimitRefusalResponse()
 		}
 	}
 	return nil
