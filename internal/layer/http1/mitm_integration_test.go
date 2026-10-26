@@ -329,6 +329,10 @@ type proxyOpts struct {
 	// OnInterceptReleaseEOF callback that mirrors proxybuild's production
 	// wiring (AppendTags via testStore.UpdateStream).
 	releaseTracker *common.ReleaseTracker
+	// onPipelineDrop, when non-nil, is wired as
+	// session.SessionOptions.OnPipelineDrop so a test can observe the
+	// BlockedBy attribution of a policy Drop / Respond.
+	onPipelineDrop func(ctx context.Context, env *envelope.Envelope, blockedBy string)
 }
 
 // startHTTPMITMProxy starts a FullListener configured for HTTP MITM (not
@@ -417,6 +421,7 @@ func startHTTPMITMProxy(
 				}
 			},
 		}
+		sessOpts.OnPipelineDrop = opts.onPipelineDrop
 		// USK-851 / USK-860: thread the optional intercept-release tracker +
 		// EOF callback when the test wires one. Mirrors
 		// proxybuild.buildSessionOptions production wiring so the harness
