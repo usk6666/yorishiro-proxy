@@ -235,7 +235,7 @@ func runForwardHTTP1ExchangeNoFilter(
 		}
 		return
 	}
-	dial := func(_ context.Context, env *envelope.Envelope) (layer.Channel, error) {
+	dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
 		upCh := upstreamH1.OpenExchange()
 		if upCh == nil {
 			return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
@@ -244,6 +244,7 @@ func runForwardHTTP1ExchangeNoFilter(
 		if env != nil {
 			reqProto = env.Protocol
 		}
+		recordUpstreamPeer(dctx, p, env, upstreamH1.EnvelopeContextTemplate())
 		return connector.WrapH1UpstreamForDispatch(upCh, reqProto, streamGRPCWebOpts), nil
 	}
 	if err := session.RunStackSessionExchange(ctx, stack, dispatchedCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
@@ -321,7 +322,7 @@ func runForwardHTTP1ExchangeWithFilter(
 	// Channel's first Receive is checked. The wrapper writes a 502 back
 	// to the client when the first response fails the filter and returns
 	// io.EOF on subsequent Next calls so the session loop unwinds.
-	dial := func(_ context.Context, env *envelope.Envelope) (layer.Channel, error) {
+	dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
 		upCh := upstreamH1.OpenExchange()
 		if upCh == nil {
 			return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
@@ -330,6 +331,7 @@ func runForwardHTTP1ExchangeWithFilter(
 		if env != nil {
 			reqProto = env.Protocol
 		}
+		recordUpstreamPeer(dctx, p, env, upstreamH1.EnvelopeContextTemplate())
 		wrappedUp := connector.WrapH1UpstreamForDispatch(upCh, reqProto, streamGRPCWebOpts)
 		return &filterUpstreamChannel{
 			Channel:  wrappedUp,

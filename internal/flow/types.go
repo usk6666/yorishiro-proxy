@@ -125,9 +125,10 @@ type ConnectionInfo struct {
 	// ServerAddr is the wire-observed TCP peer of the upstream socket
 	// (e.g., "93.184.216.34:443"). When the proxy reached the upstream
 	// through an upstream proxy this is the upstream proxy's address, not
-	// the final destination — see UpstreamProxy. Live streams fill it from
-	// the first upstream Receive envelope, so a stream that never received
-	// anything from upstream leaves it empty. It never holds a requested
+	// the final destination — see UpstreamProxy. Live streams fill it as
+	// soon as the stream is handed to an upstream socket (raw relays when
+	// the relay ends), whether or not anything is received; a stream that
+	// never reached an upstream socket leaves it empty. It never holds a requested
 	// hostname: audit / error rows that had no upstream socket (TLS
 	// stack-build errors, proxy-closed request heads, capacity
 	// rejections) leave it empty and carry the requested destination in

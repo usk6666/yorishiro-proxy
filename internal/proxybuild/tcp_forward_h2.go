@@ -456,6 +456,8 @@ func dispatchForwardH2Stream(
 		if env != nil {
 			reqProto = env.Protocol
 		}
+		// USK-1302: record the peer of the Layer this stream opened on.
+		recordUpstreamPeer(dctx, p, env, upL.EnvelopeContextTemplate())
 		return connector.WrapH2UpstreamForDispatchFull(
 			upCh, reqProto, lopts, streamGRPCOpts, streamGRPCWebOpts, streamAggOpts,
 		), nil
