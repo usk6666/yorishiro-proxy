@@ -340,3 +340,55 @@ register_hook("grpc-web", "on_start", deny)
 		t.Errorf("session result = %v, want nil", err)
 	}
 }
+
+// TestGRPCWeb_PluginDropStart_ClosesConnection (USK-1387): a plugin DROP on
+// grpc-web.on_start ends the RPC at Start time with no gRPC status. Over
+// HTTP/1.x the client connection closes with no response bytes, the upstream
+// is never dialed and receives no request, and the session ends cleanly.
+// Previously the following Data dialed the upstream and failed with
+// "GRPCDataMessage before GRPCStartMessage on Send".
+func TestGRPCWeb_PluginDropStart_ClosesConnection(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upstreamLn, captured := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+		return buildGRPCWebResponseHTTP([]byte("upstream"), 0, "OK", false)
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	script := filepath.Join(t.TempDir(), "drop.star")
+	if err := os.WriteFile(script, []byte(`
+def drop(msg, ctx):
+    return action.DROP
+
+register_hook("grpc-web", "on_start", drop)
+`), 0o600); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	eng := pluginv2.NewEngine(nil)
+	if err := eng.LoadPlugins(ctx, []pluginv2.PluginConfig{{Path: script, OnError: "abort"}}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+
+	probe := &sessionProbe{}
+	proxyAddr, _, result, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{plugins: eng, probe: probe})
+
+	resp, elapsed := sendGRPCWebHTTP1(t, proxyAddr, target, "/pkg.Echo/Say", "application/grpc-web",
+		grpcweb.EncodeFrame(false, false, []byte("hi")))
+	waitSession(t, sessionDone)
+
+	if len(resp) != 0 {
+		t.Errorf("client received %d bytes %q, want 0 (DROP answers no gRPC status)", len(resp), truncate(resp))
+	}
+	if elapsed > blockedResponseMaxWait {
+		t.Errorf("client connection closed after %v, want < %v", elapsed, blockedResponseMaxWait)
+	}
+	assertNoUpstreamRequest(t, upstreamLn.Close, captured)
+	if got := probe.dials.Load(); got != 0 {
+		t.Errorf("upstream dialed %d times, want 0 (plugin dropped the Start)", got)
+	}
+	if err := result.get(); err != nil {
+		t.Errorf("session result = %v, want nil", err)
+	}
+}
