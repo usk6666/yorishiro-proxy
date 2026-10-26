@@ -181,7 +181,14 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		rejectTCPForwardConn(entry, conn, logger)
 		return ctx, func() {}, false
 	}
-	return rctx, release, true
+	// USK-1278 review S-1: the caller defers this for the whole forward
+	// connection, so dropping the per_connection rotation entry here runs
+	// once after every dial keyed on connID is done.
+	buildCfg := stack.BuildConfig
+	return rctx, func() {
+		release()
+		buildCfg.ReleaseConnectionState(connID)
+	}, true
 }
 
 // rejectTCPForwardConn answers a denied forward connection and closes it.

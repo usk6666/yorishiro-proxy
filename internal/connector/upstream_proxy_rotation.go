@@ -252,8 +252,8 @@ type RotationResolver struct {
 	cfg RotationConfig
 
 	// perConn caches URLs by ConnID for the RotationPerConnection policy.
-	// Entries are deleted from ReleaseConnection when the connector
-	// closes the ConnectionStack.
+	// Entries are deleted by ReleaseConnection when the client
+	// connection ends.
 	perConn sync.Map // map[string]*url.URL
 
 	// perTargetHost caches URLs by target host for the
@@ -396,9 +396,12 @@ func (r *RotationResolver) Resolve(ctx context.Context, listenerName, targetHost
 }
 
 // ReleaseConnection drops any per-connection state held by the resolver
-// for connID. Called from ConnectionStack.Close so per_connection
-// entries do not leak after the client disconnects. No-op for policies
-// that do not maintain per-conn state.
+// for connID. Called once per client connection when its handler returns
+// (proxybuild's listener wrapper and tcp_forward admission) and again,
+// harmlessly, from ConnectionStack.Close on stacks that carry a
+// BuildConfig, so per_connection entries do not leak after the client
+// disconnects. Idempotent; no-op for policies that do not maintain
+// per-conn state.
 func (r *RotationResolver) ReleaseConnection(connID string) {
 	if r == nil || connID == "" {
 		return

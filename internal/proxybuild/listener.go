@@ -33,6 +33,11 @@ type Listener struct {
 	name   string
 	logger *slog.Logger
 
+	// buildCfg holds the per-listener upstream-proxy rotation resolvers.
+	// wrapHandler releases the connection's per_connection rotation entry
+	// once its handler returns (USK-1278 review S-1). nil disables it.
+	buildCfg *connector.BuildConfig
+
 	// requestTimeoutNs is the operator-configured HTTP request header read
 	// timeout in nanoseconds (USK-844). Reads happen on every handler
 	// invocation via RequestTimeout(); writes happen from MCP
@@ -182,15 +187,25 @@ func (l *Listener) Name() string {
 // on_disconnect still fires (the connection was accepted then closed —
 // symmetric with the kernel-accepted-then-rejected case in the M39
 // listener).
+//
+// The wrapper also drops the connection's per_connection upstream-proxy
+// rotation entry after inner returns: the handler owns the whole client
+// connection, so every stack and dial keyed on the ctx conn ID is done by
+// then, whichever route (plain-HTTP forward, CONNECT / SOCKS5 inner
+// dispatch, transparent, failed stack build) the connection took.
 func (l *Listener) wrapHandler(inner connector.HandlerFunc) connector.HandlerFunc {
 	if inner == nil {
 		return nil
 	}
-	if l.engine == nil {
+	if l.engine == nil && l.buildCfg == nil {
 		return inner
 	}
 	return func(ctx context.Context, pc *connector.PeekConn) error {
 		connID := connector.ConnIDFromContext(ctx)
+		defer l.buildCfg.ReleaseConnectionState(connID)
+		if l.engine == nil {
+			return inner(ctx, pc)
+		}
 		clientAddr := connector.ClientAddrFromContext(ctx)
 		logger := connector.LoggerFromContext(ctx, l.logger)
 

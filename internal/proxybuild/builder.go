@@ -487,9 +487,10 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	// constructed BEFORE the per-protocol handlers so each handler's
 	// timeout-provider closure can capture the same atomic Int64 state.
 	wrapper := &Listener{
-		engine: deps.PluginV2Engine,
-		name:   listenerName,
-		logger: logger,
+		engine:   deps.PluginV2Engine,
+		name:     listenerName,
+		logger:   logger,
+		buildCfg: deps.BuildConfig,
 	}
 	// Seed the runtime request-timeout slot from Deps so the config-file /
 	// boot-time value reaches handler invocations until a runtime
