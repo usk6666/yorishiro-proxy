@@ -62,6 +62,9 @@ type retryingUpstreamChannel struct {
 	// wrapper built under the same Manager. May be nil — every counter
 	// call is nil-safe.
 	metrics *H1UpstreamMetrics
+
+	// recordPeer is scaffolding for USK-1302 (not called yet).
+	recordPeer func(ctx context.Context, streamID string, envCtx envelope.EnvelopeContext)
 }
 
 // newRetryingUpstreamChannel constructs the wrapper around an already-

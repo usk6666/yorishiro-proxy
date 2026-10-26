@@ -181,6 +181,9 @@ func (p *Pipeline) AdmitsRawRelay(ctx context.Context, envCtx envelope.EnvelopeC
 	return true
 }
 
+// RecordUpstreamPeer is scaffolding for USK-1302 (no behavior yet).
+func (p *Pipeline) RecordUpstreamPeer(_ context.Context, _ string, _ envelope.EnvelopeContext) {}
+
 // requestPathChecked reports whether every Send envelope of protocol p is
 // covered by an HTTPScopeStep request check (USK-1130): HTTP requests
 // directly, WebSocket frames through the upgrade request, and gRPC /

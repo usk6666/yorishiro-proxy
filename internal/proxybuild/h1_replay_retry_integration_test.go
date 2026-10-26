@@ -418,6 +418,78 @@ func TestHTTP1_NoEnvelopeLossOnRetry(t *testing.T) {
 	}
 }
 
+// TestHTTP1_StaleConn_Replay_RestampsUpstreamPeer (USK-1302): when the
+// first Send hits a stale socket and the wrapper replays on a freshly
+// redialed Layer, the Stream's upstream peer must be re-recorded from the
+// socket the request actually went out on — not left at the stale
+// socket's peer stamped by the dial closure.
+func TestHTTP1_StaleConn_Replay_RestampsUpstreamPeer(t *testing.T) {
+	s := startDummyUpstream(t)
+
+	rawConn, err := net.Dial("tcp", s.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	flaky := &flakyConn{Conn: rawConn}
+	flaky.failCount.Store(1)
+	// The stale Layer carries a distinct (documentation-range) peer so a
+	// recording of the stale socket is told apart from the fresh one.
+	stalePeer := &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 1}
+	initial := http1.New(flaky, "stream-1302", envelope.Receive,
+		http1.WithScheme("https"),
+		http1.WithEnvelopeContext(envelope.EnvelopeContext{
+			ConnID: "test-conn-1302", TargetHost: s.addr,
+			ServerAddr: stalePeer, UpstreamProxy: "http://stale-proxy:1",
+		}),
+	)
+	t.Cleanup(func() { _ = initial.Close() })
+	chain := newH1Chain(initial, connector.SameUpstreamTarget(s.addr), connector.UpstreamTLSProfiled,
+		&connector.BuildConfig{InsecureSkipVerify: true}, nil, nil)
+	t.Cleanup(func() { chain.closeAll() })
+
+	upCh := chain.current.OpenExchange()
+	if upCh == nil {
+		t.Fatal("OpenExchange returned nil")
+	}
+	dispatchWrap := func(ch layer.Channel) layer.Channel { return ch }
+	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr, nil)
+
+	type stamp struct {
+		streamID   string
+		serverAddr string
+		proxy      string
+	}
+	var mu sync.Mutex
+	var stamps []stamp
+	wrapper.recordPeer = func(_ context.Context, streamID string, envCtx envelope.EnvelopeContext) {
+		mu.Lock()
+		defer mu.Unlock()
+		addr := ""
+		if envCtx.ServerAddr != nil {
+			addr = envCtx.ServerAddr.String()
+		}
+		stamps = append(stamps, stamp{streamID, addr, envCtx.UpstreamProxy})
+	}
+
+	if err := sendOneRequest(t, wrapper, "GET", "/restamp", nil, false); err != nil {
+		t.Fatalf("Send (GET, expected retry-success): %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := wrapper.Next(ctx); err != nil {
+		t.Fatalf("Next after retry: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(stamps) != 1 {
+		t.Fatalf("upstream peer stamps = %+v, want exactly one (the fresh socket after replay)", stamps)
+	}
+	if got := stamps[0]; got.streamID != "stream-999" || got.serverAddr != s.addr || got.proxy != "" {
+		t.Errorf("stamp = %+v, want stream-999 / %s / \"\" (fresh direct socket)", got, s.addr)
+	}
+}
+
 // TestHTTP1_StaleConn_RetryBudgetOneShot pins the "exactly one retry"
 // invariant from the design review. After the first EPIPE → retry →
 // succeed cycle, we drive a second Send through a stub inner that
