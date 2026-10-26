@@ -62,16 +62,20 @@ func startGRPCStartDropHarness(t *testing.T, upstreamProto, phase string) (*mcpt
 	return h, proxyAddr, logPath
 }
 
-// assertNoErrorStreams fails for every recorded Stream in state=error: a
-// plugin DROP is the proxy ending the RPC on purpose, not a failure.
+// assertNoErrorStreams fails for every recorded Stream in state=error
+// that carries no blocked_by: a plugin DROP is the proxy ending the RPC on
+// purpose, not a failure. USK-1393 records the dropped RPC itself as a
+// state=error Stream with blocked_by="plugin" — the shape every blocked
+// Stream has — so only an unattributed error Stream is a failure.
 func assertNoErrorStreams(t *testing.T, h *mcptest.Harness) {
 	t.Helper()
 	res := h.MustOK(t, "query", map[string]any{"resource": "flows", "limit": 200})
 	flows, _ := res.Decoded["flows"].([]any)
 	for _, raw := range flows {
 		f, _ := raw.(map[string]any)
-		if st, _ := f["state"].(string); strings.EqualFold(st, "error") {
-			t.Errorf("Stream %v protocol=%v state=error, want no error Stream for a dropped RPC", f["id"], f["protocol"])
+		blockedBy, _ := f["blocked_by"].(string)
+		if st, _ := f["state"].(string); strings.EqualFold(st, "error") && blockedBy == "" {
+			t.Errorf("Stream %v protocol=%v state=error without blocked_by, want no failed Stream for a dropped RPC", f["id"], f["protocol"])
 		}
 	}
 }
@@ -145,6 +149,9 @@ func TestE2E_PluginDropGRPCWebStart_H2_ResetsStream(t *testing.T) {
 			}
 			assertNoErrorStreams(t, h)
 			assertNoServerErrorLog(t, logPath)
+			// USK-1393: the dropped RPC is recorded under its own
+			// protocol (not the h2-frame overlay's "http").
+			assertPluginDropStream(t, h, "grpc-web", "grpc-web.on_start", phase, 1)
 		})
 	}
 }
@@ -202,6 +209,8 @@ func TestE2E_PluginDropGRPCWebStart_H1_ClosesConnection(t *testing.T) {
 			}
 			assertNoErrorStreams(t, h)
 			assertNoServerErrorLog(t, logPath)
+			// USK-1393: the dropped RPC is recorded.
+			assertPluginDropStream(t, h, "grpc-web", "grpc-web.on_start", phase, 1)
 		})
 	}
 }
@@ -237,6 +246,8 @@ func TestE2E_PluginDropGRPCStart_ResetsStream(t *testing.T) {
 			}
 			assertNoErrorStreams(t, h)
 			assertNoServerErrorLog(t, logPath)
+			// USK-1393: both dropped RPCs are recorded.
+			assertPluginDropStream(t, h, "grpc", "grpc.on_start", phase, 2)
 		})
 	}
 }

@@ -63,4 +63,8 @@ const (
 	// Layer or Pipeline exists. The proxybuild connection-rejection
 	// recorder writes it directly.
 	BlockedByCapacity = "capacity"
+
+	// BlockedByPlugin attributes a Drop to a plugin hook returning
+	// action.DROP (USK-1393).
+	BlockedByPlugin = "plugin"
 )
