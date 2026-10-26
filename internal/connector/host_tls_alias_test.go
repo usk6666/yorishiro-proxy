@@ -1,6 +1,8 @@
 package connector
 
 import (
+	"crypto/tls"
+	"errors"
 	"net"
 	"testing"
 
@@ -138,6 +140,10 @@ func TestBuildConnectionStack_PerHostTLSVerifyForRespelledHost_FailsClosed(t *te
 				got := buildThroughClient(t, up.splitTarget(host), cfg, []string{"http/1.1"}, ClientHelloPeek{})
 				if got.err == nil {
 					t.Fatalf("BuildConnectionStack(TLS %s) succeeded; want an x509 verification error (the per-host tls_verify: true must apply)", host)
+				}
+				var verr *tls.CertificateVerificationError
+				if !errors.As(got.err, &verr) {
+					t.Fatalf("BuildConnectionStack(TLS %s): %v (%T); want a *tls.CertificateVerificationError (the per-host tls_verify: true must apply)", host, got.err, got.err)
 				}
 			})
 		}
