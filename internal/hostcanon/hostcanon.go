@@ -49,6 +49,14 @@ func Fold(h string) string {
 
 // FoldIP is Fold that also reports whether the result is an IP address
 // literal (IPv4 or IPv6).
+//
+// Known approximation: the IPv6 zone is dropped, so different zones of the
+// same link-local address ("fe80::1%eth0", "fe80::1%eth1") compare equal
+// although they may reach different hosts on different links. For the
+// deny-like Fold this only widens a deny. For allow-like lists
+// (FoldDialEquivalent) it only widens which connections skip inspection;
+// those connections have already passed the scope gate, which evaluates
+// the host as written, so it is not a scope bypass.
 func FoldIP(h string) (string, bool) {
 	h = strings.ToLower(h)
 	if len(h) > 2 && h[0] == '[' && h[len(h)-1] == ']' {
@@ -87,11 +95,55 @@ func FoldIP(h string) (string, bool) {
 // folding one onto an entry could relay an uninspected connection to
 // whatever DNS returns; the same reasoning makes TargetScope refuse such
 // dial hosts when rules exist.
+//
+// Two known approximations remain, both inherited from Fold:
+//
+//   - One trailing dot is stripped, so "db." folds to "db". Go's resolver
+//     tries the resolv.conf search list first for a name with fewer dots
+//     than "ndots" ("db.<search>") but resolves a name ending in a dot
+//     only at the root, so the two spellings can resolve to different
+//     hosts.
+//   - The IPv6 zone is dropped, so different zones of the same link-local
+//     address ("[fe80::1%eth0]", "[fe80::1%eth1]") compare equal.
+//
+// For an allow-like list these only widen which connections skip
+// inspection. Such a connection has already passed the scope gate, which
+// evaluates the host as written, so neither is a scope bypass. Both apply
+// equally to the TLS passthrough list and to raw_passthrough_hosts.
 func FoldDialEquivalent(h string) string {
 	if LegacyIPv4Spelling(h) {
 		return h
 	}
 	return Fold(h)
+}
+
+// ParseStrictPort reads a port string with the dial-target rule
+// (connector.SplitTargetHostPort): a non-empty run of ASCII decimal digits
+// (leading zeros allowed, as in RFC 3986 §3.2.3) whose value is in
+// 1..65535. ok is false for anything else — a sign, whitespace, a service
+// name, non-ASCII digits, 0, or a value above 65535, including one
+// net.Dial would wrap modulo 2^32 (USK-1262). The value is range-checked
+// as it accumulates, so a long digit run is rejected rather than wrapped.
+// It allocates nothing and cannot panic.
+func ParseStrictPort(p string) (port int, ok bool) {
+	if p == "" {
+		return 0, false
+	}
+	n := 0
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+		if n > 65535 {
+			return 0, false
+		}
+	}
+	if n == 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // NumericUnparsable reports whether host's last label is a number — the

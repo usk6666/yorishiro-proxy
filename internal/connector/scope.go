@@ -375,7 +375,7 @@ func (s *TargetScope) CheckURL(u *url.URL) (allowed bool, reason string) {
 }
 
 // urlScopePort reads the port of u.Host for CheckURL. ok is false when a
-// port is present but fails parseStrictPort, or when the host part has
+// port is present but fails hostcanon.ParseStrictPort, or when the host part has
 // colons that are not a bracketed IPv6 literal. A bare IPv6 host
 // ("2001:db8::1", which net/url splits at its last colon) keeps the
 // u.Port() reading it always had.
@@ -410,7 +410,7 @@ func urlScopePort(scheme string, u *url.URL) (port int, ok bool) {
 	if portStr == "" {
 		return schemeDefaultPort(scheme), true
 	}
-	return parseStrictPort(portStr)
+	return hostcanon.ParseStrictPort(portStr)
 }
 
 // SetPolicyRules sets the policy layer rules at initialization. The only
@@ -792,7 +792,7 @@ func containsStringFold(slice []string, val string) bool {
 // It deliberately takes no port string (USK-1262): it used to parse one
 // leniently and return 0 for anything strconv.Atoi refused, and 0 matches
 // no ports rule — an unparsable port silently became "matches nothing"
-// (fail open). Port strings are read with parseStrictPort, whose failure
+// (fail open). Port strings are read with hostcanon.ParseStrictPort, whose failure
 // each caller turns into a refusal when the scope has rules.
 func schemeDefaultPort(scheme string) int {
 	switch scheme {

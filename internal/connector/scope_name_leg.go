@@ -149,7 +149,7 @@ const ReasonDialTargetUninterpretable = "blocked: dial target has an uninterpret
 
 // splitDialTarget splits a dial target into host and port; a port-less
 // target or an empty port takes the scheme default (0 when unknown). A
-// present port is read with parseStrictPort, and ok is false when it fails
+// present port is read with hostcanon.ParseStrictPort, and ok is false when it fails
 // (USK-1262): the dial port joins the deny match (USK-1306), so reading
 // "4294975376" or " 8080" leniently would drop it out of the match while
 // net.Dial connects to 8080. The dial target only decides an exemption and
@@ -163,7 +163,7 @@ func splitDialTarget(scheme, target string) (host string, port int, ok bool) {
 	if portStr == "" {
 		return host, schemeDefaultPort(scheme), true
 	}
-	port, ok = parseStrictPort(portStr)
+	port, ok = hostcanon.ParseStrictPort(portStr)
 	return host, port, ok
 }
 

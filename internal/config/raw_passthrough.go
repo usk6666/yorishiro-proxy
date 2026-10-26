@@ -37,9 +37,10 @@ func (c *ProxyConfig) IsRawPassthrough(target string) bool {
 // rawPassthroughKey returns the comparison form of a raw_passthrough_hosts
 // entry or target. A well-formed "host:port" (net.SplitHostPort, non-empty
 // host) becomes JoinHostPort(FoldDialEquivalent(host), port), with the
-// port as a decimal integer when it is all ASCII digits in 1..65535 —
-// leading zeros allowed, as connector.SplitTargetHostPort accepts and the
-// dialer reads them — and as written otherwise. Anything else falls back to
+// port as a decimal integer when hostcanon.ParseStrictPort accepts it (ASCII
+// digits in 1..65535, leading zeros allowed — the rule
+// connector.SplitTargetHostPort applies and the dialer reads) and as
+// written otherwise. Anything else falls back to
 // the lowercased, trimmed literal, the pre-USK-1385 behaviour. An empty
 // input yields "", which never matches. It cannot panic.
 func rawPassthroughKey(s string) string {
@@ -51,31 +52,8 @@ func rawPassthroughKey(s string) string {
 	if err != nil || host == "" {
 		return s
 	}
-	if n, ok := parseRawPassthroughPort(port); ok {
+	if n, ok := hostcanon.ParseStrictPort(port); ok {
 		port = strconv.Itoa(n)
 	}
 	return net.JoinHostPort(hostcanon.FoldDialEquivalent(host), port)
-}
-
-// parseRawPassthroughPort parses a port of ASCII decimal digits (leading
-// zeros allowed) in 1..65535. Signs, spaces and service names are rejected.
-func parseRawPassthroughPort(p string) (int, bool) {
-	if p == "" {
-		return 0, false
-	}
-	n := 0
-	for i := 0; i < len(p); i++ {
-		c := p[i]
-		if c < '0' || c > '9' {
-			return 0, false
-		}
-		n = n*10 + int(c-'0')
-		if n > 65535 {
-			return 0, false
-		}
-	}
-	if n == 0 {
-		return 0, false
-	}
-	return n, true
 }

@@ -143,5 +143,46 @@ func TestFold_GarbageNoPanic(t *testing.T) {
 		_ = NumericUnparsable(in)
 		_ = UnspecifiedOrEmpty(in)
 		_, _ = ParseLegacyIPv4(in)
+		_, _ = ParseStrictPort(in)
+	}
+}
+
+// TestParseStrictPort pins the strict dial-target port rule shared by
+// connector.SplitTargetHostPort, TargetScope and raw_passthrough_hosts
+// (USK-1262, USK-1385): an invalid port string is reported as invalid,
+// never folded into 0 and never wrapped.
+func TestParseStrictPort(t *testing.T) {
+	tests := []struct {
+		portStr string
+		want    int
+		ok      bool
+	}{
+		{"8080", 8080, true},
+		{"008080", 8080, true},
+		{"0443", 443, true},
+		{"1", 1, true},
+		{"65535", 65535, true},
+		{"0000000000000000000000065535", 65535, true},
+		{"", 0, false},
+		{"0", 0, false},
+		{"000", 0, false},
+		{"65536", 0, false},
+		{"4294975376", 0, false},
+		{"4294967376", 0, false},
+		{"99999999999999999999999999999", 0, false},
+		{"abc", 0, false},
+		{"http", 0, false},
+		{"+8080", 0, false},
+		{"-80", 0, false},
+		{" 8080", 0, false},
+		{"8080 ", 0, false},
+		{"80a", 0, false},
+		{"٨٠", 0, false},
+	}
+	for _, tt := range tests {
+		got, ok := ParseStrictPort(tt.portStr)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("ParseStrictPort(%q) = (%d, %v), want (%d, %v)", tt.portStr, got, ok, tt.want, tt.ok)
+		}
 	}
 }
