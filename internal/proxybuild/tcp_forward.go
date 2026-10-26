@@ -356,6 +356,19 @@ func (m *Manager) runTCPForwardAcceptLoop(
 				return
 			}
 			defer release()
+			// The success-path counterpart of FullListener's "connection
+			// closed": one Debug line per forward connection carrying the
+			// conn_id its Streams record, joinable on remote_addr.
+			connStart := time.Now()
+			defer func() {
+				m.logger.Debug("tcp forward connection closed",
+					"conn_id", connector.ConnIDFromContext(ctx),
+					"remote_addr", c.RemoteAddr().String(),
+					"name", parentListenerName,
+					"port", entry.port,
+					"duration_ms", time.Since(connStart).Milliseconds(),
+				)
+			}()
 			// USK-915: when fc.TLS=true, terminate client-side TLS first
 			// then dispatch by negotiated ALPN. handleTCPForwardTLSConn
 			// owns the post-handshake routing — it picks the H2 or H1
@@ -425,7 +438,7 @@ func (m *Manager) handleTCPForwardConnWithOverride(
 
 	protocol := override.resolveProtocol(entry)
 
-	connID := tcpForwardConnID(ctx)
+	connID := connector.ConnIDOrGenerate(ctx)
 	clientAddr := clientConn.RemoteAddr().String()
 	connLogger := m.logger.With(
 		"conn_id", connID,

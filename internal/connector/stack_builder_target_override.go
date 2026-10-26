@@ -8,8 +8,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
@@ -341,23 +339,21 @@ func BuildConnectionStackWithTarget(
 // between MITM-derived and operator-declared targets remains visible in the
 // code structure (CLAUDE.md MITM Principle 2).
 //
-// _ ctx is retained on the signature to give downstream Issues a stable
-// callsite shape when they add ctx-aware behaviour (e.g. ctx-cancel-aware
-// dial in USK-916). The current bytechunk path performs no I/O so ctx is
-// not consulted today.
+// ctx supplies the connection's ConnID (ConnIDOrGenerate); the bytechunk
+// path performs no I/O, so ctx carries no cancellation here.
 //
 // USK-1083: each Layer's EnvelopeContext carries ConnID, TargetHost and
 // the TLS snapshot of its own leg — clientTLS when the forward port
 // terminated TLS (tls=true), upstreamTLS when the dial did (upstream_tls)
 // — so HostScopeStep derives the scheme from the client-facing leg.
 func buildTargetOverrideRawStack(
-	_ context.Context,
+	ctx context.Context,
 	clientConn, upstreamConn net.Conn,
 	target string,
 	clientTLS, upstreamTLS *envelope.TLSSnapshot,
 	cfg *BuildConfig,
 ) (*ConnectionStack, error) {
-	connID := uuid.New().String()
+	connID := ConnIDOrGenerate(ctx)
 	stack := NewConnectionStack(connID)
 
 	clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send,
@@ -422,7 +418,7 @@ func buildTargetOverrideH2CStack(
 	if scheme == "" {
 		scheme = "http"
 	}
-	connID := uuid.New().String()
+	connID := ConnIDOrGenerate(ctx)
 
 	clientEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
@@ -552,11 +548,10 @@ func NewForwardUpstreamH2Layer(
 // Ownership: the returned stack owns clientConn and upstreamConn via its
 // Layers; the caller MUST defer stack.Close().
 //
-// _ ctx is currently unused (assembly is synchronous) but retained on the
-// signature so downstream Issues (USK-916 upstream TLS) can wire ctx-aware
-// behaviour without churning the callsite.
+// ctx supplies the connection's ConnID (ConnIDOrGenerate); assembly is
+// synchronous, so ctx carries no cancellation here.
 func buildTargetOverrideHTTPStack(
-	_ context.Context,
+	ctx context.Context,
 	clientConn, upstreamConn net.Conn,
 	target string,
 	scheme string,
@@ -567,7 +562,7 @@ func buildTargetOverrideHTTPStack(
 	if scheme == "" {
 		scheme = "http"
 	}
-	connID := uuid.New().String()
+	connID := ConnIDOrGenerate(ctx)
 
 	clientEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/google/uuid"
-
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 )
@@ -27,9 +25,11 @@ import (
 // via its layers; callers must defer stack.Close() exactly as the
 // CONNECT-MITM path does.
 //
-// No context.Context parameter: stack construction is purely synchronous
-// (no I/O, no dial). Cancellation belongs to the caller's dial step and
-// to the per-Layer session loop, not to this constructor.
+// ctx carries a value, not cancellation: the stack and both Layers adopt
+// the connection's ConnID from it (ConnIDOrGenerate), so the Streams they
+// record join the accept-time conn_id in the logs. Construction is purely
+// synchronous (no I/O, no dial); cancellation belongs to the caller's dial
+// step and to the per-Layer session loop.
 func BuildPlainHTTPStack(
 	ctx context.Context,
 	clientConn net.Conn,
@@ -44,7 +44,7 @@ func BuildPlainHTTPStack(
 		return nil, fmt.Errorf("connector: BuildPlainHTTPStack: nil conn")
 	}
 
-	connID := uuid.New().String()
+	connID := ConnIDOrGenerate(ctx)
 
 	clientEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,

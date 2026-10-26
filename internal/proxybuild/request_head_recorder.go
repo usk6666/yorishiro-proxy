@@ -99,7 +99,7 @@ func buildRequestHeadRecorder(store flow.Writer, scope *flow.RecordScope, listen
 
 		connID := f.ConnID
 		if connID == "" {
-			connID = uuid.New().String()
+			connID = connector.GenerateConnID()
 		}
 		started := head.Started
 		if started.IsZero() {

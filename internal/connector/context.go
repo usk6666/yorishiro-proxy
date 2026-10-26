@@ -2,14 +2,10 @@ package connector
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"log/slog"
-)
 
-// connIDSize is the number of random bytes used to generate a connection ID.
-// This produces an 8-character hex string.
-const connIDSize = 4
+	"github.com/google/uuid"
+)
 
 type contextKey int
 
@@ -20,18 +16,30 @@ const (
 	ctxKeyListenerName
 )
 
-// GenerateConnID returns a random 8-character hex string for connection identification.
+// GenerateConnID returns a fresh connection ID: a random (version 4) UUID
+// in its 36-character canonical form.
+//
+// One client TCP connection has exactly one ConnID (RFC-001 §3.1). The
+// accept loops (FullListener.handleConn, the tcp_forward admission) mint
+// it and put it on ctx; the slog conn_id attribute, every recorded Stream
+// of that connection (streams.conn_id — normal, blocked / audit,
+// passthrough, TLS-error and request-head records alike) and the
+// per-connection plugin / rotation state are all keyed on that value, so
+// they join on it. The 122 random bits keep it collision-free for the
+// lifetime of a flow database; the raw-forward path also uses it as the
+// prefix of recorded Stream IDs.
 func GenerateConnID() string {
-	b := make([]byte, connIDSize)
-	if _, err := rand.Read(b); err != nil {
-		// Fallback: this should never happen in practice.
-		return "00000000"
-	}
-	return hex.EncodeToString(b)
+	return uuid.New().String()
 }
 
-// ConnIDOrGenerate returns the connection ID stored in ctx, or a fresh one.
+// ConnIDOrGenerate returns the connection ID stored in ctx, or a fresh one
+// from GenerateConnID when ctx carries none (a direct caller outside the
+// accept loops, e.g. a unit test). Stack builders use it so the stack, its
+// Layers and the Streams they record adopt the accept-time ConnID.
 func ConnIDOrGenerate(ctx context.Context) string {
+	if id := ConnIDFromContext(ctx); id != "" {
+		return id
+	}
 	return GenerateConnID()
 }
 

@@ -12,8 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
@@ -809,7 +807,7 @@ func BuildConnectionStack(
 		return nil, nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil issuer")
 	}
 
-	connID := uuid.New().String()
+	connID := ConnIDOrGenerate(ctx)
 
 	// Raw passthrough mode bypasses ALPN routing entirely — always ByteChunk.
 	// raw_passthrough_hosts names a TLS authority (USK-1315).

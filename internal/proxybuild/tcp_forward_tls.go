@@ -168,7 +168,7 @@ func (m *Manager) handleTCPForwardTLSConn(
 	entry *tcpForwardEntry,
 	clientConn net.Conn,
 ) {
-	connID := tcpForwardConnID(ctx)
+	connID := connector.ConnIDOrGenerate(ctx)
 	clientAddr := clientConn.RemoteAddr().String()
 	targetHost := targetHostOnly(entry.target)
 	connLogger := m.logger.With(
