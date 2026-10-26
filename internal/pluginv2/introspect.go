@@ -30,6 +30,12 @@ type PluginIntrospectInfo struct {
 	// and []byte truncated to 8 KiB (with a trailing "...(truncated)"
 	// marker) to bound the introspect response size.
 	Vars map[string]any
+
+	// FailOpen counts the hook outcomes of this plugin that the engine
+	// refused or could not evaluate and therefore treated as CONTINUE
+	// (the message was forwarded as if the hook had not acted). Counted
+	// per loaded plugin instance for the process lifetime.
+	FailOpen FailOpenStats
 }
 
 // HookRegistration mirrors a single register_hook call.

@@ -38,6 +38,29 @@ type pluginIntrospectPlugin struct {
 	// Keys named in RedactKeys carry the literal string "<redacted>";
 	// large values are truncated by the engine.
 	Vars map[string]any `json:"vars,omitempty"`
+
+	// FailOpenCount counts this plugin's hook outcomes that the engine
+	// refused or could not evaluate and treated as CONTINUE. Always
+	// present (0 when none).
+	FailOpenCount int64 `json:"fail_open_count"`
+
+	// FailOpenByKind breaks FailOpenCount down per kind token.
+	FailOpenByKind map[string]int64 `json:"fail_open_by_kind,omitempty"`
+
+	// LastFailOpen is the most recent fail-open outcome.
+	LastFailOpen *pluginFailOpenRecord `json:"last_fail_open,omitempty"`
+}
+
+// pluginFailOpenRecord mirrors pluginv2.FailOpenRecord in the MCP wire
+// schema.
+type pluginFailOpenRecord struct {
+	Kind     string `json:"kind"`
+	Action   string `json:"action,omitempty"`
+	Protocol string `json:"protocol"`
+	Event    string `json:"event"`
+	Phase    string `json:"phase"`
+	Reason   string `json:"reason"`
+	At       string `json:"at"`
 }
 
 // hookRegistration mirrors pluginv2.HookRegistration in the MCP wire
@@ -48,6 +71,11 @@ type hookRegistration struct {
 	Event    string `json:"event"`
 	Phase    string `json:"phase"`
 }
+
+// failOpenReasonOutputCap bounds last_fail_open.reason in the MCP response.
+// Applied after Output Filter masking so a sensitive value straddling the
+// cut is masked whole before it is truncated.
+const failOpenReasonOutputCap = 256
 
 // registerPluginIntrospect registers the plugin_introspect MCP tool.
 func (s *Server) registerPluginIntrospect() {
