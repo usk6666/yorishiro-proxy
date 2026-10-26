@@ -847,3 +847,51 @@ func TestLayer_ClientIdleTimeout_IgnoredOnClientRole(t *testing.T) {
 		t.Fatal("ClientRole Layer shut down by the idle bound")
 	}
 }
+
+// The idle bound still closes the connection when the idle GOAWAY cannot be
+// written: the peer stopped reading, so the writer is stuck in a socket write
+// (net.Pipe has no buffer) and the GOAWAY's done is never delivered. The
+// Layer must give up on the GOAWAY after closeDrainTimeout and close the
+// connection, which unblocks the writer — as Close does.
+func TestLayer_ClientIdleTimeout_PeerNotReading_StillCloses(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t,
+		WithClientIdleTimeout(fixedIdle(idleTestBound)),
+		withIdleGoAwayLinger(idleTestLinger))
+	defer cleanup()
+	frames, pause := startPausableProbeReader(peer)
+	if err := peer.wr.WriteSettings(nil); err != nil {
+		t.Fatalf("write SETTINGS: %v", err)
+	}
+	ackDeadline := time.NewTimer(idleTestWait)
+	defer ackDeadline.Stop()
+	for acked := false; !acked; {
+		select {
+		case f, ok := <-frames:
+			if !ok {
+				t.Fatal("connection closed before SETTINGS ACK")
+			}
+			acked = f.typ == frame.TypeSettings && f.flags.Has(frame.FlagAck)
+		case <-ackDeadline.C:
+			t.Fatal("no SETTINGS ACK")
+		}
+	}
+	// Stop reading. The probe reader may still absorb one more frame; the
+	// PING ACKs make sure the writer is then stuck in a socket write.
+	pause()
+	go func() {
+		for i := 0; i < 3; i++ {
+			if err := peer.wr.WritePing(false, [8]byte{byte(i)}); err != nil {
+				return
+			}
+		}
+	}()
+
+	bound := idleTestBound + closeDrainTimeout + idleTestLinger + idleTestWait
+	deadline := time.Now().Add(bound)
+	for !l.IsShutdown() {
+		if time.Now().After(deadline) {
+			t.Fatalf("Layer not closed within %v of start with the peer not reading (idle GOAWAY write blocked)", bound)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
