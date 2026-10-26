@@ -90,3 +90,22 @@ func TestProxyStartDocs_MaxConnectionsDefaultMatchesConstant(t *testing.T) {
 		}
 	})
 }
+
+// In transparent mode every redirected TCP connection, passthrough included,
+// holds a max_connections slot and file descriptors, so the transparent-mode
+// section must tell the operator how to size the cap against RLIMIT_NOFILE.
+func TestProxyStartDocs_TransparentModeDocumentsFDBudget(t *testing.T) {
+	text := readResourceText(t, "yorishiro://help/proxy_start")
+	// Scope the match to the transparent-mode section (up to the next
+	// level-2 heading) so the max_connections parameter entry cannot
+	// satisfy it.
+	section := regexp.MustCompile(`(?s)\n## Transparent mode \(egress gateway\)\n(.*?)\n## `).FindStringSubmatch(text)
+	if section == nil {
+		t.Fatal("help/proxy_start has no transparent mode section")
+	}
+	for _, want := range []string{"Connection cap and file descriptors", "RLIMIT_NOFILE", "(hard limit − 1024)", "LimitNOFILE"} {
+		if !strings.Contains(section[1], want) {
+			t.Errorf("help/proxy_start transparent mode section does not mention %q", want)
+		}
+	}
+}

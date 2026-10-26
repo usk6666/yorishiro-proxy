@@ -801,6 +801,9 @@ func BuildConnectionStack(
 	// host. Idempotent — re-stamping the same key on a child ctx is
 	// harmless. USK-1315: the stamp is the dial target — the value the
 	// rotation resolver's per_target_host slot is keyed on.
+	// USK-1382: dialUpstreamTLS stamps for itself, but this stamp is still
+	// load-bearing for the resolver reads outside it — the raw-passthrough
+	// upstream dial and the h2 pool key (poolKeyForH2).
 	ctx = ContextWithDialTarget(ctx, ut.Dial)
 	if cfg.Issuer == nil {
 		return nil, nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil issuer")
@@ -1823,7 +1826,8 @@ func performClientMITM(
 //
 // target is the dial target (also the upstream-proxy CONNECT authority when
 // an upstream proxy is configured); host is the TLS host sent as ServerName
-// (USK-1315).
+// (USK-1315). The dial target is stamped on ctx for the rotation resolver
+// (dialUpstreamTLS), so callers need not stamp it themselves (USK-1382).
 func dialUpstreamWithALPN(
 	ctx context.Context,
 	target, host string,
@@ -1852,6 +1856,11 @@ func dialUpstreamTLS(
 	rootCAsConfig *tls.Config,
 	cfg *BuildConfig,
 ) (net.Conn, *envelope.TLSSnapshot, error) {
+	// USK-1382: key the rotation resolver on the address this call dials,
+	// so every dial — first dial or redial from a ctx that never carried a
+	// dial target (h1 keep-alive / h2 GOAWAY redial) — resolves the same
+	// per_target_host slot.
+	ctx = ContextWithDialTarget(ctx, target)
 	upstreamTLSCfg := &tls.Config{
 		ServerName: host,
 	}
