@@ -746,7 +746,9 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 	// USK-1202: the proxy itself ended the RPC with a delivered gRPC
 	// terminator. That is a clean end of the session, not a failure; the
 	// sentinel only existed to drive the cascade-close in clientToUpstream.
-	if errors.Is(result, errRPCTerminatedByProxy) {
+	// The same holds for the gRPC Start Drop (errRPCDroppedByProxy): the
+	// proxy refused the RPC on purpose, which is not a session failure.
+	if errors.Is(result, errRPCTerminatedByProxy) || errors.Is(result, errRPCDroppedByProxy) {
 		result = nil
 	}
 	// USK-1083: likewise a raw connection the proxy closed on a target
@@ -2888,6 +2890,18 @@ func upgradeExitOrErr(notice *UpgradeNotice, err error) error {
 // and return, so the session reports a clean end (USK-1202).
 var errRPCTerminatedByProxy = errors.New("session: RPC terminated by proxy response")
 
+// errRPCDroppedByProxy is returned by dispatchClientAction (and so by
+// clientToUpstream) when the Send GRPCStartMessage of a native-gRPC or
+// gRPC-Web RPC was Dropped (USK-1387; see dropsRPC). A Drop answers nothing:
+// the RPC ends with no gRPC status, by the transport's own means — the
+// client Channel's Close sends RST_STREAM(CANCEL) on HTTP/2 and closes the
+// HTTP/1.x connection whose request got no response. The non-nil return
+// stops the loop before the RPC's later Data / End are read, so the
+// upstream is never dialed, and drives the errgroup cancel so
+// upstreamToClient leaves its wait for the upstream. Like
+// errRPCTerminatedByProxy, RunSession maps it back to nil.
+var errRPCDroppedByProxy = errors.New("session: RPC dropped by proxy")
+
 // errRawBlockedByTargetScope is returned by clientToUpstream after a raw
 // (bytechunk) Send envelope was Dropped by a target scope verdict
 // (USK-1083, user decision U1). A raw byte stream has no protocol-level
@@ -2960,6 +2974,26 @@ func endsRPC(resp *envelope.Envelope) bool {
 		return false
 	}
 	_, ok := resp.Message.(*envelope.GRPCEndMessage)
+	return ok
+}
+
+// dropsRPC reports whether a Drop of the client-side envelope env refuses a
+// whole native-gRPC or gRPC-Web RPC: env is a Send GRPCStartMessage (USK-1387).
+// The Start is the only gRPC envelope whose Drop leaves the RPC without a
+// head — every later Data / End of the RPC would reach an upstream stream
+// that was never opened — so the session ends there instead of looping.
+// The key is the envelope, not the Step: a plugin DROP on on_start, a
+// BudgetStep exhaustion and an intercept Drop without attribution all take
+// this path. Data / End Drops keep the loop going (plugins cannot DROP them;
+// a Drop of a mid-stream message skips just that message).
+func dropsRPC(env *envelope.Envelope) bool {
+	if env == nil || env.Direction != envelope.Send {
+		return false
+	}
+	if env.Protocol != envelope.ProtocolGRPC && env.Protocol != envelope.ProtocolGRPCWeb {
+		return false
+	}
+	_, ok := env.Message.(*envelope.GRPCStartMessage)
 	return ok
 }
 
@@ -3152,6 +3186,14 @@ func dispatchClientAction(
 ) (forwarded bool, err error) {
 	switch action {
 	case pipeline.Drop:
+		if dropsRPC(env) {
+			// USK-1387: same latch as a delivered terminator — the RPC is
+			// over, so consequential errors of the teardown (a pre-dialed
+			// upstream closed under upstreamToClient, a client RST) must
+			// not win the errgroup's first-error slot.
+			uh.endingRPC.Store(true)
+			return false, errRPCDroppedByProxy
+		}
 		return false, nil
 	case pipeline.Respond:
 		if endsRPC(resp) {

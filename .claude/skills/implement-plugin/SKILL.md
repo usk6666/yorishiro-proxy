@@ -145,6 +145,7 @@ The legacy `plugin` MCP tool (`list`/`reload`/`enable`/`disable`) was removed in
 ## Notes
 
 - **gRPC mid-stream events accept CONTINUE only.** DROP/RESPOND on `grpc.on_data` / `grpc.on_end` is a load-time/dispatch-time error. `grpc.on_start` accepts DROP and `action.RESPOND_GRPC(...)`.
+- **`grpc.on_start` / `grpc-web.on_start` DROP ends the RPC with no gRPC status** — RST_STREAM(CANCEL) on h2, connection close on HTTP/1.x; the upstream is not dialed. Use `action.RESPOND_GRPC(...)` to answer with a status.
 - **WebSocket mid-stream events accept CONTINUE only.** To redact a `ws.on_message` payload, mutate `msg["payload"]` in place rather than dropping. To refuse a connection, hook `ws.on_upgrade` and return DROP.
 - **`(socks5, on_connect)` accepts DROP** for connection-level allowlists, but **no `phase=` argument** — it is a lifecycle event.
 - **WebSocket Ping/Pong frames are still delivered** as `(ws, on_message)` events; filter by `msg["opcode"]` (0x9 = ping, 0xA = pong, 0x1 = text, 0x2 = binary) when only certain frame types matter.
