@@ -419,12 +419,13 @@ func (d *pluginDispatcher) regenerateRaw(ctx context.Context, env *envelope.Enve
 }
 
 // buildRespondEnvelope synthesizes the response envelope for a RESPOND
-// outcome. The shape depends on the *RespondAction payload (HTTP vs gRPC)
-// — both are honored regardless of the requesting envelope's Protocol so
-// a plugin can RESPOND_GRPC from an HTTP envelope (e.g. on an HTTP/2
-// request that should be rejected with a gRPC status). The orchestrator
-// is responsible for ensuring the responding Layer can render the
-// resulting Message.
+// outcome. The shape follows the *RespondAction payload: an HTTP payload
+// becomes an *HTTPMessage, a gRPC payload a *GRPCEndMessage. No conversion
+// between the two happens here. pluginv2.Engine.Dispatch has already refused
+// (as ErrDisallowedAction) any payload whose shape does not match the hook's
+// protocol family, so the payload reaching this function is one the
+// responding Layer can render: action.RESPOND_GRPC on grpc / grpc-web
+// hooks, action.RESPOND on http / ws hooks.
 func (d *pluginDispatcher) buildRespondEnvelope(env *envelope.Envelope, payload *pluginv2.RespondAction) *envelope.Envelope {
 	resp := &envelope.Envelope{
 		StreamID:  env.StreamID,

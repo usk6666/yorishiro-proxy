@@ -101,7 +101,7 @@ Writing `method` / `path` / `raw_query` (request) or `status` / `status_reason` 
 |--------|----------------|
 | CONTINUE | All events (always implicit) |
 | DROP | Transaction-start only: `http.on_request`, `ws.on_upgrade`, `grpc.on_start`, `grpc-web.on_start`, `connection.on_connect`, `socks5.on_connect` |
-| RESPOND | Transaction-start request events (as above, minus `connection`/`socks5`), plus `http.on_response` (replace upstream response). gRPC uses `action.RESPOND_GRPC(status, message, trailers)` instead of `action.RESPOND(...)`. |
+| RESPOND | Transaction-start request events (as above, minus `connection`/`socks5`), plus `http.on_response` (replace upstream response). gRPC / gRPC-Web hooks must use `action.RESPOND_GRPC(status, message, trailers)` and HTTP / WS hooks `action.RESPOND(...)`; the other shape is refused as CONTINUE (Warn). |
 
 Mid-stream events (`on_data`, `on_message`, `on_event`, `on_chunk`) and lifecycle/observation events (`on_close`, `on_end`, `on_handshake`, `on_disconnect`) accept CONTINUE only — terminating a stateful stream uses native termination (gRPC `RST_STREAM`, WS close frame), not an action enum.
 
@@ -145,6 +145,7 @@ The legacy `plugin` MCP tool (`list`/`reload`/`enable`/`disable`) was removed in
 ## Notes
 
 - **gRPC mid-stream events accept CONTINUE only.** DROP/RESPOND on `grpc.on_data` / `grpc.on_end` is a load-time/dispatch-time error. `grpc.on_start` accepts DROP and `action.RESPOND_GRPC(...)`.
+- **RESPOND must match the hook's protocol.** `grpc.on_start` / `grpc-web.on_start` take only `action.RESPOND_GRPC(...)`; `http.on_request` / `http.on_response` / `ws.on_upgrade` take only `action.RESPOND(...)`. A mismatched shape is refused at dispatch time (`ErrDisallowedAction`): Warn log, the hook counts as CONTINUE with its `msg` edits discarded, and the request is forwarded upstream.
 - **WebSocket mid-stream events accept CONTINUE only.** To redact a `ws.on_message` payload, mutate `msg["payload"]` in place rather than dropping. To refuse a connection, hook `ws.on_upgrade` and return DROP.
 - **`(socks5, on_connect)` accepts DROP** for connection-level allowlists, but **no `phase=` argument** — it is a lifecycle event.
 - **WebSocket Ping/Pong frames are still delivered** as `(ws, on_message)` events; filter by `msg["opcode"]` (0x9 = ping, 0xA = pong, 0x1 = text, 0x2 = binary) when only certain frame types matter.

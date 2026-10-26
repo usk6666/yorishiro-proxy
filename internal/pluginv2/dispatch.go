@@ -50,8 +50,11 @@ type HookOutcome struct {
 // ErrDisallowedAction is returned by Engine.Dispatch when a hook returns an
 // action the surface table forbids for its (protocol, event) — e.g. a DROP
 // from a mid-stream `grpc.on_data` hook (mid-stream events accept CONTINUE
-// only). Callers should log a Warn and treat the outcome as ActionContinue
-// (fail-soft: a misbehaving plugin must not break wire traffic). The error
+// only) — or a RESPOND whose shape the hook's Layer cannot render (an
+// HTTP-shaped action.RESPOND from a gRPC hook, action.RESPOND_GRPC from an
+// HTTP-family hook). Callers should log a Warn and treat the outcome as
+// ActionContinue (fail-soft: a misbehaving plugin must not break wire
+// traffic). The error
 // is surfaced rather than silently demoted so plugin authors can see the
 // problem in tests; callers that want the demoted behavior errors.Is-check
 // this sentinel.
@@ -62,11 +65,13 @@ var ErrDisallowedAction = errors.New("pluginv2: hook returned disallowed action 
 // PluginStepPost) consume an already-validated outcome.
 //
 // Returns ErrDisallowedAction (or wrapping) when a hook returns DROP/RESPOND
-// for an event whose surface ActionMask forbids it. Returns convertMessageToDict
-// errors (ErrBodyTooLarge / ErrUnsupportedMessageType) verbatim — callers
-// treat these as "skip this hook" signals. Per-hook Starlark *runtime* errors
-// are converted into Warn-logged ActionContinue outcomes here so a misbehaving
-// hook never breaks the chain or the wire.
+// for an event whose surface ActionMask forbids it, or a RESPOND whose shape
+// does not match the hook's protocol family (see respondShapeAllowed).
+// Returns convertMessageToDict errors (ErrBodyTooLarge /
+// ErrUnsupportedMessageType) verbatim — callers treat these as "skip this
+// hook" signals. Per-hook Starlark *runtime* errors are converted into
+// Warn-logged ActionContinue outcomes here so a misbehaving hook never breaks
+// the chain or the wire.
 func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope) (*HookOutcome, error) {
 	d, err := convertMessageToDict(env)
 	if err != nil {
@@ -124,6 +129,9 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope
 	if action == ActionRespond {
 		if !surfaceAllows(hook, action) {
 			return nil, fmt.Errorf("%w: %s on (%s, %s)", ErrDisallowedAction, action, hook.Protocol, hook.Event)
+		}
+		if err := respondShapeAllowed(hook, respond); err != nil {
+			return nil, err
 		}
 		return &HookOutcome{Action: ActionRespond, Respond: respond}, nil
 	}
@@ -251,6 +259,35 @@ func surfaceAllows(hook Hook, action Action) bool {
 		return false
 	}
 	return spec.Actions.Has(action)
+}
+
+// respondShapeAllowed reports, as an error wrapping ErrDisallowedAction,
+// a RESPOND whose payload shape does not match the hook's protocol family.
+// Each shape is rendered only by its own Layer (MITM Principle 2): a gRPC /
+// gRPC-Web Channel's Send accepts gRPC messages only, an HTTP/1.x or
+// HTTP/2-aggregated Channel's Send accepts *HTTPMessage only, so a mismatch
+// would otherwise end the session with an "unsupported Send Message type"
+// error. Every surface entry that permits RESPOND is covered:
+//
+//   - grpc.on_start, grpc-web.on_start → action.RESPOND_GRPC only
+//   - http.on_request, http.on_response, ws.on_upgrade → action.RESPOND only
+//
+// sse / raw / tls / connection / socks5 entries never permit RESPOND, so
+// surfaceAllows already refuses them before this check runs.
+func respondShapeAllowed(hook Hook, respond *RespondAction) error {
+	switch hook.Protocol {
+	case ProtoGRPC, ProtoGRPCWeb:
+		if respond == nil || respond.GRPCResponse == nil {
+			return fmt.Errorf("%w: HTTP-shaped action.RESPOND cannot be rendered on (%s, %s); use action.RESPOND_GRPC",
+				ErrDisallowedAction, hook.Protocol, hook.Event)
+		}
+	default:
+		if respond == nil || respond.HTTPResponse == nil {
+			return fmt.Errorf("%w: gRPC-shaped action.RESPOND_GRPC cannot be rendered on (%s, %s); use action.RESPOND",
+				ErrDisallowedAction, hook.Protocol, hook.Event)
+		}
+	}
+	return nil
 }
 
 // lookupMaxSteps returns the per-call step budget for the named plugin,
