@@ -52,12 +52,9 @@ func NewH2CHandler(cfg H2CHandlerConfig) HandlerFunc {
 	return func(ctx context.Context, pc *PeekConn) error {
 		connLogger := LoggerFromContext(ctx, logger)
 
-		connID := ConnIDFromContext(ctx)
-		if connID == "" {
-			// Defensive fallback. FullListener populates the ConnID on the
-			// context, but any direct caller (including tests) may not.
-			connID = GenerateConnID()
-		}
+		// FullListener populates the ConnID on the context; a direct
+		// caller (including tests) may not, and gets a fresh one.
+		connID := ConnIDOrGenerate(ctx)
 
 		envCtx := envelope.EnvelopeContext{
 			ConnID: connID,

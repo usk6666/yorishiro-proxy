@@ -157,8 +157,9 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 
 	// Mint the conn ID here and carry it on ctx so the live-connection
 	// registry's close / revoke logs, the handlers' logs, recorded flows
-	// and a rate-limit refusal's Stream share one conn_id
-	// (tcpForwardConnID reuses it).
+	// and a rate-limit refusal's Stream share one conn_id (the handlers
+	// and the refusal recorder reuse it via connector.ConnIDOrGenerate,
+	// and the stack builders adopt it).
 	connID := connector.GenerateConnID()
 	ctx = connector.ContextWithConnID(ctx, connID)
 
@@ -185,17 +186,14 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		rejectTCPForwardConn(entry, conn, tcpForwardDenyResponse, logger)
 		return ctx, func() {}, false
 	}
-	return rctx, release, true
-}
-
-// tcpForwardConnID returns the conn ID admitTCPForwardConn put on ctx,
-// or a fresh one when there is none (the parent listener was gone at
-// admission, or a caller outside the accept loop).
-func tcpForwardConnID(ctx context.Context) string {
-	if id := connector.ConnIDFromContext(ctx); id != "" {
-		return id
-	}
-	return connector.GenerateConnID()
+	// USK-1278 review S-1: the caller defers this for the whole forward
+	// connection, so dropping the per_connection rotation entry here runs
+	// once after every dial keyed on connID is done.
+	buildCfg := stack.BuildConfig
+	return rctx, func() {
+		release()
+		buildCfg.ReleaseConnectionState(connID)
+	}, true
 }
 
 // rejectTCPForwardConn answers a refused forward connection and closes

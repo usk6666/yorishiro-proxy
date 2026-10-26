@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
@@ -282,7 +280,7 @@ func buildTransparentNoALPNStack(
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	connID := uuid.New().String()
+	connID := ConnIDOrGenerate(ctx)
 
 	upstreamConn, upstreamSnap, err := dialUpstreamStandardNoALPN(ctx, ut, host, hostTLS, cfg)
 	if err != nil {

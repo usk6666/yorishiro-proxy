@@ -8,8 +8,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
@@ -212,7 +210,7 @@ func BuildPlainH2CStack(
 		return nil, fmt.Errorf("connector: BuildPlainH2CStack: nil conn")
 	}
 
-	connID := uuid.New().String()
+	connID := ConnIDOrGenerate(ctx)
 
 	clientEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
@@ -272,9 +270,13 @@ func BuildPlainH2CStack(
 // per RFC-001 §3.1. Used by the inner-protocol fallback branch in CONNECT /
 // SOCKS5 handlers when peek reveals neither TLS nor an HTTP family byte.
 //
+// ctx supplies the connection's ConnID (ConnIDOrGenerate); construction
+// performs no I/O.
+//
 // Ownership: the returned stack owns both conns; callers must defer
 // stack.Close().
 func BuildBytechunkStack(
+	ctx context.Context,
 	clientConn net.Conn,
 	upstreamConn net.Conn,
 	target string,
@@ -283,7 +285,7 @@ func BuildBytechunkStack(
 	if clientConn == nil || upstreamConn == nil {
 		return nil, fmt.Errorf("connector: BuildBytechunkStack: nil conn")
 	}
-	connID := uuid.New().String()
+	connID := ConnIDOrGenerate(ctx)
 	stack := NewConnectionStack(connID)
 
 	// USK-1083: both legs are plaintext, so TLS stays nil and
@@ -514,7 +516,7 @@ func dispatchInnerHTTP1(
 	cfg innerDispatchConfig,
 	logger *slog.Logger,
 ) {
-	stack, err := BuildPlainHTTPStack(pc, upstreamConn, target, cfg.BuildCfg)
+	stack, err := BuildPlainHTTPStack(ctx, pc, upstreamConn, target, cfg.BuildCfg)
 	if err != nil {
 		_ = upstreamConn.Close()
 		logger.Warn("inner plain-HTTP stack build failed",
@@ -575,7 +577,7 @@ func dispatchInnerBytechunk(
 	cfg innerDispatchConfig,
 	logger *slog.Logger,
 ) {
-	stack, err := BuildBytechunkStack(pc, upstreamConn, target, cfg.BuildCfg)
+	stack, err := BuildBytechunkStack(ctx, pc, upstreamConn, target, cfg.BuildCfg)
 	if err != nil {
 		_ = upstreamConn.Close()
 		logger.Warn("inner bytechunk stack build failed",

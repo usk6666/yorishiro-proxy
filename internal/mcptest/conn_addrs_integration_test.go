@@ -79,10 +79,6 @@ func connAddrsGet(t *testing.T, client *gohttp.Client, rawURL string) {
 	}
 }
 
-func urlPathMatch(path string) func(connAddrsEntry) bool {
-	return func(e connAddrsEntry) bool { return strings.Contains(e.URL, path) }
-}
-
 // TestE2E_ConnAddrs_EntryPaths_Full covers every live entry path on a
 // named listener and the listener_name filter + JSONL export on top.
 func TestE2E_ConnAddrs_EntryPaths_Full(t *testing.T) {

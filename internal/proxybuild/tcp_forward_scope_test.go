@@ -295,7 +295,7 @@ func TestTCPForwardScopeCheck_NonNumericPortFailsClosed(t *testing.T) {
 // TestAdmitTCPForwardConn_ConnIDSharedWithRegistry (USK-1161 review
 // F-1): the conn ID admitTCPForwardConn registers in the live-connection
 // registry is the one it puts on the returned ctx (which the handlers
-// reuse via tcpForwardConnID), so the registry's revoke log carries the
+// reuse via connector.ConnIDOrGenerate), so the registry's revoke log carries the
 // same conn_id as the handler's logs and the recorded flow.
 func TestAdmitTCPForwardConn_ConnIDSharedWithRegistry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -338,8 +338,8 @@ func TestAdmitTCPForwardConn_ConnIDSharedWithRegistry(t *testing.T) {
 	if connID == "" {
 		t.Fatal("admitted ctx carries no conn ID")
 	}
-	if got := tcpForwardConnID(rctx); got != connID {
-		t.Errorf("tcpForwardConnID(admitted ctx) = %q, want %q", got, connID)
+	if got := connector.ConnIDOrGenerate(rctx); got != connID {
+		t.Errorf("connector.ConnIDOrGenerate(admitted ctx) = %q, want %q", got, connID)
 	}
 
 	scope.SetPolicyRules(nil, []connector.TargetRule{{Hostname: "127.0.0.1", Ports: []int{4444}}})

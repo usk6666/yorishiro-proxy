@@ -9,6 +9,8 @@
 package mcptest_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -16,9 +18,13 @@ import (
 	"net"
 	gohttp "net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/mcptest"
 )
@@ -47,6 +53,27 @@ func TestE2E_ConnAddrs_NamedListenerCONNECTHTTPS_Smoke(t *testing.T) {
 	if detail.ConnInfo.UpstreamProxy != "" {
 		t.Errorf("conn_info.upstream_proxy = %q, want empty for a direct dial", detail.ConnInfo.UpstreamProxy)
 	}
+}
+
+// TestE2E_ConnID_CONNECTHTTPS_StreamMatchesLog_Smoke drives one HTTPS
+// request through a CONNECT tunnel and asserts the recorded Stream's
+// conn_id is the conn_id the proxy logged for that client connection
+// (joined on the client socket address), and that it is a uuid.
+func TestE2E_ConnID_CONNECTHTTPS_StreamMatchesLog_Smoke(t *testing.T) {
+	h, logPath := startConnIDHarness(t, mcptest.HarnessOptions{UpstreamProto: "http/1.1"})
+	proxyAddr := startNamedListener(t, h, "worker-a", nil)
+
+	client, localAddrs := connAddrsHTTPClient(t, "http://"+proxyAddr, false)
+	resp, err := client.Get(h.UpstreamTLS.URL + "/conn-id-smoke")
+	if err != nil {
+		t.Fatalf("GET via proxy: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	d := waitConnAddrsStream(t, h, nil, urlPathMatch("/conn-id-smoke"))
+	logID := waitLogConnID(t, logPath, "connection closed", localAddrs.only(t))
+	assertConnIDJoin(t, d.ID, d.ConnID, logID)
 }
 
 // ----------------------------------------------------------------------
@@ -141,6 +168,7 @@ type connAddrsEntry struct {
 // connAddrsDetail is the subset of a query("flow") result these tests read.
 type connAddrsDetail struct {
 	ID           string `json:"id"`
+	ConnID       string `json:"conn_id"`
 	Protocol     string `json:"protocol"`
 	ListenerName string `json:"listener_name"`
 	ConnInfo     struct {
@@ -215,5 +243,71 @@ func assertConnAddrs(t *testing.T, d connAddrsDetail, wantClient, wantServer, wa
 	}
 	if d.ListenerName != wantListener {
 		t.Errorf("stream %s listener_name = %q, want %q", d.ID, d.ListenerName, wantListener)
+	}
+}
+
+func urlPathMatch(path string) func(connAddrsEntry) bool {
+	return func(e connAddrsEntry) bool { return strings.Contains(e.URL, path) }
+}
+
+// startConnIDHarness starts a harness whose proxy logs at debug level as
+// JSON to a temp file, and returns the harness and the log path.
+func startConnIDHarness(t *testing.T, opts mcptest.HarnessOptions) (*mcptest.Harness, string) {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), "proxy.log")
+	opts.LogLevel = "debug"
+	opts.ExtraArgs = append(opts.ExtraArgs, "-log-file", logPath, "-log-format", "json")
+	return mcptest.StartHarness(t, opts), logPath
+}
+
+// waitLogConnID polls the JSON log at logPath for a record with the given
+// msg whose remote_addr is remoteAddr (the client socket's local address)
+// and returns its conn_id. Every record carrying that remote_addr and a
+// conn_id must agree on it: one client connection, one conn_id.
+func waitLogConnID(t *testing.T, logPath, msg, remoteAddr string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		raw, _ := os.ReadFile(logPath)
+		found := ""
+		ids := map[string]bool{}
+		sc := bufio.NewScanner(bytes.NewReader(raw))
+		sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+		for sc.Scan() {
+			var rec struct {
+				Msg        string `json:"msg"`
+				ConnID     string `json:"conn_id"`
+				RemoteAddr string `json:"remote_addr"`
+			}
+			if json.Unmarshal(sc.Bytes(), &rec) != nil || rec.RemoteAddr != remoteAddr || rec.ConnID == "" {
+				continue
+			}
+			ids[rec.ConnID] = true
+			if rec.Msg == msg {
+				found = rec.ConnID
+			}
+		}
+		if found != "" {
+			if len(ids) != 1 {
+				t.Errorf("log records for remote_addr %s carry %d distinct conn_ids %v, want 1", remoteAddr, len(ids), ids)
+			}
+			return found
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q log record with remote_addr %s and a conn_id within deadline (conn_ids seen for it: %v)", msg, remoteAddr, ids)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// assertConnIDJoin asserts a recorded Stream's conn_id equals the conn_id
+// logged for the same client connection, and that it is a uuid.
+func assertConnIDJoin(t *testing.T, streamID, streamConnID, logConnID string) {
+	t.Helper()
+	if streamConnID != logConnID {
+		t.Errorf("stream %s conn_id = %q, want the logged conn_id %q", streamID, streamConnID, logConnID)
+	}
+	if _, err := uuid.Parse(logConnID); err != nil {
+		t.Errorf("logged conn_id %q is not a uuid: %v", logConnID, err)
 	}
 }

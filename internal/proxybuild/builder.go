@@ -506,9 +506,10 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	// constructed BEFORE the per-protocol handlers so each handler's
 	// timeout-provider closure can capture the same atomic Int64 state.
 	wrapper := &Listener{
-		engine: deps.PluginV2Engine,
-		name:   listenerName,
-		logger: logger,
+		engine:   deps.PluginV2Engine,
+		name:     listenerName,
+		logger:   logger,
+		buildCfg: deps.BuildConfig,
 	}
 	// Seed the runtime request-timeout slot from Deps so the config-file /
 	// boot-time value reaches handler invocations until a runtime
@@ -2761,13 +2762,10 @@ func buildTLSStackBuildErrorRecorder(store flow.Writer, scope *flow.RecordScope,
 			}
 		}
 
-		// Resolve the connection identity. ConnIDFromContext is populated
-		// by FullListener.handleConn before it dispatches to the handler,
-		// so this is non-empty in the production path.
-		connID := connector.ConnIDFromContext(ctx)
-		if connID == "" {
-			connID = uuid.New().String()
-		}
+		// Resolve the connection identity. FullListener.handleConn / the
+		// tcp_forward admission put it on ctx before dispatching to the
+		// handler, so this is the logged conn_id in the production path.
+		connID := connector.ConnIDOrGenerate(ctx)
 		clientAddr := connector.ClientAddrFromContext(ctx)
 
 		errMsg := buildErr.Error()
