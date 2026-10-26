@@ -27,7 +27,7 @@ import "sync/atomic"
 // Counter convention mirrors [H1UpstreamMetrics] (USK-1000) — h2 carries
 // a wider trigger-label space because it has THREE distinct stale-
 // detect / redial paths (prewarm worker, reactive GOAWAY-driven
-// selectUpstreamForDial, OpenStream Refused-stream retry) versus h1's
+// selectUpstreamForDialWithTrigger, OpenStream Refused-stream retry) versus h1's
 // two. There is no Prometheus exporter or HTTP listener in this repo;
 // the MCP `status` resource is the single surface.
 //
@@ -45,7 +45,7 @@ type H2UpstreamMetrics struct {
 	// double-count.
 	goAwayObservedPrewarm atomic.Int64
 
-	// goAwayObservedReactive counts each time selectUpstreamForDial's
+	// goAwayObservedReactive counts each time selectUpstreamForDialWithTrigger's
 	// slow path observed a stale Layer (isStaleH2 returned true) and
 	// proceeded to fresh-dial under chain.mu. Counted at the consumer
 	// (slow-path entry), matching the "divergence point" convention
@@ -69,13 +69,13 @@ type H2UpstreamMetrics struct {
 	redialPrewarm atomic.Int64
 
 	// redialReactive counts successful redials initiated by
-	// selectUpstreamForDial's slow path (reactive: stale Layer
+	// selectUpstreamForDialWithTrigger's slow path (reactive: stale Layer
 	// observed on the live request path).
 	redialReactive atomic.Int64
 
 	// redialRefusedStream counts successful redials initiated by
 	// openUpstreamStreamWithRetryFn's retry path. The retry's second
-	// selectUpstreamForDial observed the now-stale Layer and
+	// selectUpstreamForDialWithTrigger observed the now-stale Layer and
 	// fresh-dialed; this counter increments on that fresh-dial
 	// success.
 	//
@@ -83,7 +83,7 @@ type H2UpstreamMetrics struct {
 	// approximate classification by (upL != upL2). Parallel pre-warm
 	// can mis-classify in rare interleavings where chain.current was
 	// already replaced by another goroutine before the second
-	// selectUpstreamForDial call.
+	// selectUpstreamForDialWithTrigger call.
 	redialRefusedStream atomic.Int64
 
 	// redialFailedPrewarm counts dial failures inside the pre-warm
@@ -100,7 +100,7 @@ type H2UpstreamMetrics struct {
 	prewarmSuppressed atomic.Int64
 
 	// redialFailedReactive counts dial failures inside
-	// selectUpstreamForDial's slow path. The stale Layer is returned
+	// selectUpstreamForDialWithTrigger's slow path. The stale Layer is returned
 	// to the caller; OpenStream surfaces the underlying refused error.
 	redialFailedReactive atomic.Int64
 
@@ -115,7 +115,7 @@ type H2UpstreamMetrics struct {
 	retrySuccess atomic.Int64
 
 	// retryFailRedial counts retry-wrapper attempts where the retry
-	// path's selectUpstreamForDial did NOT secure a fresh Layer (the
+	// path's selectUpstreamForDialWithTrigger did NOT secure a fresh Layer (the
 	// second select returned the same stale Layer; redial failed and
 	// fell back to stale). The post-redial OpenStream then returned
 	// an error.
@@ -170,7 +170,7 @@ func (m *H2UpstreamMetrics) incGoAwayObservedPrewarm() {
 
 // incGoAwayObservedReactive increments the
 // http2_upstream_goaway_observed_total{trigger="reactive"} counter.
-// Called from selectUpstreamForDial when the slow path is taken
+// Called from selectUpstreamForDialWithTrigger when the slow path is taken
 // (active Layer observed stale via isStaleH2).
 func (m *H2UpstreamMetrics) incGoAwayObservedReactive() {
 	if m == nil {
@@ -204,7 +204,7 @@ func (m *H2UpstreamMetrics) incRedialPrewarm() {
 
 // incRedialReactive increments the
 // http2_upstream_redial_total{trigger="reactive"} counter on a
-// successful selectUpstreamForDial slow-path fresh dial.
+// successful selectUpstreamForDialWithTrigger slow-path fresh dial.
 func (m *H2UpstreamMetrics) incRedialReactive() {
 	if m == nil {
 		return
@@ -245,7 +245,7 @@ func (m *H2UpstreamMetrics) incPrewarmSuppressed() {
 
 // incRedialFailedReactive increments the
 // http2_upstream_redial_failed_total{trigger="reactive"} counter on a
-// selectUpstreamForDial slow-path dial failure.
+// selectUpstreamForDialWithTrigger slow-path dial failure.
 func (m *H2UpstreamMetrics) incRedialFailedReactive() {
 	if m == nil {
 		return

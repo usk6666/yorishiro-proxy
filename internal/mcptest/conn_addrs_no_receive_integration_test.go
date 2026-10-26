@@ -372,6 +372,11 @@ func TestE2E_ConnAddrs_NoReceive_H2RedialFails_KeepsEmpty(t *testing.T) {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		t.Errorf("GET 2 err = %v after %v, want a stream reset, not a client timeout", err, elapsed)
 	}
+	// Secondary oracle. 800 ms sits below the 1 s first retry backoff of
+	// Go's h2 transport, so a single REFUSED_STREAM retry already crosses
+	// it, while the real path has ample headroom even under -race: the
+	// redial dials a closed loopback port, which fails at once. The
+	// exactly-one-stream check below is the primary no-retry-loop oracle.
 	if elapsed >= 800*time.Millisecond {
 		t.Errorf("GET 2 took %v (err=%v), want < 800ms (no REFUSED_STREAM retry loop)", elapsed, err)
 	}
