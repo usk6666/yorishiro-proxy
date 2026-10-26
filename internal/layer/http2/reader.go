@@ -242,11 +242,17 @@ func (l *Layer) handleStreamHeaders(f *frame.Frame) error {
 		}
 	}
 
+	if l.opts.beforeAcceptPeerStream != nil && l.isNewPeerStream(f.Header.StreamID) {
+		l.opts.beforeAcceptPeerStream(f.Header.StreamID)
+	}
 	asm, ch, isNew := l.assemblerFor(f.Header.StreamID, true)
 	if asm == nil {
 		return nil
 	}
 	if isNew {
+		if l.opts.afterRegisterPeerStream != nil {
+			l.opts.afterRegisterPeerStream(f.Header.StreamID)
+		}
 		_ = l.conn.Streams().Transition(f.Header.StreamID, EventRecvHeaders)
 		if l.role == ServerRole {
 			l.emitChannel(ch)

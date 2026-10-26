@@ -77,6 +77,18 @@ type options struct {
 	// peer's SETTINGS, which forces the scheduling that let a SETTINGS ACK
 	// precede our own SETTINGS on the wire. No production Option sets it.
 	afterLoopsStart func()
+	// clientIdleTimeout resolves the client idle bound (ServerRole only).
+	// See WithClientIdleTimeout. nil = no bound.
+	clientIdleTimeout func() (time.Duration, bool)
+	// idleGoAwayLinger overrides idleGoAwayLingerDefault. Test seam only;
+	// no production Option sets it. Zero = use the default.
+	idleGoAwayLinger time.Duration
+	// beforeAcceptPeerStream / afterRegisterPeerStream are test seams run
+	// by the reader around the registration of a new peer stream: before
+	// assemblerFor creates it, and between assemblerFor and the
+	// EventRecvHeaders transition. No production Option sets them.
+	beforeAcceptPeerStream  func(streamID uint32)
+	afterRegisterPeerStream func(streamID uint32)
 }
 
 // Option configures a Layer.
@@ -216,6 +228,16 @@ func WithStateReleaser(r pluginv2.StateReleaser) Option {
 // to participate in proactive pre-warm).
 func WithGoAwayObserver(cb func()) Option {
 	return func(o *options) { o.goAwayObserver = cb }
+}
+
+// WithClientIdleTimeout bounds how long a client-facing (ServerRole)
+// connection may stay open with no open streams. fn is resolved each time
+// an idle period starts: ok=false disables the bound for that period, a
+// positive d arms it. When it elapses the Layer sends GOAWAY(NO_ERROR) with
+// the last processed client stream id and closes the connection.
+// Ignored on ClientRole Layers. nil fn (the default) means no bound.
+func WithClientIdleTimeout(fn func() (time.Duration, bool)) Option {
+	return func(o *options) { o.clientIdleTimeout = fn }
 }
 
 // BodyBufferOpts exposes the aggregator-relevant body configuration values
