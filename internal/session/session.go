@@ -3298,6 +3298,7 @@ func upstreamToClient(
 			env.StreamID = clientID
 		}
 
+		lastOnStream := h2ResponseEndsStream(notice, env)
 		env, action, resp, blockedBy, blockTags := runPipelineTracked(pctx, p, env, reg)
 		if action == pipeline.Drop || action == pipeline.Respond {
 			exit, derr := dispatchUpstreamAction(ctx, client, uh, notice, onDrop,
@@ -3371,7 +3372,35 @@ func upstreamToClient(
 			interruptChannel(client)
 			return ErrUpgradePending
 		}
+		if lastOnStream {
+			// The upstream stream was handed off for an SSE / extended-
+			// CONNECT swap that the Pipeline cancelled by replacing or
+			// mutating the head (USK-1392): the upstream Channel parks
+			// and yields nothing more for this exchange, so end it here.
+			return upstreamToClientFinish(ctx, opt, uh, client, clientID, nil, relayed)
+		}
 	}
+}
+
+// h2ResponseEndsStream reports whether env, an upstream envelope as read
+// (before the Pipeline runs), is an HTTP/2 response head the httpaggregator
+// emits as the last envelope of its stream: a 2xx text/event-stream head or
+// the 2xx accept of an extended CONNECT. The aggregator then parks, leaving
+// the stream's later frames to the SSE / WebSocket swap. When the Pipeline
+// cancels that swap (the delivered head no longer triggers it), no further
+// upstream envelope comes for the exchange.
+func h2ResponseEndsStream(notice *UpgradeNotice, env *envelope.Envelope) bool {
+	if env == nil || env.Direction != envelope.Receive {
+		return false
+	}
+	msg, ok := env.Message.(*envelope.HTTPMessage)
+	if !ok || (msg.HTTPVersion != envelope.HTTPVersionH2 && msg.HTTPVersion != envelope.HTTPVersionH2C) {
+		return false
+	}
+	if isSSEResponse(msg) {
+		return true
+	}
+	return notice != nil && notice.hasSendUpgradeH2() && isExtendedConnectAccept(msg)
 }
 
 // upstreamOutcome is the Pipeline result for one upstream envelope that

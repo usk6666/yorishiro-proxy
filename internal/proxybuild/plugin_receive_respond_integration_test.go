@@ -114,46 +114,71 @@ func TestPluginReceiveRespond_H2_ReplacesResponse(t *testing.T) {
 }
 
 // TestPluginReceiveRespond_H2_SSEHeadReplaced: an h2 upstream opens a
-// text/event-stream response and the plugin RESPOND-replaces its head with
-// a plain response. The upstream aggregator already took the SSE head as
-// the last envelope of the exchange (the event bytes belong to the SSE
-// swap that the replacement cancels), so the session must end the exchange
-// once the replacement is delivered: the upstream stream is torn down
-// instead of staying open until the connection closes.
+// text/event-stream response and the plugin turns its head into a plain
+// response — by RESPOND-replacing it, or by a CONTINUE mutation of its
+// Content-Type. The upstream aggregator already took the SSE head as the
+// last envelope of the exchange (the event bytes belong to the SSE swap
+// that the plugin cancelled), so the session must end the exchange once the
+// head is delivered: the upstream stream is torn down instead of staying
+// open until the connection closes.
 func TestPluginReceiveRespond_H2_SSEHeadReplaced(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	upstreamDone := make(chan struct{})
-	upAddr, stop := h2cEchoUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(gohttp.StatusOK)
-		_, _ = w.Write([]byte("data: upstream\n\n"))
-		w.(gohttp.Flusher).Flush()
-		select {
-		case <-r.Context().Done():
-			close(upstreamDone)
-		case <-time.After(20 * time.Second):
-		}
-	}))
-	t.Cleanup(stop)
-	h, fwd := startRawWinsForwardDeps(t, ctx, `
+	cases := []struct {
+		name, script, wantBody string
+	}{
+		{
+			name: "respond",
+			script: `
 def replace(msg, ctx):
     return action.RESPOND(status_code=200, headers=[("Content-Type", "text/plain")], body=b"plugin-body")
 
 register_hook("http", "on_response", replace)
-`, upAddr, "http2", nil)
+`,
+			wantBody: "plugin-body",
+		},
+		{
+			name: "continue_mutation",
+			script: `
+def retype(msg, ctx):
+    msg["headers"].delete_first("content-type")
+    msg["headers"].append("content-type", "text/plain")
 
-	status, body := doH2C(t, ctx, fwd, "GET", "/events", nil)
-	if status != 200 || body != "plugin-body" {
-		t.Errorf("client got %d %q, want the plugin's 200 \"plugin-body\"", status, body)
+register_hook("http", "on_response", retype)
+`,
+			wantBody: "",
+		},
 	}
-	select {
-	case <-upstreamDone:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("upstream SSE stream still open 5s after the replaced response was delivered; flows:%s", describeFlows(h.store))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			upstreamDone := make(chan struct{})
+			upAddr, stop := h2cEchoUpstream(t, gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(gohttp.StatusOK)
+				_, _ = w.Write([]byte("data: upstream\n\n"))
+				w.(gohttp.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+					close(upstreamDone)
+				case <-time.After(20 * time.Second):
+				}
+			}))
+			t.Cleanup(stop)
+			h, fwd := startRawWinsForwardDeps(t, ctx, tc.script, upAddr, "http2", nil)
+
+			status, body := doH2C(t, ctx, fwd, "GET", "/events", nil)
+			if status != 200 || body != tc.wantBody {
+				t.Errorf("client got %d %q, want 200 %q", status, body, tc.wantBody)
+			}
+			select {
+			case <-upstreamDone:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("upstream SSE stream still open 5s after the plugin's head was delivered; flows:%s", describeFlows(h.store))
+			}
+			waitAnyFlow(t, h.store, "receive")
+		})
 	}
-	waitAnyFlow(t, h.store, "receive")
 }
 
 // startInformationalUpstream answers every request with a 103 Early Hints

@@ -53,12 +53,11 @@ type HookOutcome struct {
 // only) — or a RESPOND whose shape the hook's Layer cannot render (an
 // HTTP-shaped action.RESPOND from a gRPC hook, action.RESPOND_GRPC from an
 // HTTP-family hook), or a RESPOND on an informational (1xx, not 101)
-// response whose final response is still to come. Callers should log a Warn and treat the outcome as
-// ActionContinue (fail-soft: a misbehaving plugin must not break wire
-// traffic). The error
-// is surfaced rather than silently demoted so plugin authors can see the
-// problem in tests; callers that want the demoted behavior errors.Is-check
-// this sentinel.
+// response whose final response is still to come. Callers should log a
+// Warn and treat the outcome as ActionContinue (fail-soft: a misbehaving
+// plugin must not break wire traffic). The error is surfaced rather than
+// silently demoted so plugin authors can see the problem in tests; callers
+// that want the demoted behavior errors.Is-check this sentinel.
 var ErrDisallowedAction = errors.New("pluginv2: hook returned disallowed action for this event")
 
 // Dispatch invokes one Hook against env. Conv / exec / read-back / surface
