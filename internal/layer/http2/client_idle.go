@@ -139,12 +139,15 @@ func (l *Layer) idleGoAway(epochLast uint32) (chan error, bool) {
 		slog.Uint64("last_stream_id", uint64(epochLast)),
 		slog.Duration("idle", d),
 	)
+	// Bounded like Close's GOAWAY: a writer stuck on a peer that stopped
+	// reading can leave the queue full, and shutdown is not closed yet. On
+	// timeout done carries ErrWriterClosed and lingerAndClose closes.
 	done := make(chan error, 1)
-	l.enqueueWrite(writeRequest{goAway: &writeGoAway{
+	l.enqueueWriteBounded(writeRequest{goAway: &writeGoAway{
 		lastStreamID: epochLast,
 		code:         ErrCodeNo,
 		done:         done,
-	}})
+	}}, closeDrainTimeout)
 	return done, true
 }
 
@@ -168,10 +171,15 @@ func (l *Layer) peerStreamOpeningLocked(last uint32) bool {
 // lingerAndClose waits for the idle GOAWAY to be written, keeps the
 // connection for the linger (the reader keeps answering PING and ignoring
 // streams above last_stream_id), then closes the Layer. Shutdown — the peer
-// closing, or Close — ends either wait early.
+// closing, or Close — ends either wait early. The write wait is bounded by
+// closeDrainTimeout, as in Close: a peer that stopped reading leaves the
+// writer stuck in a socket write and done undelivered, and only closing the
+// connection unblocks it.
 func (l *Layer) lingerAndClose(done chan error) {
+	drain := time.NewTimer(closeDrainTimeout)
 	select {
 	case err := <-done:
+		drain.Stop()
 		if err == nil {
 			linger := l.opts.idleGoAwayLinger
 			if linger <= 0 {
@@ -184,7 +192,13 @@ func (l *Layer) lingerAndClose(done chan error) {
 			}
 			t.Stop()
 		}
+	case <-drain.C:
+		slog.Debug("http2: idle GOAWAY not written within the drain timeout; closing",
+			slog.String("role", l.role.String()),
+			slog.String("conn_stream_id", l.streamID),
+		)
 	case <-l.shutdown:
+		drain.Stop()
 	}
 	_ = l.close(false)
 }

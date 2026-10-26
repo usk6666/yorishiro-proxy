@@ -30,7 +30,7 @@ import (
 // used when no protocol handler is registered.
 const defaultRequestTimeoutMs = 60000
 
-// defaultClientIdleTimeoutMs is the default client keep-alive idle timeout
+// defaultClientIdleTimeoutMs is the default client idle timeout
 // in milliseconds (connector.DefaultClientIdleTimeout, USK-1185).
 const defaultClientIdleTimeoutMs = int64(connector.DefaultClientIdleTimeout / time.Millisecond)
 

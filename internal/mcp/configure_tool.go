@@ -380,8 +380,8 @@ type configureResult struct {
 	// RequestTimeoutMs is the current request timeout in milliseconds (set when changed).
 	RequestTimeoutMs *int64 `json:"request_timeout_ms,omitempty"`
 
-	// ClientIdleTimeoutMs is the current client keep-alive idle timeout in
-	// milliseconds (set when changed; 0 = disabled).
+	// ClientIdleTimeoutMs is the current client idle timeout (HTTP/1.x
+	// keep-alive and HTTP/2 no-open-stream) in milliseconds (set when changed; 0 = disabled).
 	ClientIdleTimeoutMs *int64 `json:"client_idle_timeout_ms,omitempty"`
 
 	// TLSFingerprint is the current TLS fingerprint profile (set when changed).

@@ -872,8 +872,9 @@ type ProxyConfig struct {
 	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty"`
 
 	// ClientIdleTimeoutMs is the boot value of client_idle_timeout_ms
-	// (USK-1186): the HTTP/1.x client keep-alive idle wait. Nil keeps the
-	// default (120s); 0 disables it; otherwise
+	// (USK-1186): the client idle bound — the HTTP/1.x keep-alive wait for
+	// the next request and the HTTP/2 time with no open stream before
+	// GOAWAY. Nil keeps the default (120s); 0 disables it; otherwise
 	// MinClientTimeoutMs..MaxClientTimeoutMs.
 	//
 	// Both are pointers so an omitted key stays distinct from 0. They seed
