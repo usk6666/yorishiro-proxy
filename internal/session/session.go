@@ -746,6 +746,8 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 	// USK-1202: the proxy itself ended the RPC with a delivered gRPC
 	// terminator. That is a clean end of the session, not a failure; the
 	// sentinel only existed to drive the cascade-close in clientToUpstream.
+	// The same holds for the gRPC Start Drop (errRPCDroppedByProxy): the
+	// proxy refused the RPC on purpose, which is not a session failure.
 	if errors.Is(result, errRPCTerminatedByProxy) || errors.Is(result, errRPCDroppedByProxy) {
 		result = nil
 	}

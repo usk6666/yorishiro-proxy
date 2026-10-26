@@ -92,9 +92,33 @@ func assertNoServerErrorLog(t *testing.T, logPath string) {
 	}
 }
 
-// settle gives the session time to finish recording before the store and
-// log are inspected (the client observes the reset before OnComplete runs).
-func settle() { time.Sleep(300 * time.Millisecond) }
+// waitSessionsDone blocks until the proxy reports no connection in flight,
+// so the store and log are inspected only after every session has finished
+// recording (the client observes the reset before OnComplete runs). The
+// caller closes its client connection first: the listener's per-connection
+// handler returns — and active_connections drops — only after every session
+// on that connection (each h2 stream included) has returned. A dropped RPC
+// may record no Stream at all, so the store is no completion signal; the
+// connection count is, with or without the fix. Fails the test if the
+// count does not reach zero before the deadline.
+func waitSessionsDone(t *testing.T, h *mcptest.Harness) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		res := h.MustOK(t, "query", map[string]any{"resource": "status"})
+		n, ok := res.Decoded["active_connections"].(float64)
+		if !ok {
+			t.Fatalf("query status: missing active_connections in result: %s", res.Text)
+		}
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("proxy still has %v active connection(s) after 5s; sessions did not finish", n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
 
 var grpcStartDropPhases = []string{"pre_pipeline", "post_pipeline"}
 
@@ -114,7 +138,8 @@ func TestE2E_PluginDropGRPCWebStart_H2_ResetsStream(t *testing.T) {
 			if !strings.Contains(err.Error(), "CANCEL") {
 				t.Errorf("dropped gRPC-Web call err = %v; want an RST_STREAM(CANCEL) stream error", err)
 			}
-			settle()
+			// sendGRPCWebH2 has already closed its client connection.
+			waitSessionsDone(t, h)
 			if got := h.GRPCWebObservedHits.Requests(); got != 0 {
 				t.Errorf("upstream requests = %d, want 0", got)
 			}
@@ -139,6 +164,9 @@ func TestE2E_PluginDropGRPCWebStart_H1_ClosesConnection(t *testing.T) {
 			})
 			startRes := h.MustOK(t, "proxy_start", map[string]any{"listen_addr": "127.0.0.1:0"})
 			proxyAddr, _ := startRes.Decoded["listen_addr"].(string)
+			if proxyAddr == "" {
+				t.Fatalf("proxy_start: missing listen_addr in result: %s", startRes.Text)
+			}
 
 			body := string(grpcweb.EncodeFrame(false, false, []byte("hi")))
 			req := fmt.Sprintf("POST http://%s/pkg.Echo/Say HTTP/1.1\r\nHost: %s\r\nContent-Type: application/grpc-web\r\nContent-Length: %d\r\n\r\n%s",
@@ -167,7 +195,8 @@ func TestE2E_PluginDropGRPCWebStart_H1_ClosesConnection(t *testing.T) {
 			if elapsed > grpcWebBlockedMaxWait {
 				t.Errorf("client connection closed after %v, want < %v", elapsed, grpcWebBlockedMaxWait)
 			}
-			settle()
+			_ = c.Close()
+			waitSessionsDone(t, h)
 			if n := received.Load(); n != 0 {
 				t.Errorf("upstream received %d bytes (head %q), want 0", n, lastHead())
 			}
@@ -201,7 +230,8 @@ func TestE2E_PluginDropGRPCStart_ResetsStream(t *testing.T) {
 					t.Errorf("call %d took %v; want < %v", i, elapsed, grpcWebBlockedMaxWait)
 				}
 			}
-			settle()
+			_ = cc.Close()
+			waitSessionsDone(t, h)
 			if got := h.GRPCObservedHits.Total(); got != 0 {
 				t.Errorf("upstream hits = %d, want 0", got)
 			}
