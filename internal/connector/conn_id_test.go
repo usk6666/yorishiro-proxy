@@ -47,12 +47,18 @@ func assertStackAdoptsConnID(t *testing.T, stack *ConnectionStack, want string) 
 	if stack.ConnID != want {
 		t.Errorf("stack.ConnID = %q, want %q (the ctx conn ID)", stack.ConnID, want)
 	}
+	// A TLS MITM h2 stack keeps its (poolable) upstream h2 Layer outside
+	// the upstream side stack; on a fresh dial it is this connection's.
+	upstreamLayers := append([]layer.Layer(nil), stack.upstream.layers...)
+	if h2 := stack.UpstreamH2Layer(); h2 != nil {
+		upstreamLayers = append(upstreamLayers, h2)
+	}
 	for _, side := range []struct {
 		name   string
 		layers []layer.Layer
 	}{
 		{"client", stack.client.layers},
-		{"upstream", stack.upstream.layers},
+		{"upstream", upstreamLayers},
 	} {
 		stamped := 0
 		for _, l := range side.layers {
