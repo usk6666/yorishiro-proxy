@@ -119,8 +119,10 @@ type Deps struct {
 	RecordScope *flow.RecordScope
 
 	// RateLimiter is the rate-limit policy applied per connection at the
-	// CONNECT, plain-HTTP forward and SOCKS5 gates and on every
-	// transparent-listener route (USK-1374). nil = unlimited.
+	// CONNECT, plain-HTTP forward and SOCKS5 gates, on every
+	// transparent-listener route (USK-1374) and at every tcp_forwards
+	// accept (carried to the forward listeners on Stack.RateLimiter).
+	// nil = unlimited.
 	RateLimiter *connector.RateLimiter
 
 	// BudgetManager enforces the diagnostic-session budget
@@ -402,6 +404,17 @@ type Stack struct {
 	// (USK-1161). May be nil (no tracking).
 	LiveConns *connector.LiveConns
 
+	// RateLimiter is the Policy / Agent rate-limit policy (the same
+	// instance as Deps.RateLimiter). TCP forward listeners piggybacking on
+	// this Stack check it once per accepted connection, after the scope
+	// gate. May be nil (unlimited).
+	RateLimiter *connector.RateLimiter
+
+	// blockedRecorder records connections a gate refused before any
+	// Envelope existed (the tcp_forwards rate-limit refusals). Nil when
+	// FlowStore is nil.
+	blockedRecorder *blockedConnRecorder
+
 	// TransparentMode is "redirect" for a transparent listener, empty
 	// otherwise (USK-1316).
 	TransparentMode string
@@ -480,6 +493,10 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	// (header deadline with bytes received, 414, 431) before any Envelope
 	// exists. Called from every HTTP/1 exchange loop.
 	headRecorder := buildRequestHeadRecorder(deps.FlowStore, deps.RecordScope, listenerName, logger)
+
+	// Recorder for connections a listener-level gate refuses before any
+	// Envelope exists; the tcp_forwards rate-limit gate uses it.
+	blockedRecorder := newBlockedConnRecorder(deps.FlowStore, listenerName, logger, deps.RecordScope)
 
 	// proxybuild.Listener wraps the FullListener so it can interpose
 	// connection.on_connect / on_disconnect lifecycle hooks AND host the
@@ -623,6 +640,8 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		requestHeadRecorder:   headRecorder,
 		Scope:                 deps.Scope,
 		LiveConns:             deps.LiveConns,
+		RateLimiter:           deps.RateLimiter,
+		blockedRecorder:       blockedRecorder,
 		TransparentMode:       transparentModeOf(transparent),
 	}, nil
 }

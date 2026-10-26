@@ -151,16 +151,21 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 
 	if allowed, reason := tcpForwardScopeCheck(scope, entry.target, upstreamTLS, tcpForwardProtocol(entry.fc)); !allowed {
 		logger.Info("tcp forward target blocked by scope", "reason", reason)
-		rejectTCPForwardConn(entry, conn, logger)
+		rejectTCPForwardConn(entry, conn, tcpForwardDenyResponse, logger)
 		return ctx, func() {}, false
 	}
 
 	// Mint the conn ID here and carry it on ctx so the live-connection
-	// registry's close / revoke logs and the handlers' logs and recorded
-	// flows share one conn_id (the handlers reuse it via
-	// connector.ConnIDOrGenerate, and the stack builders adopt it).
+	// registry's close / revoke logs, the handlers' logs, recorded flows
+	// and a rate-limit refusal's Stream share one conn_id (the handlers
+	// and the refusal recorder reuse it via connector.ConnIDOrGenerate,
+	// and the stack builders adopt it).
 	connID := connector.GenerateConnID()
 	ctx = connector.ContextWithConnID(ctx, connID)
+
+	if tcpForwardRateLimited(ctx, stack, entry, conn, logger) {
+		return ctx, func() {}, false
+	}
 	rctx, release, err := stack.LiveConns.Register(ctx, connector.LiveConn{
 		ConnID:   connID,
 		Listener: parentListenerName,
@@ -178,7 +183,7 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 	if err != nil {
 		logger.Info("tcp forward target blocked by scope (policy changed during admission)", "error", err)
 		release()
-		rejectTCPForwardConn(entry, conn, logger)
+		rejectTCPForwardConn(entry, conn, tcpForwardDenyResponse, logger)
 		return ctx, func() {}, false
 	}
 	// USK-1278 review S-1: the caller defers this for the whole forward
@@ -191,12 +196,13 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 	}, true
 }
 
-// rejectTCPForwardConn answers a denied forward connection and closes it.
-// A plaintext http / websocket / sse forward gets the canned 403 (written
-// without reading the request); every other arm — raw, auto, http2, grpc
-// and every tls=true entry, whose client TLS is not terminated — is closed
-// with no byte written.
-func rejectTCPForwardConn(entry *tcpForwardEntry, conn net.Conn, logger *slog.Logger) {
+// rejectTCPForwardConn answers a refused forward connection and closes
+// it. A plaintext http / websocket / sse forward gets resp — the scope
+// gate's canned 403 or the rate-limit gate's 429 — written without reading
+// the request; every other arm — raw, auto, http2, grpc and every tls=true
+// entry, whose client TLS is not terminated — is closed with no byte
+// written (a FIN, not a RST).
+func rejectTCPForwardConn(entry *tcpForwardEntry, conn net.Conn, resp []byte, logger *slog.Logger) {
 	defer conn.Close()
 	if entry.fc == nil || entry.fc.TLS {
 		return
@@ -207,12 +213,13 @@ func rejectTCPForwardConn(entry *tcpForwardEntry, conn net.Conn, logger *slog.Lo
 		return
 	}
 	_ = conn.SetDeadline(time.Now().Add(tcpForwardDenyDrainTimeout))
-	if _, err := conn.Write(tcpForwardDenyResponse); err != nil {
-		logger.Debug("tcp forward scope 403 write failed", "error", err)
+	if _, err := conn.Write(resp); err != nil {
+		logger.Debug("tcp forward refusal write failed", "error", err)
 		return
 	}
 	// Half-close and drain what the client already sent, so the close is
-	// a FIN rather than a RST that would discard the 403 at the client.
+	// a FIN rather than a RST that would discard the response at the
+	// client.
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
 	}
