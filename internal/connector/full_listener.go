@@ -301,7 +301,7 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 	ctx = ContextWithListenerName(ctx, fl.name)
 	ctx = ContextWithLogger(ctx, connLogger)
 
-	if fl.originalDst != nil && fl.onTransparent != nil {
+	if fl.transparent() {
 		fl.handleTransparentConn(ctx, conn, pc, connLogger, connStart)
 		return
 	}
@@ -355,6 +355,11 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// transparent reports whether fl is a transparent listener (USK-1316).
+func (fl *FullListener) transparent() bool {
+	return fl.originalDst != nil && fl.onTransparent != nil
+}
+
 // handleTransparentConn is handleConn for a transparent listener
 // (USK-1316): no protocol detection and no peek deadline (the transparent
 // handler peeks with its own short deadline and treats silence as a
@@ -398,6 +403,9 @@ func (fl *FullListener) handleTransparentConn(ctx context.Context, conn net.Conn
 // signal for raw TCP, and h2c 503 over HTTP/2 SETTINGS/HEADERS frames is a
 // follow-up (out of scope per USK-906).
 //
+// USK-1379: on a transparent listener the original destination is
+// resolved first and reported as RejectInfo.OriginalDst.
+//
 // USK-1142: for HTTP/1.x and CONNECT the request line is read (never the
 // headers) under the same rejectPeekTimeout deadline, so the refused
 // request-target can be reported verbatim to OnReject. The rejection is
@@ -420,6 +428,20 @@ func (fl *FullListener) handleRejection(conn net.Conn, maxConns int) {
 		DetectedKind:   ProtocolUnknown,
 		MaxConnections: maxConns,
 		At:             fl.now(),
+	}
+
+	// USK-1379: on a transparent listener the refused connection's
+	// original destination is the only record of where it was bound.
+	// Resolve it before reading a byte, with the same validation as the
+	// accepted path; an unusable one leaves OriginalDst empty and the
+	// rejection is recorded as usual.
+	if fl.transparent() {
+		if dst, err := resolveTransparentDst(fl.originalDst, conn); err == nil {
+			info.OriginalDst = dst.String()
+		} else {
+			fl.logger.Debug("capacity rejection: original destination not resolved",
+				"remote_addr", info.RemoteAddr, "reason", err.Error())
+		}
 	}
 
 	// Short peek deadline so a stalled client cannot tie up the rejection

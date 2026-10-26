@@ -172,6 +172,7 @@ func (c *ConnectionRejections) Record(info connector.RejectInfo) {
 		Method:          info.Method,
 		Target:          info.Target,
 		TargetTruncated: info.TargetTruncated,
+		OriginalDst:     info.OriginalDst,
 		Wrote503:        info.WroteResponse,
 		MaxConnections:  info.MaxConnections,
 		Recorded:        recorded,
@@ -381,6 +382,9 @@ func (c *ConnectionRejections) write(rec rejectionRecord) {
 	if info.ForwardPort != "" {
 		tags["forward_port"] = info.ForwardPort
 	}
+	if info.OriginalDst != "" {
+		tags[connector.TagOriginalDst] = info.OriginalDst
+	}
 	tags["wrote_503"] = strconv.FormatBool(info.WroteResponse)
 
 	st := &flow.Stream{
@@ -516,6 +520,9 @@ type ConnectionRejectionEntry struct {
 	Target string `json:"target,omitempty"`
 	// TargetTruncated reports that Target was cut at 512 bytes.
 	TargetTruncated bool `json:"target_truncated,omitempty"`
+	// OriginalDst is the original destination of a connection refused on
+	// a transparent listener (host:port), when it was resolvable.
+	OriginalDst string `json:"original_dst,omitempty"`
 	// Wrote503 reports that a 503 response was written to the client.
 	Wrote503 bool `json:"wrote_503"`
 	// MaxConnections is the cap in force at the time.
