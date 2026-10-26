@@ -863,7 +863,9 @@ func TestProxyStart_RequestTimeoutMs_Validation(t *testing.T) {
 		{name: "normal value", value: 60000, wantErr: false},
 		{name: "maximum valid", value: 600000, wantErr: false},
 		{name: "below minimum", value: 99, wantErr: true},
-		{name: "zero", value: 0, wantErr: true},
+		// USK-1185: 0 disables the bound (was rejected before).
+		{name: "zero disables", value: 0, wantErr: false},
+		{name: "one", value: 1, wantErr: true},
 		{name: "negative", value: -1, wantErr: true},
 		{name: "above maximum", value: 600001, wantErr: true},
 	}
@@ -1775,8 +1777,10 @@ func TestProxyStart_ResetsLimitsAndTimeoutsOnRestart(t *testing.T) {
 	if got := manager.PeekTimeout(); got != 30*time.Second {
 		t.Errorf("peek_timeout after restart = %v, want 30s (default)", got)
 	}
-	if got := mockTimeout.timeout; got != 60*time.Second {
-		t.Errorf("request_timeout after restart = %v, want 60s (default)", got)
+	// USK-1185: an omitted request_timeout_ms keeps the current value
+	// (previously proxy_start reset it to 60s).
+	if got := mockTimeout.timeout; got != 10*time.Second {
+		t.Errorf("request_timeout after restart = %v, want 10s (kept; omitted fields do not reset it)", got)
 	}
 }
 

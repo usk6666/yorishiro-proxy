@@ -94,7 +94,8 @@ Parameters (key=value):
   tls_fingerprint=<prof>  TLS fingerprint profile (chrome, firefox, safari, edge, random, none)
   max_connections=<n>     Max concurrent connections (default: 512)
   peek_timeout_ms=<n>     Protocol detection timeout in ms (default: 30000)
-  request_timeout_ms=<n>  Request-head (line + headers / CONNECT / TLS handshake) timeout in ms (default: 60000)
+  request_timeout_ms=<n>  Request-head (line + headers / CONNECT / TLS handshake) timeout in ms; 0 = disabled (default: 60000)
+  client_idle_timeout_ms=<n> HTTP/1.x keep-alive wait for the next request in ms; 0 = disabled (default: 120000)
 
 Examples:
   yorishiro-proxy client proxy_start listen_addr=127.0.0.1:8080
@@ -121,7 +122,8 @@ Parameters (key=value):
   tls_fingerprint=<profile>     TLS fingerprint profile (chrome, firefox, safari, edge, random, none)
   max_connections=<n>           Max concurrent connections
   peek_timeout_ms=<n>           Protocol detection timeout in ms
-  request_timeout_ms=<n>        Request-head (line + headers / CONNECT / TLS handshake) timeout in ms
+  request_timeout_ms=<n>        Request-head (line + headers / CONNECT / TLS handshake) timeout in ms; 0 = disabled
+  client_idle_timeout_ms=<n>    HTTP/1.x keep-alive wait for the next request in ms; 0 = disabled
 
 TLS passthrough (dot-notation):
   tls_passthrough.add=<hosts>       (merge) Comma-separated patterns to add

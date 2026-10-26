@@ -154,6 +154,10 @@ type CONNECTHandlerConfig struct {
 	// static InnerPeekTimeout / DefaultInnerPeekTimeout.
 	InnerPeekTimeoutProvider func() time.Duration
 
+	// InnerPeekTimeoutDisabled, when non-nil and true, arms no inner-byte
+	// peek deadline at all (request_timeout_ms: 0, USK-1185).
+	InnerPeekTimeoutDisabled func() bool
+
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -199,11 +203,16 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		// written only after the policy gates admit the target, USK-1246).
 		// USK-1162: bound the CONNECT request head by request_timeout_ms
 		// so a trickling client cannot hold the slot (nil-safe BuildCfg).
-		armed := cfg.BuildCfg.EffectiveRequestHeaderTimeout()
+		// USK-1185: request_timeout_ms: 0 arms no deadline (armed stays 0).
+		armed, bounded := cfg.BuildCfg.ClientRequestHeadDeadline()
 		started := time.Now()
-		_ = pc.SetReadDeadline(started.Add(armed))
+		if bounded {
+			_ = pc.SetReadDeadline(started.Add(armed))
+		}
 		target, err := cfg.Negotiator.ReadRequest(ctx, pc)
-		_ = pc.SetReadDeadline(time.Time{})
+		if bounded {
+			_ = pc.SetReadDeadline(time.Time{})
+		}
 		if err != nil {
 			if errors.Is(err, ErrNotCONNECT) {
 				connLogger.Debug("not a CONNECT request", "error", err)
@@ -462,6 +471,7 @@ func connectShouldRunTLSMITM(ctx context.Context, cfg CONNECTHandlerConfig, pc *
 	return dispatchInnerProtocol(ctx, pc, ut.Dial, innerDispatchConfig{
 		PeekTimeout:         cfg.InnerPeekTimeout,
 		PeekTimeoutProvider: cfg.InnerPeekTimeoutProvider,
+		PeekTimeoutDisabled: cfg.InnerPeekTimeoutDisabled,
 		BuildCfg:            cfg.BuildCfg,
 		OnStack:             cfg.OnStack,
 		OnHTTP2Stack:        cfg.OnHTTP2Stack,

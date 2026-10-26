@@ -62,6 +62,10 @@ type SOCKS5HandlerConfig struct {
 	// CONNECTHandlerConfig.InnerPeekTimeoutProvider.
 	InnerPeekTimeoutProvider func() time.Duration
 
+	// InnerPeekTimeoutDisabled, when non-nil and true, arms no inner-byte
+	// peek deadline at all (request_timeout_ms: 0, USK-1185).
+	InnerPeekTimeoutDisabled func() bool
+
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
 
@@ -209,6 +213,7 @@ func socks5ShouldRunTLSMITM(ctx context.Context, cfg SOCKS5HandlerConfig, pc *Pe
 	return dispatchInnerProtocol(ctx, pc, ut.Dial, innerDispatchConfig{
 		PeekTimeout:         cfg.InnerPeekTimeout,
 		PeekTimeoutProvider: cfg.InnerPeekTimeoutProvider,
+		PeekTimeoutDisabled: cfg.InnerPeekTimeoutDisabled,
 		BuildCfg:            cfg.BuildCfg,
 		OnStack:             cfg.OnStack,
 		OnHTTP2Stack:        cfg.OnHTTP2Stack,

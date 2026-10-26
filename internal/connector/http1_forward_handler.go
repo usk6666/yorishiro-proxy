@@ -57,6 +57,10 @@ type HTTP1ForwardHandlerConfig struct {
 	// static RequestTimeout / package default. (USK-844)
 	RequestTimeoutProvider func() time.Duration
 
+	// RequestTimeoutDisabled, when non-nil and true, arms no target-peek
+	// deadline at all (request_timeout_ms: 0, USK-1185).
+	RequestTimeoutDisabled func() bool
+
 	// OnRequestHeadFailure is invoked when the target peek is cut off by
 	// its deadline after bytes arrived (USK-1189). head carries the bytes
 	// peeked and the 400 the handler returned. Nil disables.
@@ -88,6 +92,8 @@ const forwardPeekTimeout = 30 * time.Second
 // resolveForwardPeekTimeout returns the effective read-deadline for the
 // header-section peek on each invocation of the forward handler. Precedence
 // (USK-844):
+//  0. cfg.RequestTimeoutDisabled reporting true → 0: no deadline at all
+//     (request_timeout_ms: 0, USK-1185).
 //  1. cfg.RequestTimeoutProvider (runtime hot-reload via Manager).
 //  2. cfg.RequestTimeout (boot-time value threaded via proxybuild.Deps).
 //  3. forwardPeekTimeout package default (30s zero-config).
@@ -95,6 +101,9 @@ const forwardPeekTimeout = 30 * time.Second
 // Non-positive values from the provider or the static field collapse to the
 // next tier so a "0 = default" wire shape is preserved end-to-end.
 func resolveForwardPeekTimeout(cfg HTTP1ForwardHandlerConfig) time.Duration {
+	if cfg.RequestTimeoutDisabled != nil && cfg.RequestTimeoutDisabled() {
+		return 0
+	}
 	if cfg.RequestTimeoutProvider != nil {
 		if d := cfg.RequestTimeoutProvider(); d > 0 {
 			return d
@@ -148,12 +157,17 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 		// FullListener cleared its detection deadline, this handler owns
 		// per-exchange timeouts. Operator overrides flow through
 		// resolveForwardPeekTimeout so a runtime configure { request_timeout_ms }
-		// reaches this read deadline (USK-844).
+		// reaches this read deadline (USK-844). Zero means
+		// request_timeout_ms is disabled: no deadline (USK-1185).
 		deadline := resolveForwardPeekTimeout(cfg)
 		started := time.Now()
-		_ = pc.SetReadDeadline(started.Add(deadline))
+		if deadline > 0 {
+			_ = pc.SetReadDeadline(started.Add(deadline))
+		}
 		target, perr := peekForwardTarget(pc)
-		_ = pc.SetReadDeadline(time.Time{})
+		if deadline > 0 {
+			_ = pc.SetReadDeadline(time.Time{})
+		}
 		if perr != nil {
 			connLogger.Debug("plain HTTP: peek target failed", "error", perr)
 			resp := forwardErrorResponse(400, "Bad Request",

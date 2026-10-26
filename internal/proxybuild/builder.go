@@ -526,6 +526,8 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		// to zero by a future caller.
 		InnerPeekTimeout:         deps.RequestTimeout,
 		InnerPeekTimeoutProvider: wrapper.RequestTimeout,
+		// USK-1185: request_timeout_ms: 0 arms no inner-peek deadline.
+		InnerPeekTimeoutDisabled: wrapper.RequestTimeoutDisabled,
 		Logger:                   logger,
 	})
 	// USK-770: prefer the process-singleton SOCKS5Negotiator supplied via
@@ -557,6 +559,8 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		// CONNECTHandlerConfig.InnerPeekTimeoutProvider for the precedence.
 		InnerPeekTimeout:         deps.RequestTimeout,
 		InnerPeekTimeoutProvider: wrapper.RequestTimeout,
+		// USK-1185: request_timeout_ms: 0 arms no inner-peek deadline.
+		InnerPeekTimeoutDisabled: wrapper.RequestTimeoutDisabled,
 		Logger:                   logger,
 		PluginV2Engine:           deps.PluginV2Engine,
 	})
@@ -573,6 +577,8 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		OnStack:                buildOnStack(p, deps, headRecorder, logger),
 		RequestTimeout:         deps.RequestTimeout,
 		RequestTimeoutProvider: wrapper.RequestTimeout,
+		// USK-1185: request_timeout_ms: 0 arms no target-peek deadline.
+		RequestTimeoutDisabled: wrapper.RequestTimeoutDisabled,
 		// USK-1189: a target peek cut off by its deadline is recorded
 		// with the 400 the handler returns.
 		OnRequestHeadFailure: connectorRequestHeadCallback(headRecorder),
@@ -2725,7 +2731,7 @@ func buildTLSStackBuildErrorRecorder(store flow.Writer, scope *flow.RecordScope,
 // The caller gates on errors.Is(err, context.DeadlineExceeded) AND
 // FailureReason="client_tls_error": the three client handshake sites
 // (performClientMITM, the raw passthrough builder, tcp_forwards TLS) are
-// bounded only by a context.WithTimeout of EffectiveRequestHeaderTimeout,
+// bounded only by BuildConfig.ClientHandshakeContext (request_timeout_ms),
 // and crypto/tls returns that ctx's error. The FailureReason gate keeps
 // upstream dial / handshake timeouts out — a net timeout error also
 // satisfies errors.Is(context.DeadlineExceeded). context.Canceled
@@ -2739,7 +2745,8 @@ func addTLSHandshakeTimeoutTags(tags map[string]string, buildCfg *connector.Buil
 	tags["phase"] = "tls_handshake"
 	tags["closed_by"] = "proxy"
 	tags["timeout"] = "request_timeout"
-	if buildCfg != nil {
-		tags["request_timeout_ms"] = strconv.FormatInt(buildCfg.EffectiveRequestHeaderTimeout().Milliseconds(), 10)
+	// USK-1185: nothing was armed while request_timeout_ms is disabled.
+	if d, ok := buildCfg.ClientRequestHeadDeadline(); buildCfg != nil && ok {
+		tags["request_timeout_ms"] = strconv.FormatInt(d.Milliseconds(), 10)
 	}
 }

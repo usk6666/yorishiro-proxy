@@ -113,6 +113,7 @@ export interface ProxyStartParams {
   max_connections?: number | null;
   peek_timeout_ms?: number | null;
   request_timeout_ms?: number | null;
+  client_idle_timeout_ms?: number | null;
 }
 
 /** Response from the proxy_start tool. */
@@ -295,6 +296,7 @@ export interface ConfigureParams {
   max_connections?: number | null;
   peek_timeout_ms?: number | null;
   request_timeout_ms?: number | null;
+  client_idle_timeout_ms?: number | null;
   client_cert?: ConfigureClientCert;
 }
 
@@ -339,6 +341,7 @@ export interface ConfigureResult {
   max_connections?: number;
   peek_timeout_ms?: number;
   request_timeout_ms?: number;
+  client_idle_timeout_ms?: number;
   client_cert?: {
     cert_path?: string;
     key_path?: string;
@@ -674,6 +677,8 @@ export interface StatusResult {
   max_connections: number;
   peek_timeout_ms: number;
   request_timeout_ms: number;
+  /** 0 = disabled (USK-1185). Absent on servers that predate the field. */
+  client_idle_timeout_ms?: number;
   total_flows: number;
   db_size_bytes: number;
   uptime_seconds: number;
@@ -724,6 +729,8 @@ export interface ConfigResult {
   max_connections: number;
   peek_timeout_ms: number;
   request_timeout_ms: number;
+  /** 0 = disabled (USK-1185). Absent on servers that predate the field. */
+  client_idle_timeout_ms?: number;
   tls_fingerprint: string;
   /**
    * Current intercept HoldQueue settings (USK-977). Mirrors the

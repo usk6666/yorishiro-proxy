@@ -148,6 +148,32 @@ const transparentDialTimeout = 30 * time.Second
 // the HTTP route when a Host must admit the connection.
 const transparentHeadTimeout = forwardPeekTimeout
 
+// transparentHeadTimeoutOverride replaces transparentHeadTimeout when
+// positive. Set only by SetTransparentHeadTimeoutForTest.
+var transparentHeadTimeoutOverride atomic.Int64
+
+// SetTransparentHeadTimeoutForTest seeds the transparent pre-dial
+// request-head bound with d so tests can measure past it without waiting
+// 30s (USK-1185). It returns a func restoring the previous value. Tests
+// only.
+func SetTransparentHeadTimeoutForTest(d time.Duration) (restore func()) {
+	prev := transparentHeadTimeoutOverride.Swap(int64(d))
+	return func() { transparentHeadTimeoutOverride.Store(prev) }
+}
+
+// headBound returns the pre-dial request-head bound, or 0 (no deadline)
+// when request_timeout_ms is disabled (USK-1185). The enabled bound stays
+// the fixed transparentHeadTimeout, not request_timeout_ms.
+func (h *TransparentHandler) headBound() time.Duration {
+	if _, ok := h.cfg.BuildCfg.ClientRequestHeadDeadline(); !ok {
+		return 0
+	}
+	if d := time.Duration(transparentHeadTimeoutOverride.Load()); d > 0 {
+		return d
+	}
+	return transparentHeadTimeout
+}
+
 // Transparent audit classifications.
 const (
 	// TransparentFailureScope is the FailureReason of a TargetScope refusal.
@@ -411,7 +437,7 @@ func (h *TransparentHandler) handleHTTP(ctx context.Context, pc *PeekConn, dst n
 	case !denyOK:
 		v = refuseScope(reason)
 	case !full:
-		head = readTransparentRequestHead(pc, transparentHeadTimeout)
+		head = readTransparentRequestHead(pc, h.headBound())
 		v = h.scopeHTTPNames(dst, head)
 		if v.allowed {
 			v = h.bindNames(ctx, dst, head.names())
@@ -422,7 +448,7 @@ func (h *TransparentHandler) handleHTTP(ctx context.Context, pc *PeekConn, dst n
 		// on the first request must still not get the target contacted.
 		// A head that cannot be read whole within the bound is left to
 		// HTTPScopeStep, which checks every request after the dial.
-		head = readTransparentRequestHead(pc, transparentHeadTimeout)
+		head = readTransparentRequestHead(pc, h.headBound())
 		if head.complete {
 			if ok, r := h.checkHTTPNames(dst, head); !ok {
 				v = refuseScope(r)

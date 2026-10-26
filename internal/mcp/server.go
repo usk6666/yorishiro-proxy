@@ -84,11 +84,20 @@ type upstreamProxySetter interface {
 	SetUpstreamProxy(proxyURL *url.URL)
 }
 
-// requestTimeoutSetter is implemented by protocol handlers that support
-// request timeout configuration (HTTP/1.x and HTTP/2 handlers).
+// requestTimeoutSetter is implemented by the live data path
+// (proxybuild.Manager) to receive the client-side timeouts:
+// request_timeout_ms (USK-1162) and client_idle_timeout_ms (USK-1185).
+// "Disabled" (MCP value 0) is a state of its own: Set*(0) means "unset /
+// default", never "disabled".
 type requestTimeoutSetter interface {
 	SetRequestTimeout(d time.Duration)
 	RequestTimeout() time.Duration
+	DisableRequestTimeout()
+	RequestTimeoutDisabled() bool
+	SetClientIdleTimeout(d time.Duration)
+	ClientIdleTimeout() time.Duration
+	DisableClientIdleTimeout()
+	ClientIdleTimeoutDisabled() bool
 }
 
 // targetScopeSetter is implemented by protocol handlers that support

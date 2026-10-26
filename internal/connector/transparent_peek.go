@@ -112,14 +112,19 @@ func (h transparentRequestHead) names() []string {
 }
 
 // readTransparentRequestHead peeks the first request head (bounded by
-// peekHeaderSize and timeout) without consuming it and extracts its
-// names. Parsing is tolerant like the HTTP/1 Layer's: no net/url, no
+// peekHeaderSize and timeout; a non-positive timeout arms no deadline,
+// USK-1185) without consuming it and extracts its names. Parsing is
+// tolerant like the HTTP/1 Layer's: no net/url, no
 // rejection of escapes or control bytes — a head that cannot be read
 // simply yields no names (and so no admitting name).
 func readTransparentRequestHead(pc *PeekConn, timeout time.Duration) transparentRequestHead {
-	_ = pc.SetReadDeadline(time.Now().Add(timeout))
+	if timeout > 0 {
+		_ = pc.SetReadDeadline(time.Now().Add(timeout))
+	}
 	buf, _ := peekUntilHeadersEnd(pc, peekHeaderSize)
-	_ = pc.SetReadDeadline(time.Time{})
+	if timeout > 0 {
+		_ = pc.SetReadDeadline(time.Time{})
+	}
 	var head transparentRequestHead
 	if idx := bytes.Index(buf, []byte("\r\n\r\n")); idx >= 0 {
 		buf = buf[:idx]

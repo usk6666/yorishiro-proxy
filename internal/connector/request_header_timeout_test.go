@@ -57,3 +57,106 @@ func TestDefaultRequestHeaderTimeout_MatchesConfigDefault(t *testing.T) {
 		t.Errorf("DefaultRequestHeaderTimeout = %v, want config.Default().RequestTimeout = %v", DefaultRequestHeaderTimeout, want)
 	}
 }
+
+// USK-1185: request_timeout_ms: 0 disables the client request-head bound.
+// "Disabled" is a separate state from the internal 0 ("unset / default"),
+// resolved by ClientRequestHeadDeadline.
+func TestBuildConfig_ClientRequestHeadDeadline(t *testing.T) {
+	t.Run("default enabled", func(t *testing.T) {
+		c := &BuildConfig{}
+		if d, ok := c.ClientRequestHeadDeadline(); !ok || d != DefaultRequestHeaderTimeout {
+			t.Errorf("ClientRequestHeadDeadline = (%v, %v), want (%v, true)", d, ok, DefaultRequestHeaderTimeout)
+		}
+	})
+	t.Run("static enabled", func(t *testing.T) {
+		c := &BuildConfig{RequestHeaderTimeout: 3 * time.Second}
+		if d, ok := c.ClientRequestHeadDeadline(); !ok || d != 3*time.Second {
+			t.Errorf("ClientRequestHeadDeadline = (%v, %v), want (3s, true)", d, ok)
+		}
+	})
+	t.Run("disabled overrides static", func(t *testing.T) {
+		c := &BuildConfig{RequestHeaderTimeout: 3 * time.Second}
+		c.DisableRequestHeaderTimeout()
+		if _, ok := c.ClientRequestHeadDeadline(); ok {
+			t.Error("ClientRequestHeadDeadline reports enabled after DisableRequestHeaderTimeout")
+		}
+	})
+	t.Run("positive set re-enables", func(t *testing.T) {
+		c := &BuildConfig{RequestHeaderTimeout: 3 * time.Second}
+		c.DisableRequestHeaderTimeout()
+		c.SetRequestHeaderTimeout(7 * time.Second)
+		if d, ok := c.ClientRequestHeadDeadline(); !ok || d != 7*time.Second {
+			t.Errorf("ClientRequestHeadDeadline = (%v, %v), want (7s, true)", d, ok)
+		}
+	})
+	t.Run("set zero clears override and disabled", func(t *testing.T) {
+		c := &BuildConfig{RequestHeaderTimeout: 3 * time.Second}
+		c.SetRequestHeaderTimeout(9 * time.Second)
+		c.DisableRequestHeaderTimeout()
+		c.SetRequestHeaderTimeout(0)
+		if d, ok := c.ClientRequestHeadDeadline(); !ok || d != 3*time.Second {
+			t.Errorf("ClientRequestHeadDeadline = (%v, %v), want static (3s, true)", d, ok)
+		}
+	})
+	t.Run("nil receiver", func(t *testing.T) {
+		var c *BuildConfig
+		c.DisableRequestHeaderTimeout() // must not panic
+		if d, ok := c.ClientRequestHeadDeadline(); !ok || d != DefaultRequestHeaderTimeout {
+			t.Errorf("nil ClientRequestHeadDeadline = (%v, %v), want (%v, true)", d, ok, DefaultRequestHeaderTimeout)
+		}
+	})
+}
+
+// USK-1185: client_idle_timeout_ms — the keep-alive wait for the first byte
+// of the next request. Default 120s; 0 on the MCP surface disables it.
+func TestBuildConfig_ClientIdleDeadline(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		c := &BuildConfig{}
+		if d, ok := c.ClientIdleDeadline(); !ok || d != DefaultClientIdleTimeout {
+			t.Errorf("ClientIdleDeadline = (%v, %v), want (%v, true)", d, ok, DefaultClientIdleTimeout)
+		}
+		if DefaultClientIdleTimeout != 120*time.Second {
+			t.Errorf("DefaultClientIdleTimeout = %v, want 120s", DefaultClientIdleTimeout)
+		}
+	})
+	t.Run("set value", func(t *testing.T) {
+		c := &BuildConfig{}
+		c.SetClientIdleTimeout(5 * time.Second)
+		if d, ok := c.ClientIdleDeadline(); !ok || d != 5*time.Second {
+			t.Errorf("ClientIdleDeadline = (%v, %v), want (5s, true)", d, ok)
+		}
+	})
+	t.Run("disabled", func(t *testing.T) {
+		c := &BuildConfig{}
+		c.SetClientIdleTimeout(5 * time.Second)
+		c.DisableClientIdleTimeout()
+		if _, ok := c.ClientIdleDeadline(); ok {
+			t.Error("ClientIdleDeadline reports enabled after DisableClientIdleTimeout")
+		}
+	})
+	t.Run("positive set re-enables", func(t *testing.T) {
+		c := &BuildConfig{}
+		c.DisableClientIdleTimeout()
+		c.SetClientIdleTimeout(2 * time.Second)
+		if d, ok := c.ClientIdleDeadline(); !ok || d != 2*time.Second {
+			t.Errorf("ClientIdleDeadline = (%v, %v), want (2s, true)", d, ok)
+		}
+	})
+	t.Run("set zero restores default", func(t *testing.T) {
+		c := &BuildConfig{}
+		c.SetClientIdleTimeout(2 * time.Second)
+		c.DisableClientIdleTimeout()
+		c.SetClientIdleTimeout(0)
+		if d, ok := c.ClientIdleDeadline(); !ok || d != DefaultClientIdleTimeout {
+			t.Errorf("ClientIdleDeadline = (%v, %v), want default (%v, true)", d, ok, DefaultClientIdleTimeout)
+		}
+	})
+	t.Run("nil receiver", func(t *testing.T) {
+		var c *BuildConfig
+		c.SetClientIdleTimeout(time.Second) // must not panic
+		c.DisableClientIdleTimeout()        // must not panic
+		if d, ok := c.ClientIdleDeadline(); !ok || d != DefaultClientIdleTimeout {
+			t.Errorf("nil ClientIdleDeadline = (%v, %v), want (%v, true)", d, ok, DefaultClientIdleTimeout)
+		}
+	})
+}

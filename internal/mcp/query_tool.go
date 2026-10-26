@@ -30,6 +30,10 @@ import (
 // used when no protocol handler is registered.
 const defaultRequestTimeoutMs = 60000
 
+// defaultClientIdleTimeoutMs is the default client keep-alive idle timeout
+// in milliseconds (connector.DefaultClientIdleTimeout, USK-1185).
+const defaultClientIdleTimeoutMs = int64(connector.DefaultClientIdleTimeout / time.Millisecond)
+
 // oversizeAdvisoryThreshold is the per-message body byte length at which
 // the flow / messages handlers attach an Advisory hint suggesting that the
 // caller pass include_bodies=false or body_max_bytes=N to stay under the
@@ -2324,26 +2328,29 @@ type queryListenerStatusEntry struct {
 // surface (prewarm worker / reactive GOAWAY-driven redial / OpenStream
 // Refused retry). Same nil-vs-populated semantics as H1Upstream.
 type queryStatusResult struct {
-	Running           bool                                  `json:"running"`
-	ListenAddr        string                                `json:"listen_addr"`
-	Listeners         []queryListenerStatusEntry            `json:"listeners,omitempty"`
-	ListenerCount     int                                   `json:"listener_count"`
-	UpstreamProxy     string                                `json:"upstream_proxy"`
-	ActiveConnections int                                   `json:"active_connections"`
-	MaxConnections    int                                   `json:"max_connections"`
-	PeekTimeoutMs     int64                                 `json:"peek_timeout_ms"`
-	RequestTimeoutMs  int64                                 `json:"request_timeout_ms"`
-	TotalFlows        int                                   `json:"total_flows"`
-	DBSizeBytes       int64                                 `json:"db_size_bytes"`
-	UptimeSeconds     int64                                 `json:"uptime_seconds"`
-	CAInitialized     bool                                  `json:"ca_initialized"`
-	SOCKS5Enabled     bool                                  `json:"socks5_enabled"`
-	SOCKS5Auth        string                                `json:"socks5_auth,omitempty"`
-	TLSFingerprint    string                                `json:"tls_fingerprint"`
-	RateLimits        *queryRateLimitStatus                 `json:"rate_limits,omitempty"`
-	Budget            *queryBudgetStatus                    `json:"budget,omitempty"`
-	H1Upstream        *proxybuild.H1UpstreamMetricsSnapshot `json:"h1_upstream,omitempty"`
-	H2Upstream        *proxybuild.H2UpstreamMetricsSnapshot `json:"h2_upstream,omitempty"`
+	Running           bool                       `json:"running"`
+	ListenAddr        string                     `json:"listen_addr"`
+	Listeners         []queryListenerStatusEntry `json:"listeners,omitempty"`
+	ListenerCount     int                        `json:"listener_count"`
+	UpstreamProxy     string                     `json:"upstream_proxy"`
+	ActiveConnections int                        `json:"active_connections"`
+	MaxConnections    int                        `json:"max_connections"`
+	PeekTimeoutMs     int64                      `json:"peek_timeout_ms"`
+	RequestTimeoutMs  int64                      `json:"request_timeout_ms"`
+	// ClientIdleTimeoutMs is the HTTP/1.x keep-alive idle wait (USK-1185);
+	// 0 = disabled.
+	ClientIdleTimeoutMs int64                                 `json:"client_idle_timeout_ms"`
+	TotalFlows          int                                   `json:"total_flows"`
+	DBSizeBytes         int64                                 `json:"db_size_bytes"`
+	UptimeSeconds       int64                                 `json:"uptime_seconds"`
+	CAInitialized       bool                                  `json:"ca_initialized"`
+	SOCKS5Enabled       bool                                  `json:"socks5_enabled"`
+	SOCKS5Auth          string                                `json:"socks5_auth,omitempty"`
+	TLSFingerprint      string                                `json:"tls_fingerprint"`
+	RateLimits          *queryRateLimitStatus                 `json:"rate_limits,omitempty"`
+	Budget              *queryBudgetStatus                    `json:"budget,omitempty"`
+	H1Upstream          *proxybuild.H1UpstreamMetricsSnapshot `json:"h1_upstream,omitempty"`
+	H2Upstream          *proxybuild.H2UpstreamMetricsSnapshot `json:"h2_upstream,omitempty"`
 	// ConnectionRejections (USK-1142) reports connections the proxy
 	// refused because max_connections was saturated: cumulative totals,
 	// per-kind counts, and the most recent rejections with their target.
@@ -2442,13 +2449,9 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 
 	s.populateManagerStatus(result)
 
-	// Report request timeout from the first registered handler.
-	if rt := s.currentRequestTimeout(); rt > 0 {
-		result.RequestTimeoutMs = rt.Milliseconds()
-	} else {
-		// Default request timeout when no handler is registered.
-		result.RequestTimeoutMs = defaultRequestTimeoutMs
-	}
+	// Report the client-side timeouts (0 = disabled, USK-1185).
+	result.RequestTimeoutMs = s.currentRequestTimeoutMs()
+	result.ClientIdleTimeoutMs = s.currentClientIdleTimeoutMs()
 
 	if s.flowStore.store != nil {
 		count, err := s.flowStore.store.CountStreams(ctx, flow.StreamListOptions{})
@@ -2518,7 +2521,10 @@ type queryConfigResult struct {
 	MaxConnections   int                              `json:"max_connections"`
 	PeekTimeoutMs    int64                            `json:"peek_timeout_ms"`
 	RequestTimeoutMs int64                            `json:"request_timeout_ms"`
-	TLSFingerprint   string                           `json:"tls_fingerprint"`
+	// ClientIdleTimeoutMs is the HTTP/1.x keep-alive idle wait (USK-1185);
+	// 0 = disabled.
+	ClientIdleTimeoutMs int64  `json:"client_idle_timeout_ms"`
+	TLSFingerprint      string `json:"tls_fingerprint"`
 	// MaxRawCaptureSize echoes the per-message HTTP/1.x raw-bytes capture
 	// cap configured via Config.MaxRawCaptureSize (USK-800). Zero / omitted
 	// means the layer default (config.DefaultMaxRawCaptureSize, 2 MiB) is
@@ -2679,12 +2685,9 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		result.SSEMaxEventsPerStream = s.connector.manager.SSEMaxEventsPerStream()
 	}
 
-	if rt := s.currentRequestTimeout(); rt > 0 {
-		result.RequestTimeoutMs = rt.Milliseconds()
-	} else {
-		// Default request timeout when no handler is registered.
-		result.RequestTimeoutMs = defaultRequestTimeoutMs
-	}
+	// Client-side timeouts (0 = disabled, USK-1185).
+	result.RequestTimeoutMs = s.currentRequestTimeoutMs()
+	result.ClientIdleTimeoutMs = s.currentClientIdleTimeoutMs()
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
 	result.CaptureScope = s.currentCaptureScope()

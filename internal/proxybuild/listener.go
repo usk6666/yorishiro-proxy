@@ -41,6 +41,11 @@ type Listener struct {
 	// downstream consumer (plain-HTTP forward, CONNECT/SOCKS5 inner
 	// peek) implements when its provider returns zero.
 	requestTimeoutNs atomic.Int64
+
+	// requestTimeoutDisabled is the request_timeout_ms: 0 state (USK-1185):
+	// the handlers arm no deadline at all. Kept apart from requestTimeoutNs,
+	// whose zero means "handler default".
+	requestTimeoutDisabled atomic.Bool
 }
 
 // PluginV2Engine returns the pluginv2 Engine bound to this listener, or
@@ -128,7 +133,8 @@ func (l *Listener) RequestTimeout() time.Duration {
 // are stored verbatim — a stored zero means "fall back to handler
 // defaults", a stored negative value is treated as zero by every
 // downstream consumer (defensive: callers never write negatives, but the
-// asymmetric behaviour would be surprising).
+// asymmetric behaviour would be surprising). Every call clears a previous
+// DisableRequestTimeout (USK-1185).
 func (l *Listener) SetRequestTimeout(d time.Duration) {
 	if l == nil {
 		return
@@ -137,6 +143,29 @@ func (l *Listener) SetRequestTimeout(d time.Duration) {
 		d = 0
 	}
 	l.requestTimeoutNs.Store(int64(d))
+	l.requestTimeoutDisabled.Store(false)
+}
+
+// DisableRequestTimeout switches the plain-HTTP forward peek and the
+// CONNECT / SOCKS5 inner peek deadlines off (request_timeout_ms: 0,
+// USK-1185) until the next SetRequestTimeout. The stored timeout is
+// cleared too; disabled is a state of its own, never a stored zero.
+func (l *Listener) DisableRequestTimeout() {
+	if l == nil {
+		return
+	}
+	l.requestTimeoutNs.Store(0)
+	l.requestTimeoutDisabled.Store(true)
+}
+
+// RequestTimeoutDisabled reports whether request_timeout_ms is disabled
+// (USK-1185). The handlers' *Disabled providers read it on every
+// invocation.
+func (l *Listener) RequestTimeoutDisabled() bool {
+	if l == nil {
+		return false
+	}
+	return l.requestTimeoutDisabled.Load()
 }
 
 // Name returns the listener's name as supplied at construction.
