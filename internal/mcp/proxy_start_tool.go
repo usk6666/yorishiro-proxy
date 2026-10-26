@@ -160,9 +160,10 @@ type proxyStartInput struct {
 	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"Request-head timeout in milliseconds: HTTP/1.x request line + headers, CONNECT request, client TLS handshake, plain-HTTP and CONNECT/SOCKS5 inner peeks (0 = disabled, or 100-600000; default: 60000; omitted keeps the current value)"`
 
 	// ClientIdleTimeoutMs bounds the HTTP/1.x keep-alive wait for the first
-	// byte of the client's next request (USK-1185). 0 disables the bound;
-	// omitted keeps the current value.
-	ClientIdleTimeoutMs *int `json:"client_idle_timeout_ms,omitempty" jsonschema:"HTTP/1.x keep-alive wait for the next request's first byte in milliseconds (0 = disabled, or 100-600000; default: 120000; omitted keeps the current value)"`
+	// byte of the client's next request (USK-1185) and how long an HTTP/2
+	// client connection may have no open stream before GOAWAY (USK-1188).
+	// 0 disables the bound; omitted keeps the current value.
+	ClientIdleTimeoutMs *int `json:"client_idle_timeout_ms,omitempty" jsonschema:"Client idle bound in milliseconds: HTTP/1.x keep-alive wait for the next request's first byte, and HTTP/2 time with no open stream before GOAWAY (0 = disabled, or 100-600000; default: 120000; omitted keeps the current value)"`
 
 	// CaptureScope filters which flows are persisted to the flow store
 	// without altering wire transmission (USK-776). Use this to suppress

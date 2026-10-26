@@ -77,6 +77,18 @@ type options struct {
 	// peer's SETTINGS, which forces the scheduling that let a SETTINGS ACK
 	// precede our own SETTINGS on the wire. No production Option sets it.
 	afterLoopsStart func()
+	// clientIdleTimeout resolves the client idle bound (ServerRole only).
+	// See WithClientIdleTimeout. nil = no bound.
+	clientIdleTimeout func() (time.Duration, bool)
+	// idleGoAwayLinger overrides idleGoAwayLingerDefault. Test seam only;
+	// no production Option sets it. Zero = use the default.
+	idleGoAwayLinger time.Duration
+	// beforeAcceptPeerStream / afterRegisterPeerStream are test seams run
+	// by the reader around the registration of a new peer stream: before
+	// assemblerFor creates it, and between assemblerFor and the
+	// EventRecvHeaders transition. No production Option sets them.
+	beforeAcceptPeerStream  func(streamID uint32)
+	afterRegisterPeerStream func(streamID uint32)
 }
 
 // Option configures a Layer.
@@ -218,6 +230,16 @@ func WithGoAwayObserver(cb func()) Option {
 	return func(o *options) { o.goAwayObserver = cb }
 }
 
+// WithClientIdleTimeout bounds how long a client-facing (ServerRole)
+// connection may stay open with no open streams. fn is resolved each time
+// an idle period starts: ok=false disables the bound for that period, a
+// positive d arms it. When it elapses the Layer sends GOAWAY(NO_ERROR) with
+// the last processed client stream id and closes the connection.
+// Ignored on ClientRole Layers. nil fn (the default) means no bound.
+func WithClientIdleTimeout(fn func() (time.Duration, bool)) Option {
+	return func(o *options) { o.clientIdleTimeout = fn }
+}
+
 // BodyBufferOpts exposes the aggregator-relevant body configuration values
 // threaded into this Layer at construction time. The aggregator reads these
 // when wrapping a per-stream Channel so body accumulation respects the same
@@ -268,6 +290,10 @@ type Layer struct {
 	closeChannelOutOnce sync.Once
 
 	pendingHeaderStream uint32
+	// headerBlockOpen mirrors pendingHeaderStream != 0 for the idle
+	// goroutine, which must not read the reader-owned field (USK-1188).
+	// Written only through setPendingHeaderStream.
+	headerBlockOpen atomic.Bool
 	// pendingAsm is the assembler collecting the header block of
 	// pendingHeaderStream (nil when no block is open or the block is being
 	// discarded). Reader goroutine only.
@@ -336,6 +362,13 @@ type Layer struct {
 
 	lastErrMu sync.Mutex
 	lastErr   error
+
+	// streamsChanged (cap 1) wakes idleLoop when a stream is retired, so it
+	// can start an idle period once none is open (USK-1188). nil when the
+	// Layer runs no idleLoop.
+	streamsChanged chan struct{}
+	// idleDone is closed when idleLoop exits; nil when there is none.
+	idleDone chan struct{}
 }
 
 // Role returns the Layer's role (ServerRole or ClientRole).
@@ -686,6 +719,10 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		encoderTableSize:   local.HeaderTableSize,
 		h2Fingerprint:      fp,
 	}
+	if role == ServerRole && o.clientIdleTimeout != nil {
+		l.streamsChanged = make(chan struct{}, 1)
+		l.idleDone = make(chan struct{})
+	}
 
 	if err := l.runPreface(); err != nil {
 		_ = conn.Close()
@@ -731,12 +768,17 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 	return l, nil
 }
 
-// startLoops launches the writer and reader goroutines. Both terminate on
-// Close() (writerDone / readerDone). The afterLoopsStart hook, if set, runs
-// after both goroutines have been started (USK-1138 test seam).
+// startLoops launches the writer and reader goroutines, and the idle
+// goroutine when the client idle bound is configured (USK-1188). All
+// terminate on Close() (writerDone / readerDone / idleDone). The
+// afterLoopsStart hook, if set, runs after the goroutines have been started
+// (USK-1138 test seam).
 func (l *Layer) startLoops() {
 	go l.writerLoop()
 	go l.readerLoop()
+	if l.idleDone != nil {
+		go l.idleLoop()
+	}
 	if l.opts.afterLoopsStart != nil {
 		l.opts.afterLoopsStart()
 	}
@@ -808,9 +850,16 @@ func (l *Layer) goAwayRefusal() *layer.StreamError {
 }
 
 // Close tears down the Layer: sends GOAWAY (best-effort; skipped if the
-// writer cannot accept it within closeDrainTimeout), drains the writer, closes
-// streams, closes the connection. Safe to call multiple times.
+// writer cannot accept it within closeDrainTimeout, or if a GOAWAY was
+// already sent), drains the writer, closes streams, closes the connection.
+// Safe to call multiple times.
 func (l *Layer) Close() error {
+	return l.close(true)
+}
+
+// close is Close. waitIdle is false only when idleLoop itself closes the
+// Layer, which must not wait for its own exit.
+func (l *Layer) close(waitIdle bool) error {
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
@@ -826,8 +875,12 @@ func (l *Layer) Close() error {
 	// would never return — shutdown is not closed yet, so nothing wakes the
 	// writer, the reader, or this goroutine. Give up on GOAWAY instead and
 	// proceed to close(shutdown), which unblocks every waiter.
+	//
+	// A GOAWAY already sent (the idle GOAWAY, or one answering a connection
+	// error) is not repeated (USK-1188): the peer already knows which
+	// streams were processed.
 	last := l.conn.Streams().LastPeerStreamID()
-	if !l.enqueueWriteBounded(writeRequest{goAway: &writeGoAway{
+	if sent, _ := l.conn.GoAwaySent(); !sent && !l.enqueueWriteBounded(writeRequest{goAway: &writeGoAway{
 		lastStreamID: last,
 		code:         ErrCodeNo,
 	}}, closeDrainTimeout) {
@@ -849,6 +902,9 @@ func (l *Layer) Close() error {
 	closeErr := l.netConn.Close()
 	<-l.writerDone
 	<-l.readerDone
+	if waitIdle && l.idleDone != nil {
+		<-l.idleDone
+	}
 
 	l.broadcastShutdown()
 	return closeErr

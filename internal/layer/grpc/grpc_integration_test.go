@@ -453,6 +453,21 @@ type sessionProbe struct {
 
 	mu        sync.Mutex
 	blockedBy []string
+	// results holds every RunSession result passed to OnComplete
+	// (USK-1387: a proxy-ended RPC must report a clean end).
+	results []error
+}
+
+func (p *sessionProbe) addResult(err error) {
+	p.mu.Lock()
+	p.results = append(p.results, err)
+	p.mu.Unlock()
+}
+
+func (p *sessionProbe) sessionResults() []error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]error(nil), p.results...)
 }
 
 func (p *sessionProbe) addBlocked(v string) {
@@ -721,6 +736,7 @@ func handleProxyConn(ctx context.Context, t *testing.T, clientConn net.Conn, iss
 					},
 					OnComplete: func(cctx context.Context, streamID string, err error) {
 						if opts.probe != nil {
+							opts.probe.addResult(err)
 							defer opts.probe.completed.Add(1)
 						}
 						state := "complete"

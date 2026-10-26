@@ -30,7 +30,7 @@ import (
 // used when no protocol handler is registered.
 const defaultRequestTimeoutMs = 60000
 
-// defaultClientIdleTimeoutMs is the default client keep-alive idle timeout
+// defaultClientIdleTimeoutMs is the default client idle timeout
 // in milliseconds (connector.DefaultClientIdleTimeout, USK-1185).
 const defaultClientIdleTimeoutMs = int64(connector.DefaultClientIdleTimeout / time.Millisecond)
 
@@ -2337,8 +2337,8 @@ type queryStatusResult struct {
 	MaxConnections    int                        `json:"max_connections"`
 	PeekTimeoutMs     int64                      `json:"peek_timeout_ms"`
 	RequestTimeoutMs  int64                      `json:"request_timeout_ms"`
-	// ClientIdleTimeoutMs is the HTTP/1.x keep-alive idle wait (USK-1185);
-	// 0 = disabled.
+	// ClientIdleTimeoutMs is the client idle bound (USK-1185): the HTTP/1.x
+	// keep-alive wait and the HTTP/2 no-open-stream wait; 0 = disabled.
 	ClientIdleTimeoutMs int64                                 `json:"client_idle_timeout_ms"`
 	TotalFlows          int                                   `json:"total_flows"`
 	DBSizeBytes         int64                                 `json:"db_size_bytes"`
@@ -2521,8 +2521,8 @@ type queryConfigResult struct {
 	MaxConnections   int                              `json:"max_connections"`
 	PeekTimeoutMs    int64                            `json:"peek_timeout_ms"`
 	RequestTimeoutMs int64                            `json:"request_timeout_ms"`
-	// ClientIdleTimeoutMs is the HTTP/1.x keep-alive idle wait (USK-1185);
-	// 0 = disabled.
+	// ClientIdleTimeoutMs is the client idle bound (USK-1185): the HTTP/1.x
+	// keep-alive wait and the HTTP/2 no-open-stream wait; 0 = disabled.
 	ClientIdleTimeoutMs int64  `json:"client_idle_timeout_ms"`
 	TLSFingerprint      string `json:"tls_fingerprint"`
 	// MaxRawCaptureSize echoes the per-message HTTP/1.x raw-bytes capture

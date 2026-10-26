@@ -250,18 +250,7 @@ func BuildPlainH2CStack(
 
 	enableConnectProtocol := resolveEnableConnectProtocol(ctx, upstreamLayer, false, connID, target)
 
-	clientH2Opts := []http2.Option{
-		http2.WithScheme("http"),
-		http2.WithEnvelopeContext(clientEnvCtx),
-		http2.WithBodySpillDir(cfg.BodySpillDir),
-		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
-		http2.WithMaxBodySize(cfg.MaxBodySize),
-		http2.WithStateReleaser(cfg.PluginV2Engine),
-		http2.WithEnableConnectProtocol(enableConnectProtocol),
-	}
-	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
-		clientH2Opts = append(clientH2Opts, mcsOpt)
-	}
+	clientH2Opts := clientH2ServerOptions(cfg, "http", clientEnvCtx, enableConnectProtocol)
 	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole, clientH2Opts...)
 	if err != nil {
 		_ = upstreamLayer.Close()

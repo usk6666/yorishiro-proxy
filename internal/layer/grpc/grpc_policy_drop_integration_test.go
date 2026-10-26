@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -283,6 +284,121 @@ register_hook("grpc", "on_start", deny)
 	if got := probe.dials.Load(); got != 0 {
 		t.Errorf("upstream dialed %d times; want 0 (plugin responded on Start)", got)
 	}
+}
+
+// loadDropPlugin writes a plugin that returns DROP from grpc.on_start and
+// loads it into a fresh Engine (USK-1387).
+func loadDropPlugin(t *testing.T, ctx context.Context) *pluginv2.Engine {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "drop.star")
+	if err := os.WriteFile(script, []byte(`
+def drop(msg, ctx):
+    return action.DROP
+
+register_hook("grpc", "on_start", drop)
+`), 0o600); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	eng := pluginv2.NewEngine(nil)
+	if err := eng.LoadPlugins(ctx, []pluginv2.PluginConfig{{Path: script, OnError: "abort"}}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	return eng
+}
+
+// assertCleanDroppedSession checks the harness probe after a plugin DROP on
+// grpc.on_start: the session finished with a nil result and the upstream was
+// never dialed.
+func assertCleanDroppedSession(t *testing.T, probe *sessionProbe, hits *atomic.Int32) {
+	t.Helper()
+	probe.waitCompleted(t, 5*time.Second)
+	for _, err := range probe.sessionResults() {
+		if err != nil {
+			t.Errorf("session result = %v; want nil (the proxy dropped the RPC on purpose)", err)
+		}
+	}
+	if got := probe.dials.Load(); got != 0 {
+		t.Errorf("upstream dialed %d times; want 0 (Start dropped before the dial)", got)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Errorf("upstream handler ran %d times; want 0", got)
+	}
+}
+
+// TestGRPC_PluginDropStart_Unary_Canceled (USK-1387): a plugin DROP on
+// grpc.on_start ends a unary RPC at Start time with no gRPC status — the
+// client stream is reset with RST_STREAM(CANCEL), surfacing as
+// codes.Canceled — the upstream is never dialed and the session ends
+// cleanly.
+func TestGRPC_PluginDropStart_Unary_Canceled(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ca, issuer := makeCA(t)
+	var hits atomic.Int32
+	srv := &echoServer{
+		unary: func(_ context.Context, req []byte) ([]byte, error) {
+			hits.Add(1)
+			return req, nil
+		},
+	}
+	upAddr, upStop := startGRPCUpstream(t, ca, issuer, srv)
+	defer upStop()
+
+	probe := &sessionProbe{}
+	proxyAddr, _ := startGRPCMITMProxy(t, ctx, ca, issuer, pipelineOpts{plugins: loadDropPlugin(t, ctx), probe: probe})
+
+	cc := dialGRPCViaProxy(ctx, t, proxyAddr, upAddr)
+	defer cc.Close()
+
+	assertBlockedUnary(t, ctx, cc, echoFullMethod(echoMethodUnary), []byte("hi"), codes.Canceled, "")
+	assertCleanDroppedSession(t, probe, &hits)
+}
+
+// TestGRPC_PluginDropStart_BidiRecvFirst_Canceled (USK-1387): a bidi client
+// that waits for the server before sending anything must not hang until its
+// own deadline when a plugin DROPs the Start — the proxy resets the stream.
+func TestGRPC_PluginDropStart_BidiRecvFirst_Canceled(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ca, issuer := makeCA(t)
+	var hits atomic.Int32
+	srv := &echoServer{
+		bidiStream: func(grpc.ServerStream) error {
+			hits.Add(1)
+			return nil
+		},
+	}
+	upAddr, upStop := startGRPCUpstream(t, ca, issuer, srv)
+	defer upStop()
+
+	probe := &sessionProbe{}
+	proxyAddr, _ := startGRPCMITMProxy(t, ctx, ca, issuer, pipelineOpts{plugins: loadDropPlugin(t, ctx), probe: probe})
+
+	cc := dialGRPCViaProxy(ctx, t, proxyAddr, upAddr)
+	defer cc.Close()
+
+	callCtx, callCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer callCancel()
+	start := time.Now()
+	desc := &grpc.StreamDesc{StreamName: echoMethodBidiStream, ServerStreams: true, ClientStreams: true}
+	cs, err := cc.NewStream(callCtx, desc, echoFullMethod(echoMethodBidiStream))
+	if err == nil {
+		var resp []byte
+		err = cs.RecvMsg(&resp)
+	}
+	elapsed := time.Since(start)
+	if err == nil || errors.Is(err, io.EOF) {
+		t.Fatalf("RecvMsg err = %v; want a Canceled stream error", err)
+	}
+	if got := status.Code(err); got != codes.Canceled {
+		t.Errorf("status code = %v (%v) after %v; want Canceled", got, err, elapsed)
+	}
+	if elapsed > blockedCallMaxWait {
+		t.Errorf("dropped bidi RPC took %v; want < %v (the proxy must reset it, not the client deadline)", elapsed, blockedCallMaxWait)
+	}
+	assertCleanDroppedSession(t, probe, &hits)
 }
 
 // TestGRPC_PluginHTTPRespond_Refused: an HTTP-shaped action.RESPOND on
