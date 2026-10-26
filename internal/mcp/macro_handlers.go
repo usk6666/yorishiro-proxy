@@ -694,10 +694,14 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 //     diagnostic budget and refuses the step with errBudgetExhausted when
 //     the budget is spent.
 //
-// A macro step has no Stream until it has been sent (the flow is recorded
-// after the response by recordMacroStepSessionDeps), so a refusal here is
-// surfaced only as the step error — no blocked_by audit Stream is written,
-// matching the existing SafetyFilter refusal on this path.
+// A refusal here is surfaced only as the step error (step_results[].error)
+// and, for the budget, in get_budget's counters. Writing no blocked_by audit
+// Stream is a deliberate scope choice, not a technical limit: resend_* /
+// fuzz_* pre-allocate a metadata-only Stream for their refusals
+// (recordBlockedStream / recordBudgetBlockedStream), and the same could be
+// done here. It is skipped to stay consistent with the existing run_macro
+// SafetyFilter refusal, so query filter.blocked_by does not list macro-step
+// refusals.
 //
 // label prefixes the rate-limit / budget error ("macro step" or
 // "hook macro step").

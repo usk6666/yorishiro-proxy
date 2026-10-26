@@ -338,3 +338,103 @@ func TestHookMacro_RateLimit_OneTokenPerStep(t *testing.T) {
 		t.Error("host bucket still had a token after the hook macro step; the step did not consume one")
 	}
 }
+
+// TestFuzzHTTP_PreMacro_OneVariantCountsTwo drives the fuzz_http MCP tool
+// end to end with one variant and a one-step pre_macro hook, and verifies
+// the counting rule across both paths: the variant and its hook step are two
+// wire requests, so they take exactly two budget counts (not one, not three)
+// and both draw from the shared host's rate bucket.
+func TestFuzzHTTP_PreMacro_OneVariantCountsTwo(t *testing.T) {
+	echo, hits := newHitCountingServer(t)
+	u, _ := url.Parse(echo.URL)
+	authority := u.Host
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	preID := saveHTTPSendFlow(t, store, echo.URL+"/pre")
+	cfgJSON, err := json.Marshal(macroConfig{Steps: []macroStepInput{{ID: "pre", StreamID: preID}}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := store.SaveMacro(ctx, "pre-macro", "test", string(cfgJSON)); err != nil {
+		t.Fatalf("SaveMacro: %v", err)
+	}
+
+	// Per-host 1 rps -> burst 2: room for the variant and the hook step
+	// without waiting, and the bucket is empty once both have been sent.
+	rl := connector.NewRateLimiter()
+	rl.SetPolicyLimits(connector.RateLimitConfig{MaxRequestsPerHostPerSecond: 1})
+	bm := connector.NewBudgetManager()
+
+	opts := []ServerOption{WithRateLimiter(rl), WithBudgetManager(bm)}
+	if fs, ok := store.(flow.FuzzStore); ok {
+		opts = append(opts, WithFuzzStore(fs))
+	}
+	s := newServer(ctx, nil, store, nil, opts...)
+	s.jobRunner.replayDoer = newPermissiveClient()
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "test-client", Version: "v0.0.1"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(callCtx, &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/seed",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/v"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro":  map[string]any{"name": "pre-macro"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("fuzz_http returned error: %s", extractTextContent(res))
+	}
+	var out fuzzHTTPResult
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal structured content: %v", err)
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode structured content: %v", err)
+	}
+	if out.CompletedVariants != 1 {
+		t.Fatalf("CompletedVariants = %d, want 1 (result: %+v)", out.CompletedVariants, out)
+	}
+	if len(out.Variants) != 1 || out.Variants[0].Error != "" {
+		t.Fatalf("variant rows = %+v, want one row without error", out.Variants)
+	}
+
+	if got := hits.Load(); got != 2 {
+		t.Errorf("upstream hits = %d, want 2 (pre_macro step + variant)", got)
+	}
+	if got := bm.RequestCount(); got != 2 {
+		t.Errorf("budget RequestCount = %d, want 2 (one per wire request, none counted twice)", got)
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer waitCancel()
+	if err := s.waitRateLimit(waitCtx, u.Hostname()); err == nil {
+		t.Error("host bucket (burst 2) still had a token after the variant and its pre_macro step; one of them did not consume a token")
+	}
+}
