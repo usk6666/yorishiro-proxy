@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -473,9 +474,17 @@ register_hook("http", "on_request", gate, phase="post_pipeline")
 
 // TestE2E_ResendHTTP_PluginRespondRecordedOnce pins that a post_pipeline
 // plugin RESPOND on resend_http leaves its Stream with the request and
-// exactly one synthetic response row.
+// exactly one synthetic response row. A second recording attempt of the
+// same response collides with the first on the flows table's keys, so it
+// shows up as a RecordStep "flow save failed" error in the server log
+// rather than as a second row — the log is checked too.
 func TestE2E_ResendHTTP_PluginRespondRecordedOnce(t *testing.T) {
-	h, _ := startPluginOutcomeHarness(t, pluginResendRespondScript, "")
+	path := writePluginScript(t, "plugin_outcome.star", pluginResendRespondScript)
+	logPath := filepath.Join(t.TempDir(), "server.log")
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{
+		ConfigJSON: pluginsConfigJSON(t, path),
+		ExtraArgs:  []string{"-log-file", logPath},
+	})
 	upstreamAddr, _ := startObservedUpstream(t)
 	res := h.MustOK(t, "resend_http", map[string]any{
 		"method":     "GET",
@@ -511,4 +520,5 @@ func TestE2E_ResendHTTP_PluginRespondRecordedOnce(t *testing.T) {
 	if recv != 1 {
 		t.Errorf("receive rows = %d, want exactly 1 (messages %v)", recv, msgs)
 	}
+	assertNoServerErrorLog(t, logPath)
 }
