@@ -877,6 +877,17 @@ type ProxyConfig struct {
 	// as server-first (passthrough). Zero = DefaultTransparentPeekTimeoutMs.
 	TransparentPeekTimeoutMs int `json:"transparent_peek_timeout_ms,omitempty"`
 
+	// RequestTimeoutMs is the boot value of request_timeout_ms (USK-1186):
+	// the client-side request-head receive deadline. Nil keeps the default
+	// (60s); 0 disables it; otherwise MinClientTimeoutMs..MaxClientTimeoutMs.
+	RequestTimeoutMs *int `json:"-"`
+
+	// ClientIdleTimeoutMs is the boot value of client_idle_timeout_ms
+	// (USK-1186): the HTTP/1.x client keep-alive idle wait. Nil keeps the
+	// default (120s); 0 disables it; otherwise
+	// MinClientTimeoutMs..MaxClientTimeoutMs.
+	ClientIdleTimeoutMs *int `json:"-"`
+
 	// SOCKS5Username is the username for SOCKS5 password authentication.
 	SOCKS5Username string `json:"socks5_username,omitempty"`
 

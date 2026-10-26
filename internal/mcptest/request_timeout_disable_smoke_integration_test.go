@@ -20,8 +20,7 @@ import (
 )
 
 func TestE2E_RequestTimeoutZero_TrickledHeadAnswered(t *testing.T) {
-	// request_timeout is a JSON time.Duration (nanoseconds): 200ms.
-	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: `{"request_timeout": 200000000}`})
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: `{"request_timeout_ms": 200}`})
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		_, _ = io.WriteString(w, "path="+r.URL.Path)
 	}))
