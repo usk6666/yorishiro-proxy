@@ -16,10 +16,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	nethttp "net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -391,4 +394,120 @@ register_hook("grpc-web", "on_start", drop)
 	if err := result.get(); err != nil {
 		t.Errorf("session result = %v, want nil", err)
 	}
+}
+
+// httpRespondPluginEngine loads a plugin whose grpc-web.on_start hook returns
+// an HTTP-shaped action.RESPOND — a shape no gRPC-Web Channel can render.
+func httpRespondPluginEngine(t *testing.T, ctx context.Context) *pluginv2.Engine {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "http_respond.star")
+	if err := os.WriteFile(script, []byte(`
+def deny(msg, ctx):
+    return action.RESPOND(status_code=403, headers=[("Content-Type", "text/plain")], body=b"denied")
+
+register_hook("grpc-web", "on_start", deny)
+`), 0o600); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	eng := pluginv2.NewEngine(nil)
+	if err := eng.LoadPlugins(ctx, []pluginv2.PluginConfig{{Path: script, OnError: "abort"}}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	return eng
+}
+
+// TestGRPCWeb_PluginHTTPRespond_RefusedOverHTTP1: an HTTP-shaped
+// action.RESPOND on grpc-web.on_start is refused (Warn + CONTINUE), so the
+// request is forwarded and the client gets the upstream's real gRPC-Web
+// response instead of a dropped connection. Previously the session ended
+// with "grpcweb: unsupported Send Message type *envelope.HTTPMessage" and
+// the client read 0 bytes.
+func TestGRPCWeb_PluginHTTPRespond_RefusedOverHTTP1(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upstreamResp := buildGRPCWebResponseHTTP([]byte("upstream"), 0, "OK", false)
+	upstreamLn, captured := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte { return upstreamResp })
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	probe := &sessionProbe{}
+	proxyAddr, store, result, sessionDone := startGRPCWebHTTP1Proxy(t, ctx,
+		pipelineOpts{plugins: httpRespondPluginEngine(t, ctx), probe: probe})
+
+	reqFrame := grpcweb.EncodeFrame(false, false, []byte("hi"))
+	resp, _ := sendGRPCWebHTTP1(t, proxyAddr, target, "/pkg.Echo/Say", "application/grpc-web+proto", reqFrame)
+	waitSession(t, sessionDone)
+
+	assertClientGotUpstreamResponse(t, resp, upstreamResp)
+	if len(resp) > 0 {
+		_, body := splitHTTPMessage(t, resp)
+		res, err := grpcweb.DecodeBody(body, false)
+		switch {
+		case err != nil || res.TrailerFrame == nil:
+			t.Errorf("client body %q is not a gRPC-Web response with a trailer frame (err %v)", truncate(body), err)
+		default:
+			tr, perr := grpcweb.ParseTrailers(res.TrailerFrame.Payload)
+			if perr != nil || tr["grpc-status"] != "0" {
+				t.Errorf("trailer grpc-status = %q (err %v), want 0 from the upstream", tr["grpc-status"], perr)
+			}
+		}
+	}
+	if err := result.get(); err != nil {
+		t.Errorf("session result = %v, want nil (a refused RESPOND must not end the session in error)", err)
+	}
+	_ = upstreamLn.Close()
+	assertUpstreamBody(t, captured(), reqFrame)
+	if got := probe.dials.Load(); got != 1 {
+		t.Errorf("upstream dialed %d times, want 1", got)
+	}
+	if b := probe.blocked(); len(b) != 0 {
+		t.Errorf("OnPipelineDrop attributions = %v, want none", b)
+	}
+	assertGRPCWebStream(t, store)
+}
+
+// TestGRPCWeb_PluginHTTPRespond_RefusedOverHTTP2: the same refusal over
+// HTTP/2 — the client gets HTTP 200 with the upstream's body instead of
+// "stream error: stream ID 1; CANCEL".
+func TestGRPCWeb_PluginHTTPRespond_RefusedOverHTTP2(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	wantBody := buildGRPCWebResponseBody([]byte("upstream-h2"), 0, "OK", false)
+	var upstreamCalls atomic.Int32
+	upAddr, upShutdown := startGRPCWebHTTP2Upstream(t, func(_ *nethttp.Request) ([]byte, string) {
+		upstreamCalls.Add(1)
+		return wantBody, "application/grpc-web+proto"
+	})
+	defer upShutdown()
+
+	proxyAddr, store, _ := startGRPCWebHTTP2Proxy(t, ctx, pipelineOpts{plugins: httpRespondPluginEngine(t, ctx)})
+
+	cli := &nethttp.Client{Transport: h2TransportViaProxy(proxyAddr, upAddr), Timeout: 15 * time.Second}
+	req, err := nethttp.NewRequestWithContext(ctx, "POST", "https://"+upAddr+"/pkg.Echo/Say",
+		bytes.NewReader(grpcweb.EncodeFrame(false, false, []byte("hi"))))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/grpc-web+proto")
+	resp, err := cli.Do(req)
+	if err != nil {
+		t.Fatalf("h2 client Do: %v (want the upstream response; a refused RESPOND must not reset the stream)", err)
+	}
+	defer resp.Body.Close()
+	gotBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if !bytes.Equal(gotBody, wantBody) {
+		t.Errorf("body = %q, want the upstream body %q", truncate(gotBody), truncate(wantBody))
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Errorf("upstream handled %d requests, want 1", got)
+	}
+	assertGRPCWebStream(t, store)
 }
