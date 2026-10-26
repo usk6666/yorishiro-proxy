@@ -89,7 +89,10 @@ func FoldIP(h string) (string, bool) {
 // returned unchanged.
 //
 // Use it where a match means less inspection (TLS passthrough, raw
-// passthrough): only spellings proven to dial the same host are folded.
+// passthrough) or where an entry can lower protection toward the named host
+// (per-host TLS: a client certificate or tls_verify: false; USK-1384,
+// through DialEquivalentPatternKey / DialEquivalentLookupKeys): only
+// spellings proven to dial the same host are folded.
 // Go's pure resolver does not read a legacy IPv4 spelling as an address
 // (it rejects the all-digit ones and looks the others up in DNS), so
 // folding one onto an entry could relay an uninspected connection to
@@ -109,12 +112,42 @@ func FoldIP(h string) (string, bool) {
 // For an allow-like list these only widen which connections skip
 // inspection. Such a connection has already passed the scope gate, which
 // evaluates the host as written, so neither is a scope bypass. Both apply
-// equally to the TLS passthrough list and to raw_passthrough_hosts.
+// equally to the TLS passthrough list, to raw_passthrough_hosts and to
+// host_tls.
 func FoldDialEquivalent(h string) string {
 	if LegacyIPv4Spelling(h) {
 		return h
 	}
 	return Fold(h)
+}
+
+// DialEquivalentPatternKey returns the comparison key of a per-host table
+// pattern (host_tls, USK-1384): the pattern lowercased and folded with
+// FoldDialEquivalent, except that a leading "*." wildcard label is kept and
+// only the domain after it is folded ("*.Example.COM." -> "*.example.com").
+// Exact and wildcard patterns therefore never share a key. It is the
+// registration-side twin of DialEquivalentLookupKeys; both sides must use
+// these two functions so the grammar cannot drift.
+func DialEquivalentPatternKey(pattern string) string {
+	p := strings.ToLower(pattern)
+	if strings.HasPrefix(p, "*.") {
+		return "*." + FoldDialEquivalent(p[2:])
+	}
+	return FoldDialEquivalent(p)
+}
+
+// DialEquivalentLookupKeys returns the keys a host is looked up under in a
+// table keyed by DialEquivalentPatternKey: exact is the host lowercased and
+// folded with FoldDialEquivalent, and wildcard is the one-level wildcard
+// key for it ("api.example.com." -> "*.example.com"), or "" when the folded
+// host has no dot. Only one level is matched: "a.b.example.com" does not
+// produce "*.example.com". The host must not carry a port. It cannot panic.
+func DialEquivalentLookupKeys(host string) (exact, wildcard string) {
+	exact = FoldDialEquivalent(strings.ToLower(host))
+	if i := strings.IndexByte(exact, '.'); i >= 0 {
+		wildcard = "*" + exact[i:]
+	}
+	return exact, wildcard
 }
 
 // ParseStrictPort reads a port string with the dial-target rule
