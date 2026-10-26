@@ -141,6 +141,11 @@ type CONNECTHandlerConfig struct {
 	// Nil disables — the failure is only logged, as before.
 	OnRequestHeadFailure OnRequestHeadFailureFunc
 
+	// OnGateRefusal is invoked after a CONNECT the rate-limit gate refused
+	// has been answered 429 (USK-1381). Scope refusals do not fire it.
+	// Nil disables — the refusal is only logged.
+	OnGateRefusal OnGateRefusalFunc
+
 	// InnerPeekTimeout bounds how long the handler waits for the first
 	// inner byte after CONNECT 200 (USK-762). Zero means
 	// DefaultInnerPeekTimeout. Misbehaving clients that complete CONNECT
@@ -235,8 +240,9 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 
 		// Step 2-3: scope and rate-limit policy checks. A denial is
 		// answered with 403 / 429 and the connection closes (USK-1246).
-		if resp := connectPolicyReject(cfg, target, route.opaque(), connLogger); resp != nil {
+		if resp, denial := connectPolicyReject(cfg, target, route.opaque(), connLogger); resp != nil {
 			writeForwardResponse(pc, resp)
+			reportRateLimitRefusal(ctx, cfg.OnGateRefusal, "connect", target, pc.RemoteAddr(), denial)
 			return nil
 		}
 
@@ -313,21 +319,23 @@ func RateLimitRefusalResponse() []byte {
 	return forwardErrorResponse(429, "Too Many Requests", connectRateLimitDenyDetail)
 }
 
-// connectPolicyReject runs the scope and rate-limit gates. It returns nil
-// when the target is admitted, otherwise the response the caller must send
-// before closing — 403 for a scope denial, 429 for a rate-limit denial
-// (USK-1246) — after emitting the denial log line. Scope runs first, so a
-// scope-denied CONNECT consumes no rate-limit token. opaque selects the
-// strict scope check for routes that never yield a path (USK-1130).
-func connectPolicyReject(cfg CONNECTHandlerConfig, target string, opaque bool, logger *slog.Logger) []byte {
+// connectPolicyReject runs the scope and rate-limit gates. It returns a nil
+// response when the target is admitted, otherwise the response the caller
+// must send before closing — 403 for a scope denial, 429 for a rate-limit
+// denial (USK-1246) — after emitting the denial log line. denial is
+// non-nil only for a rate-limit refusal, so the caller can record it
+// (USK-1381). Scope runs first, so a scope-denied CONNECT consumes no
+// rate-limit token. opaque selects the strict scope check for routes that
+// never yield a path (USK-1130).
+func connectPolicyReject(cfg CONNECTHandlerConfig, target string, opaque bool, logger *slog.Logger) (resp []byte, denial *RateLimitDenial) {
 	allowed, reason, splitErr := connectScopeCheck(cfg.Scope, target, opaque)
 	if splitErr != nil {
 		logger.Debug("invalid CONNECT target", "error", splitErr)
-		return forwardErrorResponse(400, "Bad Request", "yorishiro-proxy: invalid CONNECT target")
+		return forwardErrorResponse(400, "Bad Request", "yorishiro-proxy: invalid CONNECT target"), nil
 	}
 	if !allowed {
 		logger.Info("CONNECT target blocked by scope", "reason", reason)
-		return forwardErrorResponse(403, "Forbidden", connectScopeDenyDetail)
+		return forwardErrorResponse(403, "Forbidden", connectScopeDenyDetail), nil
 	}
 	if cfg.RateLimiter != nil {
 		host, _, _ := net.SplitHostPort(target)
@@ -335,10 +343,10 @@ func connectPolicyReject(cfg CONNECTHandlerConfig, target string, opaque bool, l
 			logger.Info("CONNECT target blocked by rate limit",
 				"limit_type", denial.LimitType,
 				"effective_rps", denial.EffectiveRPS)
-			return RateLimitRefusalResponse()
+			return RateLimitRefusalResponse(), denial
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // connectScopeCheck is the CONNECT gate's scope check: scheme "https",

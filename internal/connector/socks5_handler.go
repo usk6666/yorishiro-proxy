@@ -66,6 +66,13 @@ type SOCKS5HandlerConfig struct {
 	// peek deadline at all (request_timeout_ms: 0, USK-1185).
 	InnerPeekTimeoutDisabled func() bool
 
+	// OnGateRefusal is invoked after a tunnel the negotiator's rate-limit
+	// gate refused has been answered REP=0x02 (USK-1381). It lives here,
+	// not on the process-singleton negotiator, so each listener records
+	// under its own name. Scope refusals do not fire it. Nil disables —
+	// the refusal is only logged.
+	OnGateRefusal OnGateRefusalFunc
+
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
 
@@ -98,7 +105,11 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		// Step 1: SOCKS5 handshake (auth + CONNECT + scope + ratelimit).
 		ctx, target, err := cfg.Negotiator.Negotiate(ctx, pc)
 		if err != nil {
-			handleSOCKS5NegotiateErr(ctx, err, connLogger)
+			handleSOCKS5NegotiateErr(err, target, connLogger)
+			var rlErr *SOCKS5RateLimitError
+			if errors.As(err, &rlErr) {
+				reportRateLimitRefusal(ctx, cfg.OnGateRefusal, "socks5", target, pc.RemoteAddr(), rlErr.Denial)
+			}
 			return nil
 		}
 
@@ -158,15 +169,15 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 }
 
 // handleSOCKS5NegotiateErr maps the SOCKS5 negotiator's sentinel errors to
-// the appropriate log level so the handler's main loop stays small.
-func handleSOCKS5NegotiateErr(ctx context.Context, err error, logger *slog.Logger) {
+// the appropriate log level so the handler's main loop stays small. target
+// is the destination Negotiate returned with the error (the ctx SOCKS5
+// target is only stamped on success).
+func handleSOCKS5NegotiateErr(err error, target string, logger *slog.Logger) {
 	switch {
 	case errors.Is(err, ErrSOCKS5BlockedByScope):
-		logger.Info("SOCKS5 target blocked by scope",
-			"target", SOCKS5TargetFromContext(ctx))
+		logger.Info("SOCKS5 target blocked by scope", "target", target)
 	case errors.Is(err, ErrSOCKS5BlockedByRateLimit):
-		logger.Info("SOCKS5 target blocked by rate limit",
-			"target", SOCKS5TargetFromContext(ctx))
+		logger.Info("SOCKS5 target blocked by rate limit", "target", target)
 	case errors.Is(err, ErrSOCKS5AuthFailed):
 		logger.Info("SOCKS5 authentication failed")
 	case errors.Is(err, ErrSOCKS5NoAcceptableMethods):

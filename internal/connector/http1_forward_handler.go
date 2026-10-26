@@ -66,6 +66,11 @@ type HTTP1ForwardHandlerConfig struct {
 	// peeked and the 400 the handler returned. Nil disables.
 	OnRequestHeadFailure OnRequestHeadFailureFunc
 
+	// OnGateRefusal is invoked after a connection the rate-limit gate
+	// refused has been answered 429 (USK-1381). Scope refusals do not fire
+	// it. Nil disables — the refusal is only logged.
+	OnGateRefusal OnGateRefusalFunc
+
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -223,6 +228,7 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 					"limit_type", denial.LimitType,
 					"effective_rps", denial.EffectiveRPS)
 				writeForwardResponse(pc, RateLimitRefusalResponse())
+				reportRateLimitRefusal(ctx, cfg.OnGateRefusal, "http1-forward", target, pc.RemoteAddr(), denial)
 				return nil
 			}
 		}

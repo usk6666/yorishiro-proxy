@@ -59,6 +59,19 @@ const (
 	socks5AuthMethodUsernamePassword = "username_password"
 )
 
+// SOCKS5RateLimitError is what Negotiate returns on a rate-limit refusal
+// (USK-1381): errors.Is(err, ErrSOCKS5BlockedByRateLimit) holds, and
+// errors.As yields the denial so the per-listener handler can record it.
+type SOCKS5RateLimitError struct {
+	Denial *RateLimitDenial
+}
+
+// Error returns ErrSOCKS5BlockedByRateLimit's message.
+func (e *SOCKS5RateLimitError) Error() string { return ErrSOCKS5BlockedByRateLimit.Error() }
+
+// Unwrap returns ErrSOCKS5BlockedByRateLimit.
+func (e *SOCKS5RateLimitError) Unwrap() error { return ErrSOCKS5BlockedByRateLimit }
+
 // socks5HandshakeTimeout bounds the entire SOCKS5 handshake phase so a
 // lingering client cannot stall a negotiator goroutine.
 const socks5HandshakeTimeout = 30 * time.Second
@@ -70,7 +83,8 @@ var (
 	// ErrSOCKS5BlockedByScope is returned when TargetScope denied the target.
 	ErrSOCKS5BlockedByScope = errors.New("connector: SOCKS5 target blocked by scope")
 
-	// ErrSOCKS5BlockedByRateLimit is returned when the rate limiter denied the target.
+	// ErrSOCKS5BlockedByRateLimit is returned when the rate limiter denied
+	// the target — wrapped in a *SOCKS5RateLimitError carrying the denial.
 	ErrSOCKS5BlockedByRateLimit = errors.New("connector: SOCKS5 target blocked by rate limit")
 
 	// ErrSOCKS5UnsupportedCommand is returned for BIND / UDP ASSOCIATE.
@@ -224,7 +238,8 @@ func NewSOCKS5Negotiator(logger *slog.Logger) *SOCKS5Negotiator {
 //   - Unsupported CMD returns REP=0x07 then ErrSOCKS5UnsupportedCommand.
 //   - Unsupported ATYP returns REP=0x08 then ErrSOCKS5UnsupportedAddrType.
 //   - TargetScope denial returns REP=0x02 then ErrSOCKS5BlockedByScope.
-//   - RateLimit denial returns REP=0x02 then ErrSOCKS5BlockedByRateLimit.
+//   - RateLimit denial returns REP=0x02 then a *SOCKS5RateLimitError
+//     (errors.Is ErrSOCKS5BlockedByRateLimit).
 func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (context.Context, string, error) {
 	if conn == nil {
 		return ctx, "", fmt.Errorf("connector: SOCKS5Negotiator.Negotiate: nil conn")
@@ -315,7 +330,7 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 			n.logger(ctx).Info("socks5 target blocked by rate limit",
 				"target", target, "type", denial.LimitType)
 			_ = writeSOCKS5Reply(conn, socks5ReplyConnectionNotAllowed)
-			return ctx, target, ErrSOCKS5BlockedByRateLimit
+			return ctx, target, &SOCKS5RateLimitError{Denial: denial}
 		}
 	}
 
