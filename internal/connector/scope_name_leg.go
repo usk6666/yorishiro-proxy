@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/hostcanon"
 )
 
 // Name legs (USK-1167).
@@ -86,7 +88,7 @@ func (s *TargetScope) checkNameLegLocked(scheme, name string, port int, path, di
 // port or on dialPort (0 = no dial target, name port only). Caller holds
 // s.mu.
 func (s *TargetScope) nameDenyLocked(scheme, name string, port, dialPort int, path string) (bool, string) {
-	if s.hasRulesLocked() && numericHostUnparsable(name) {
+	if s.hasRulesLocked() && hostcanon.NumericUnparsable(name) {
 		return false, numericHostReason
 	}
 	for _, rule := range s.policyDenies {
@@ -132,12 +134,12 @@ func matchAllowLayerName(rules []TargetRule, scheme, name string, port int, path
 }
 
 // isIPLiteralRule reports whether rule names a single IP address (any
-// spelling canonicalScopeHost reads as one). TargetScope has no CIDR form.
+// spelling hostcanon.Fold reads as one). TargetScope has no CIDR form.
 func isIPLiteralRule(rule TargetRule) bool {
 	if rule.Hostname == "" {
 		return false
 	}
-	_, isIP := canonicalScopeHostIP(rule.Hostname)
+	_, isIP := hostcanon.FoldIP(rule.Hostname)
 	return isIP
 }
 

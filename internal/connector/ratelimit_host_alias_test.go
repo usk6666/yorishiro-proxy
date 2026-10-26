@@ -8,7 +8,7 @@ import (
 )
 
 // USK-1263: the per-host RateLimiter keys its buckets on the
-// canonicalScopeHost form of the host, so a client cannot get a fresh
+// hostcanon.Fold form of the host, so a client cannot get a fresh
 // bucket for an already-limited host by respelling it (trailing dot,
 // IPv4-mapped IPv6, IPv6 text forms, zone, brackets, legacy IPv4). The
 // fold is used for the map key only; callers, logs and denial tags keep

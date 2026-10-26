@@ -3,6 +3,8 @@ package connector
 import (
 	"strings"
 	"sync"
+
+	"github.com/usk6666/yorishiro-proxy/internal/hostcanon"
 )
 
 // PassthroughList manages a set of domain patterns that should bypass TLS
@@ -16,7 +18,7 @@ import (
 //     (e.g. "foo.example.com", "bar.baz.example.com") but not "example.com" itself
 //
 // Matching compares the pattern (for a wildcard, the part after "*.") and
-// the hostname in passthroughMatchHost form, so spellings that dial the
+// the hostname in hostcanon.FoldDialEquivalent form, so spellings that dial the
 // same host match the same pattern ("example.com." / "example.com",
 // "::ffff:127.0.0.1" / "127.0.0.1", "[::1]" / "0:0::1"). Legacy IPv4
 // spellings are compared as written (USK-1263). Patterns are stored, listed
@@ -69,13 +71,13 @@ func (pl *PassthroughList) Remove(pattern string) bool {
 }
 
 // Contains checks whether the given hostname matches any pattern in the list.
-// The hostname and the patterns are compared in passthroughMatchHost form.
+// The hostname and the patterns are compared in hostcanon.FoldDialEquivalent form.
 func (pl *PassthroughList) Contains(hostname string) bool {
 	hostname = strings.ToLower(strings.TrimSpace(hostname))
 	if hostname == "" {
 		return false
 	}
-	host := passthroughMatchHost(hostname)
+	host := hostcanon.FoldDialEquivalent(hostname)
 
 	pl.mu.RLock()
 	defer pl.mu.RUnlock()
@@ -125,34 +127,16 @@ func normalizePattern(pattern string) string {
 	return pattern
 }
 
-// passthroughMatchHost returns the form in which PassthroughList compares a
-// lowercased host with a pattern (USK-1263). It is canonicalScopeHost —
-// one trailing dot on a name, one "[...]" pair, IPv6 RFC 5952 text,
-// IPv4-mapped IPv6 to dotted quad, zone dropped — except for a host
-// legacyIPv4Spelling reports (integer / hex / octal / short IPv4,
-// "127.0.0.1.", "[127.0.0.1]"), which is returned unchanged.
-//
-// Passthrough is allow-like: a match means less inspection. Only spellings
-// proven to dial the same host are folded. Go's pure resolver does not read
-// a legacy IPv4 spelling as an address (it rejects the all-digit ones and
-// looks the others up in DNS), so folding one onto a pattern could relay an
-// uninspected tunnel to whatever DNS returns; the same reasoning makes
-// TargetScope refuse such dial hosts when rules exist.
-func passthroughMatchHost(h string) string {
-	if legacyIPv4Spelling(h) {
-		return h
-	}
-	return canonicalScopeHost(h)
-}
-
 // passthroughMatchPattern returns the match form of a normalized pattern:
-// passthroughMatchHost of the pattern, or of the part after "*." for a
-// wildcard.
+// hostcanon.FoldDialEquivalent of the pattern, or of the part after "*."
+// for a wildcard. Passthrough is allow-like (a match means less
+// inspection), so it uses the dial-equivalent fold that leaves legacy IPv4
+// spellings verbatim (USK-1263).
 func passthroughMatchPattern(pattern string) string {
 	if strings.HasPrefix(pattern, "*.") {
-		return "*." + passthroughMatchHost(pattern[2:])
+		return "*." + hostcanon.FoldDialEquivalent(pattern[2:])
 	}
-	return passthroughMatchHost(pattern)
+	return hostcanon.FoldDialEquivalent(pattern)
 }
 
 // matchWildcardPattern checks if a wildcard pattern matches the hostname.

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/usk6666/yorishiro-proxy/internal/hostcanon"
 	"golang.org/x/time/rate"
 )
 
@@ -235,7 +236,7 @@ func (rl *RateLimiter) Wait(ctx context.Context, hostname string) error {
 }
 
 // hostLimiterLocked returns the per-host limiter for hostname, creating it
-// on first use. Buckets are keyed on canonicalScopeHost(hostname), so every
+// on first use. Buckets are keyed on hostcanon.Fold(hostname), so every
 // spelling the dial treats as one host — case, one trailing dot, brackets,
 // IPv6 text forms, IPv4-mapped IPv6, the zone, and legacy inet_aton IPv4 —
 // shares one bucket (USK-1263). Folding legacy IPv4 is safe here because
@@ -247,7 +248,7 @@ func (rl *RateLimiter) Wait(ctx context.Context, hostname string) error {
 // adversarial unique-host flooding (CWE-400). Must be called with rl.mu
 // held and rl.effectiveHostRPS > 0.
 func (rl *RateLimiter) hostLimiterLocked(hostname string) *rate.Limiter {
-	key := canonicalScopeHost(hostname)
+	key := hostcanon.Fold(hostname)
 	if limiter, ok := rl.hostLimiters[key]; ok {
 		return limiter
 	}

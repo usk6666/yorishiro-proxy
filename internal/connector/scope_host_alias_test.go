@@ -3,6 +3,8 @@ package connector
 import (
 	"strings"
 	"testing"
+
+	"github.com/usk6666/yorishiro-proxy/internal/hostcanon"
 )
 
 // USK-1250 (absorbs USK-1132): TargetScope compared hosts after only
@@ -170,28 +172,6 @@ func TestCheckTarget_HostAliasAllowSymmetry(t *testing.T) {
 	}
 }
 
-// TestParseLegacyIPv4_EmptyHexPart pins the parser to glibc inet_aton(3),
-// which rejects a "0x" / "0X" prefix with no hex digits after it. WHATWG
-// reads such a part as 0, but Go's pure resolver sends the name to DNS, so
-// folding it into an address would let an allow rule admit a host that
-// dials whatever DNS returns (USK-1250 review S-1).
-func TestParseLegacyIPv4_EmptyHexPart(t *testing.T) {
-	for _, in := range []string{"0x", "0X", "0x.0.0.1", "0x7f.0x.0.1", "1.2.3.0x", "0X.1", "1.0x"} {
-		if v, ok := parseLegacyIPv4(in); ok {
-			t.Errorf("parseLegacyIPv4(%q) = %#x, true; want rejected", in, v)
-		}
-		if c, isIP := canonicalScopeHostIP(in); isIP {
-			t.Errorf("canonicalScopeHostIP(%q) = %q, IP; want not an IP", in, c)
-		}
-	}
-	// Controls: a hex part with digits still parses.
-	for in, want := range map[string]uint32{"0x0": 0, "0x7f.0.0.1": 0x7f000001, "1.2.3.0x0": 0x01020300} {
-		if v, ok := parseLegacyIPv4(in); !ok || v != want {
-			t.Errorf("parseLegacyIPv4(%q) = %#x, %v; want %#x, true", in, v, ok, want)
-		}
-	}
-}
-
 // TestHostnameCoveredBy_HostAliases is test-plan 9 (coverage half).
 func TestHostnameCoveredBy_HostAliases(t *testing.T) {
 	tests := []struct {
@@ -267,8 +247,8 @@ func TestCanonicalScopeHost_GarbageNoPanic(t *testing.T) {
 	scope := NewTargetScope()
 	scope.SetPolicyRules(nil, []TargetRule{{Hostname: "127.0.0.1"}})
 	for _, in := range inputs {
-		_ = canonicalScopeHost(in)
-		_ = legacyIPv4Spelling(in)
+		_ = hostcanon.Fold(in)
+		_ = hostcanon.LegacyIPv4Spelling(in)
 		_, _ = scope.CheckTarget("https", in, 443, "")
 		_ = hostnameCoveredBy(in, in)
 		_ = matchHostname(in, in)
