@@ -104,36 +104,7 @@ func (e *Engine) FireLifecycle(ctx context.Context, protocol, event string, env 
 // (msg is caller-supplied) and no dictToMessage read-back (lifecycle
 // events have no envelope to commit mutations to).
 func (e *Engine) dispatchLifecycleHook(ctx context.Context, hook Hook, env *envelope.Envelope, msg starlark.Value) (Action, error) {
-	ctxVal := e.NewCtx(env)
-
-	thread := &starlark.Thread{
-		Name: fmt.Sprintf("pluginv2.lifecycle:%s/%s/%s", hook.PluginName, hook.Protocol, hook.Event),
-		Print: func(_ *starlark.Thread, m string) {
-			e.logger.Info("pluginv2: plugin print",
-				slog.String("plugin", hook.PluginName),
-				slog.String("hook", hook.Protocol+"."+hook.Event),
-				slog.String("message", m),
-			)
-		},
-	}
-	if steps := e.lookupMaxSteps(hook.PluginName); steps > 0 {
-		thread.SetMaxExecutionSteps(steps)
-	}
-
-	done := make(chan struct{})
-	defer close(done)
-	if ctx != nil && ctx.Done() != nil {
-		go func() {
-			select {
-			case <-ctx.Done():
-				thread.Cancel(ctx.Err().Error())
-			case <-done:
-			}
-		}()
-	}
-
-	args := starlark.Tuple{msg, ctxVal}
-	ret, callErr := starlark.Call(thread, hook.Fn, args, nil)
+	ret, callErr := e.callHook(ctx, hook, "pluginv2.lifecycle", starlark.Tuple{msg, e.NewCtx(env)})
 	if callErr != nil {
 		e.logger.WarnContext(ctx, "pluginv2: lifecycle hook returned error; treating as continue",
 			slog.String("plugin", hook.PluginName),

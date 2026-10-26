@@ -97,39 +97,7 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope
 		noted = true
 		hook.stats.record(hook, kind, action, reason)
 	}
-	ctxVal := e.NewCtx(env)
-
-	thread := &starlark.Thread{
-		Name: fmt.Sprintf("pluginv2.dispatch:%s/%s/%s", hook.PluginName, hook.Protocol, hook.Event),
-		Print: func(_ *starlark.Thread, msg string) {
-			e.logger.Info("pluginv2: plugin print",
-				slog.String("plugin", hook.PluginName),
-				slog.String("hook", hook.Protocol+"."+hook.Event),
-				slog.String("message", msg),
-			)
-		},
-	}
-	if steps := e.lookupMaxSteps(hook.PluginName); steps > 0 {
-		thread.SetMaxExecutionSteps(steps)
-	}
-
-	// Bridge ctx cancellation into thread.Cancel so external signals (SIGINT,
-	// deadline) abort hook execution promptly. The done channel stops the
-	// watcher when starlark.Call returns. Mirrors Engine.loadPlugin pattern.
-	done := make(chan struct{})
-	defer close(done)
-	if ctx != nil && ctx.Done() != nil {
-		go func() {
-			select {
-			case <-ctx.Done():
-				thread.Cancel(ctx.Err().Error())
-			case <-done:
-			}
-		}()
-	}
-
-	args := starlark.Tuple{d, ctxVal}
-	ret, callErr := starlark.Call(thread, hook.Fn, args, nil)
+	ret, callErr := e.callHook(ctx, hook, "pluginv2.dispatch", starlark.Tuple{d, e.NewCtx(env)})
 	if callErr != nil {
 		// In-place mutations applied before the error are still committed
 		// per RFC §9.3 D2 ("msg is mutable in-place"). We log the error and
@@ -195,6 +163,40 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope
 		NewMessage: msg,
 		NewRaw:     raw,
 	}, nil
+}
+
+// callHook runs hook.Fn(args...) on a fresh Starlark thread named
+// "<threadPrefix>:<plugin>/<protocol>/<event>", with the plugin's step
+// budget and ctx cancellation bridged into thread.Cancel (the done channel
+// stops the watcher when the call returns; mirrors Engine.loadPlugin).
+// Shared by Dispatch and dispatchLifecycleHook.
+func (e *Engine) callHook(ctx context.Context, hook Hook, threadPrefix string, args starlark.Tuple) (starlark.Value, error) {
+	thread := &starlark.Thread{
+		Name: fmt.Sprintf("%s:%s/%s/%s", threadPrefix, hook.PluginName, hook.Protocol, hook.Event),
+		Print: func(_ *starlark.Thread, msg string) {
+			e.logger.Info("pluginv2: plugin print",
+				slog.String("plugin", hook.PluginName),
+				slog.String("hook", hook.Protocol+"."+hook.Event),
+				slog.String("message", msg),
+			)
+		},
+	}
+	if steps := e.lookupMaxSteps(hook.PluginName); steps > 0 {
+		thread.SetMaxExecutionSteps(steps)
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	if ctx != nil && ctx.Done() != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				thread.Cancel(ctx.Err().Error())
+			case <-done:
+			}
+		}()
+	}
+	return starlark.Call(thread, hook.Fn, args, nil)
 }
 
 // enforceTCPChunkCap returns ErrChunkTooLarge when a (raw, on_chunk) hook
