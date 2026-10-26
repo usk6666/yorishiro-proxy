@@ -71,11 +71,10 @@ register_hook("http", "` + tc.event + `", deny)
 // USK-1388: the HTTP/2 mirror of the case above. An http hook's
 // action.RESPOND_GRPC over h2 reaches httpaggregator, whose Send also
 // requires *HTTPMessage; the refused RESPOND must leave the original
-// exchange intact. Only on_request discriminates the fix: on this path
-// upstreamToClient does not deliver a Receive-direction Respond envelope
-// (it forwards the original response), so on_response guards the
-// end-to-end behavior without reaching the aggregator's Send. The h2c
-// harness helpers live in plugin_raw_wins_h2_integration_test.go.
+// exchange intact. Since USK-1392 the session delivers a Receive-direction
+// Respond to the client, so an unrefused on_response RESPOND_GRPC would
+// reach the aggregator's Send as well. The h2c harness helpers live in
+// plugin_raw_wins_h2_integration_test.go.
 func TestPluginRespondShape_H2_RespondGRPCRefused(t *testing.T) {
 	for _, event := range []string{"on_request", "on_response"} {
 		t.Run(event, func(t *testing.T) {

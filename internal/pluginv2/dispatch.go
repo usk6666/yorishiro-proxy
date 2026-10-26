@@ -52,12 +52,12 @@ type HookOutcome struct {
 // from a mid-stream `grpc.on_data` hook (mid-stream events accept CONTINUE
 // only) — or a RESPOND whose shape the hook's Layer cannot render (an
 // HTTP-shaped action.RESPOND from a gRPC hook, action.RESPOND_GRPC from an
-// HTTP-family hook). Callers should log a Warn and treat the outcome as
-// ActionContinue (fail-soft: a misbehaving plugin must not break wire
-// traffic). The error
-// is surfaced rather than silently demoted so plugin authors can see the
-// problem in tests; callers that want the demoted behavior errors.Is-check
-// this sentinel.
+// HTTP-family hook), or a RESPOND on an informational (1xx, not 101)
+// response whose final response is still to come. Callers should log a
+// Warn and treat the outcome as ActionContinue (fail-soft: a misbehaving
+// plugin must not break wire traffic). The error is surfaced rather than
+// silently demoted so plugin authors can see the problem in tests; callers
+// that want the demoted behavior errors.Is-check this sentinel.
 var ErrDisallowedAction = errors.New("pluginv2: hook returned disallowed action for this event")
 
 // Dispatch invokes one Hook against env. Conv / exec / read-back / surface
@@ -66,8 +66,9 @@ var ErrDisallowedAction = errors.New("pluginv2: hook returned disallowed action 
 //
 // Returns ErrDisallowedAction (or wrapping) when a hook returns DROP/RESPOND
 // for an event whose surface ActionMask forbids it, or a RESPOND whose shape
-// does not match the hook's protocol family (see respondShapeAllowed).
-// Returns convertMessageToDict errors (ErrBodyTooLarge /
+// does not match the hook's protocol family (see respondShapeAllowed), or a
+// RESPOND on a Receive-direction informational response (see
+// respondTargetAllowed). Returns convertMessageToDict errors (ErrBodyTooLarge /
 // ErrUnsupportedMessageType) verbatim — callers treat these as "skip this
 // hook" signals. Per-hook Starlark *runtime* errors are converted into
 // Warn-logged ActionContinue outcomes here so a misbehaving hook never breaks
@@ -127,10 +128,7 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope
 	action, respond := interpretReturnValue(ret, hook, e.logger)
 
 	if action == ActionRespond {
-		if !surfaceAllows(hook, action) {
-			return nil, fmt.Errorf("%w: %s on (%s, %s)", ErrDisallowedAction, action, hook.Protocol, hook.Event)
-		}
-		if err := respondShapeAllowed(hook, respond); err != nil {
+		if err := respondAllowed(hook, respond, env); err != nil {
 			return nil, err
 		}
 		return &HookOutcome{Action: ActionRespond, Respond: respond}, nil
@@ -261,6 +259,20 @@ func surfaceAllows(hook Hook, action Action) bool {
 	return spec.Actions.Has(action)
 }
 
+// respondAllowed runs every RESPOND check in order — the surface ActionMask,
+// the payload shape (respondShapeAllowed) and the target envelope
+// (respondTargetAllowed) — and returns the first refusal, wrapping
+// ErrDisallowedAction.
+func respondAllowed(hook Hook, respond *RespondAction, env *envelope.Envelope) error {
+	if !surfaceAllows(hook, ActionRespond) {
+		return fmt.Errorf("%w: %s on (%s, %s)", ErrDisallowedAction, ActionRespond, hook.Protocol, hook.Event)
+	}
+	if err := respondShapeAllowed(hook, respond); err != nil {
+		return err
+	}
+	return respondTargetAllowed(hook, env)
+}
+
 // respondShapeAllowed reports, as an error wrapping ErrDisallowedAction,
 // a RESPOND whose payload shape does not match the hook's protocol family.
 // Each shape is rendered only by its own Layer (MITM Principle 2): a gRPC /
@@ -286,6 +298,29 @@ func respondShapeAllowed(hook Hook, respond *RespondAction) error {
 			return fmt.Errorf("%w: gRPC-shaped action.RESPOND_GRPC cannot be rendered on (%s, %s); use action.RESPOND",
 				ErrDisallowedAction, hook.Protocol, hook.Event)
 		}
+	}
+	return nil
+}
+
+// respondTargetAllowed reports, as an error wrapping ErrDisallowedAction, a
+// RESPOND on a Receive-direction informational response (1xx other than
+// 101). A response-side RESPOND replaces the upstream response in place
+// (RFC-001 §9.3), but an informational response is followed by the
+// upstream's final response on the same exchange: replacing the 1xx would
+// hand the client two final responses. The plugin can RESPOND on the final
+// response instead, where the same hook fires again. A 101 is the final
+// response of its exchange (ws.on_upgrade), so it stays replaceable.
+func respondTargetAllowed(hook Hook, env *envelope.Envelope) error {
+	if env == nil || env.Direction != envelope.Receive {
+		return nil
+	}
+	msg, ok := env.Message.(*envelope.HTTPMessage)
+	if !ok || msg == nil {
+		return nil
+	}
+	if msg.Status >= 100 && msg.Status < 200 && msg.Status != 101 {
+		return fmt.Errorf("%w: RESPOND on informational response %d on (%s, %s); RESPOND on the final response instead",
+			ErrDisallowedAction, msg.Status, hook.Protocol, hook.Event)
 	}
 	return nil
 }

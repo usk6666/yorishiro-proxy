@@ -307,13 +307,15 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		// Receive direction), synthesize a 403 response so the client
 		// sees a clean close instead of hanging until its own read
 		// timeout. The session loop dispatches Respond via client.Send
-		// (dispatchClientAction / wsRelayDirection).
+		// (dispatchClientAction / dispatchUpstreamAction /
+		// wsRelayDirection).
 		//
 		// USK-1202 / USK-1220: a held Send-direction native-gRPC or
 		// gRPC-Web Start / Data gets the same grpc-status 7
 		// PERMISSION_DENIED terminator as a SafetyFilter block. A
-		// Receive-direction gRPC drop skips one streamed message and
-		// keeps Drop; WS (Close frame) also keeps Drop.
+		// Receive-direction gRPC drop keeps Drop: on a response Data it
+		// skips one streamed message, on the response Start the session
+		// ends the RPC (USK-1392). WS (Close frame) also keeps Drop.
 		switch env.Message.(type) {
 		case *envelope.HTTPMessage:
 			return Result{

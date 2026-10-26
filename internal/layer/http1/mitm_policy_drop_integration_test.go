@@ -16,10 +16,12 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
@@ -266,4 +268,85 @@ func TestHTTPSMITM_HTTPScopeReject(t *testing.T) {
 
 	assertUpstreamNotReached(t, upstreamLn, getUpstreamReqs, upstreamReceived,
 		"http_scope did not block forwarding")
+}
+
+// TestHTTPSMITM_InterceptDropHeldResponse (USK-1392): dropping a held
+// Receive-direction response answers the client with the 403 terminator
+// (blocked_by intercept_drop) instead of the upstream's response, and the
+// BlockedBy attribution reaches SessionOptions.OnPipelineDrop exactly once.
+// Previously the 403 Respond was discarded and the upstream response the
+// operator had dropped reached the client.
+func TestHTTPSMITM_InterceptDropHeldResponse(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nupstream")
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	interceptEngine := httprules.NewInterceptEngine()
+	interceptEngine.AddRule(httprules.InterceptRule{
+		ID:          "hold-response",
+		Enabled:     true,
+		Direction:   httprules.DirectionResponse,
+		PathPattern: regexp.MustCompile(`/held`),
+	})
+	holdQueue := common.NewHoldQueue()
+
+	var dropMu sync.Mutex
+	var dropped []string
+	proxyAddr, _, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
+		interceptEngine: interceptEngine,
+		holdQueue:       holdQueue,
+		onPipelineDrop: func(_ context.Context, _ *envelope.Envelope, blockedBy string) {
+			dropMu.Lock()
+			dropped = append(dropped, blockedBy)
+			dropMu.Unlock()
+		},
+	})
+
+	respCh := make(chan string, 1)
+	go func() {
+		rawReq := fmt.Sprintf("GET /held HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
+		respCh <- connectAndSendHTTP(t, proxyAddr, target, rawReq)
+	}()
+
+	var entries []*common.HeldEntry
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if entries = holdQueue.List(); len(entries) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no response appeared in the hold queue")
+	}
+	if err := holdQueue.Release(entries[0].ID, &common.HoldAction{Type: common.ActionDrop}); err != nil {
+		t.Fatalf("release with Drop: %v", err)
+	}
+
+	var resp string
+	select {
+	case resp = <-respCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for the client response after dropping the held response")
+	}
+	if strings.Contains(resp, "upstream") {
+		t.Errorf("client received the dropped upstream response: %q", resp)
+	}
+	assertPolicyDropResponse(t, resp, "intercept_drop")
+
+	select {
+	case <-sessionDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+	dropMu.Lock()
+	defer dropMu.Unlock()
+	if len(dropped) != 1 || dropped[0] != "intercept_drop" {
+		t.Errorf("OnPipelineDrop attributions = %v, want [intercept_drop]", dropped)
+	}
 }

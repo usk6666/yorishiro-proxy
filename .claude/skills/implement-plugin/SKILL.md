@@ -22,7 +22,7 @@ If no description argument is given, interactively confirm:
 2. **Protocol**: Target plugin protocol — one of `http`, `ws`, `grpc`, `grpc-web`, `sse`, `raw`, `tls`, `connection`, `socks5` (the plugin protocol vocabulary; see `internal/pluginv2/surface.go`).
 3. **Event**: Hook event under that protocol (e.g. `on_request`, `on_message`, `on_chunk`).
 4. **Phase**: `pre_pipeline` (default — before Intercept/Transform) or `post_pipeline` (after; right place for signing/last-mile mutation). Lifecycle / observation events (`on_close`, `on_handshake`, `on_disconnect`, `socks5.on_connect`, etc.) take **no `phase=` argument** — passing one is a load-time error.
-5. **Action**: CONTINUE (mutate in place) / DROP (transaction-start only) / RESPOND (transaction-start request, plus `http.on_response` for replacement).
+5. **Action**: CONTINUE (mutate in place) / DROP (transaction-start only) / RESPOND (transaction-start request; on the response side `http.on_response` / `ws.on_upgrade` on a 101 replace the upstream response, `grpc.on_start` / `grpc-web.on_start` end the RPC).
 
 If a description argument is given, auto-determine from its content.
 
@@ -45,7 +45,7 @@ Create a plugin file in `examples/plugins/`:
 - Include a comment block at the top describing purpose, the `register_hook` call(s), and a config snippet
 - Hook registration is **script-driven** via `register_hook(protocol, event, fn[, phase=...])` — there is no `protocol`/`hooks` config key
 - Hook signature is `def fn(msg, ctx):` — two positional arguments
-- Returning `None` means CONTINUE; `action.DROP` drops; `action.RESPOND(...)` short-circuits with a synthetic response
+- Returning `None` means CONTINUE; `action.DROP` drops; `action.RESPOND(...)` short-circuits with a synthetic response (on a response-side hook it replaces the upstream response instead)
 - Mutate `msg` in place — `msg["headers"].append(name, value)`, `msg["body"] = b"..."`, `msg["raw"] = b"..."`. Mutations to the dict and to `*HeadersValue` are committed regardless of the return value.
 
 #### Template Structure
@@ -101,7 +101,7 @@ Writing `method` / `path` / `raw_query` (request) or `status` / `status_reason` 
 |--------|----------------|
 | CONTINUE | All events (always implicit) |
 | DROP | Transaction-start only: `http.on_request`, `ws.on_upgrade`, `grpc.on_start`, `grpc-web.on_start`, `connection.on_connect`, `socks5.on_connect` |
-| RESPOND | Transaction-start request events (as above, minus `connection`/`socks5`), plus `http.on_response` (replace upstream response). gRPC / gRPC-Web hooks must use `action.RESPOND_GRPC(status, message, trailers)` and HTTP / WS hooks `action.RESPOND(...)`; the other shape is refused as CONTINUE (Warn). |
+| RESPOND | Transaction-start request events (as above, minus `connection`/`socks5`), plus the response side: `http.on_response` and `ws.on_upgrade` on the upstream's 101 (replace the upstream response), and `grpc.on_start` / `grpc-web.on_start` on the upstream's response headers (end the RPC with the plugin's status). gRPC / gRPC-Web hooks must use `action.RESPOND_GRPC(status, message, trailers)` and HTTP / WS hooks `action.RESPOND(...)`; the other shape is refused as CONTINUE (Warn). |
 
 Mid-stream events (`on_data`, `on_message`, `on_event`, `on_chunk`) and lifecycle/observation events (`on_close`, `on_end`, `on_handshake`, `on_disconnect`) accept CONTINUE only — terminating a stateful stream uses native termination (gRPC `RST_STREAM`, WS close frame), not an action enum.
 
@@ -146,6 +146,8 @@ The legacy `plugin` MCP tool (`list`/`reload`/`enable`/`disable`) was removed in
 
 - **gRPC mid-stream events accept CONTINUE only.** DROP/RESPOND on `grpc.on_data` / `grpc.on_end` is a load-time/dispatch-time error. `grpc.on_start` accepts DROP and `action.RESPOND_GRPC(...)`.
 - **`grpc.on_start` / `grpc-web.on_start` DROP ends the RPC with no gRPC status** — RST_STREAM(CANCEL) on h2, connection close on HTTP/1.x; the upstream is not dialed. Use `action.RESPOND_GRPC(...)` to answer with a status.
+- **Response-side RESPOND replaces the upstream response.** `http.on_response` RESPOND (and `ws.on_upgrade` RESPOND on the 101) delivers the plugin's response to the client instead of the upstream's, over HTTP/1.x and HTTP/2; the exchange ends normally (keep-alive kept) and the flow records the upstream response as the `original` variant, the plugin's as `modified`. Later hooks of the same phase are skipped, but Intercept / Transform / `post_pipeline` hooks still see the replacement — register with `phase="post_pipeline"` when the replacement must survive Transform rules. RESPOND on an informational 1xx response (e.g. `103`) is refused (Warn + CONTINUE); the hook fires again on the final response. `ws.on_upgrade` DROP on the 101 closes the client connection (HTTP/1.x) / resets the stream (HTTP/2) with no response.
+- **`grpc.on_start` / `grpc-web.on_start` also fire on the response headers.** The response-side Start has an empty `msg["service"]` (guard with `if not msg["service"]`). `action.RESPOND_GRPC(...)` there replaces the upstream's response with the plugin's status (Trailers-Only / gRPC-Web trailer frame) and cancels the upstream stream; DROP ends the RPC with no status, like a request-side DROP.
 - **RESPOND must match the hook's protocol.** `grpc.on_start` / `grpc-web.on_start` take only `action.RESPOND_GRPC(...)`; `http.on_request` / `http.on_response` / `ws.on_upgrade` take only `action.RESPOND(...)`. A mismatched shape is refused at dispatch time (`ErrDisallowedAction`): Warn log, the hook counts as CONTINUE with its `msg` edits discarded, and the request is forwarded upstream.
 - **WebSocket mid-stream events accept CONTINUE only.** To redact a `ws.on_message` payload, mutate `msg["payload"]` in place rather than dropping. To refuse a connection, hook `ws.on_upgrade` and return DROP.
 - **`(socks5, on_connect)` accepts DROP** for connection-level allowlists, but **no `phase=` argument** — it is a lifecycle event.
