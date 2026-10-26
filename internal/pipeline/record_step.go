@@ -1363,7 +1363,7 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 		Direction: env.Direction.String(),
 		Timestamp: time.Now(),
 		RawBytes:  s.projectRawBytes(ctx, env),
-		Metadata:  map[string]string{"protocol": string(env.Protocol)},
+		Metadata:  baseFlowMetadata(env),
 		// USK-889: project EnvelopeContext.WireLevel onto the persisted
 		// Flow so the schemaV14 wire_level column distinguishes the
 		// frame-level overlay envelopes (h2-frame) from the canonical
@@ -1372,12 +1372,6 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 		// backstop, so existing semantic-only producers do not need to
 		// thread the constant explicitly.
 		WireLevel: env.Context.WireLevel,
-	}
-	// USK-1393: a proxy-synthesized envelope (EnvelopeContext.Synthetic —
-	// today a plugin RESPOND response; the WS hold keepalive Ping is not
-	// recorded) is marked so it is never mistaken for wire-observed data.
-	if env.Context.Synthetic {
-		fl.Metadata["synthetic"] = "true"
 	}
 
 	switch m := env.Message.(type) {
@@ -1437,6 +1431,19 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 	}
 
 	return fl
+}
+
+// baseFlowMetadata returns the protocol-independent Flow.Metadata every
+// recorded envelope starts with: "protocol", plus "synthetic"="true" for
+// a proxy-synthesized envelope (EnvelopeContext.Synthetic — today a plugin
+// RESPOND response, USK-1393; the WS hold keepalive Ping is not recorded)
+// so it is never mistaken for wire-observed data.
+func baseFlowMetadata(env *envelope.Envelope) map[string]string {
+	md := map[string]string{"protocol": string(env.Protocol)}
+	if env.Context.Synthetic {
+		md["synthetic"] = "true"
+	}
+	return md
 }
 
 // projectTLSHandshake projects a TLSHandshakeMessage (USK-790 passthrough
