@@ -837,7 +837,17 @@ type ProxyConfig struct {
 	ClientKeyPath string `json:"client_key,omitempty"`
 
 	// HostTLS maps hostnames to per-host TLS configurations for mTLS,
-	// custom CA bundles, and per-host TLS verification control.
+	// custom CA bundles, and per-host TLS verification control. A key is a
+	// hostname, an IP literal, or a one-level "*.domain" wildcard.
+	//
+	// Keys and the upstream TLS host are compared in the dial-equivalent
+	// host form (hostcanon.DialEquivalentPatternKey, USK-1384): case, one
+	// trailing dot, "[...]" brackets, IPv6 RFC 5952 text, IPv4-mapped IPv6
+	// and the IPv6 zone are folded, so "localhost." gets the "localhost"
+	// entry. Legacy inet_aton IPv4 spellings ("127.1", "0x7f.0.0.1") are
+	// compared as written. Validate rejects two keys with the same folded
+	// form. The fold is comparison-only: the dial target, the TLS
+	// ServerName and the recorded data stay as written.
 	HostTLS map[string]*HostTLSEntry `json:"host_tls,omitempty"`
 
 	// Plugins configures Starlark plugins for the proxy pipeline (RFC-001
@@ -1069,6 +1079,9 @@ func (c *ProxyConfig) Validate() error {
 		return err
 	}
 	if err := c.validateClientTimeouts(); err != nil {
+		return err
+	}
+	if err := validateHostTLSKeys(c.HostTLS); err != nil {
 		return err
 	}
 	return nil

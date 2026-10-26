@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
 	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/hostcanon"
 )
 
 // ResolvedHostTLS holds the per-host TLS overrides resolved by HostTLSResolver.
@@ -116,39 +116,38 @@ func (e *hostTLSEntry) loadCAHash() (string, error) {
 }
 
 // HostTLSResolver resolves per-host TLS configuration from a map of hostname
-// patterns to HostTLSEntry. It supports exact match and wildcard patterns
-// (e.g. "*.example.com"). Certificates and CA bundles are loaded lazily on
-// first access and cached for the resolver's lifetime.
+// patterns to HostTLSEntry. It supports exact match and one-level wildcard
+// patterns (e.g. "*.example.com"). Certificates and CA bundles are loaded
+// lazily on first access and cached for the resolver's lifetime.
+//
+// Patterns and targets are compared in the dial-equivalent host form with
+// the same grammar as transport.HostTLSRegistry
+// (hostcanon.DialEquivalentPatternKey / DialEquivalentLookupKeys, USK-1384),
+// so a target respelled with a trailing dot or as an IPv4-mapped IPv6
+// literal gets its entry. Only the comparison key is folded.
 //
 // HostTLSResolver is safe for concurrent use.
 type HostTLSResolver struct {
-	exact    map[string]*hostTLSEntry
-	wildcard map[string]*hostTLSEntry // key = "example.com" for pattern "*.example.com"
+	entries map[string]*hostTLSEntry // key = hostcanon.DialEquivalentPatternKey
 }
 
 // NewHostTLSResolver builds a resolver from the config HostTLS map.
 // Returns nil if hostTLS is nil or empty (nil resolver is safe to call Resolve on).
+//
+// Two patterns with the same dial-equivalent key are rejected by
+// config.ProxyConfig.Validate before the resolver is built; if they reach
+// here anyway, one of them wins.
 func NewHostTLSResolver(hostTLS map[string]*config.HostTLSEntry) *HostTLSResolver {
 	if len(hostTLS) == 0 {
 		return nil
 	}
 
 	r := &HostTLSResolver{
-		exact:    make(map[string]*hostTLSEntry),
-		wildcard: make(map[string]*hostTLSEntry),
+		entries: make(map[string]*hostTLSEntry, len(hostTLS)),
 	}
-
 	for pattern, cfg := range hostTLS {
-		entry := &hostTLSEntry{cfg: cfg}
-		if strings.HasPrefix(pattern, "*.") {
-			// "*.example.com" → key "example.com"
-			domain := pattern[2:]
-			r.wildcard[strings.ToLower(domain)] = entry
-		} else {
-			r.exact[strings.ToLower(pattern)] = entry
-		}
+		r.entries[hostcanon.DialEquivalentPatternKey(pattern)] = &hostTLSEntry{cfg: cfg}
 	}
-
 	return r
 }
 
@@ -161,10 +160,7 @@ func (r *HostTLSResolver) Resolve(target string) (*ResolvedHostTLS, error) {
 		return nil, nil
 	}
 
-	host := extractHost(target)
-	hostLower := strings.ToLower(host)
-
-	entry := r.lookup(hostLower)
+	entry := r.lookup(extractHost(target))
 	if entry == nil {
 		return nil, nil
 	}
@@ -200,22 +196,18 @@ func (r *HostTLSResolver) Resolve(target string) (*ResolvedHostTLS, error) {
 	return result, nil
 }
 
-// lookup finds the best matching entry: exact > wildcard.
-func (r *HostTLSResolver) lookup(hostLower string) *hostTLSEntry {
-	// Exact match first.
-	if entry, ok := r.exact[hostLower]; ok {
+// lookup finds the best matching entry for a host without a port:
+// exact > one-level wildcard, both in the dial-equivalent form.
+func (r *HostTLSResolver) lookup(host string) *hostTLSEntry {
+	exact, wildcard := hostcanon.DialEquivalentLookupKeys(host)
+	if entry, ok := r.entries[exact]; ok {
 		return entry
 	}
-
-	// Wildcard: try each parent domain.
-	// "sub.example.com" matches "*.example.com" (key "example.com").
-	parts := strings.SplitN(hostLower, ".", 2)
-	if len(parts) == 2 {
-		if entry, ok := r.wildcard[parts[1]]; ok {
+	if wildcard != "" {
+		if entry, ok := r.entries[wildcard]; ok {
 			return entry
 		}
 	}
-
 	return nil
 }
 

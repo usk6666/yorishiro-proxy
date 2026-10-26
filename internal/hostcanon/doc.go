@@ -1,7 +1,8 @@
 // Package hostcanon holds the host comparison forms shared by the
 // host-matching seams of the data path: TargetScope and the per-host
-// RateLimiter in internal/connector, the TLS passthrough list, and the
-// raw passthrough list in internal/config.
+// RateLimiter in internal/connector, the TLS passthrough list, the
+// raw passthrough list in internal/config, and the per-host TLS settings
+// (host_tls: transport.HostTLSRegistry and connector.HostTLSResolver).
 //
 // A client may spell one destination several ways ("localhost." and
 // "localhost", "[::ffff:127.0.0.1]" and "127.0.0.1", "0:0::1" and "::1").
@@ -23,7 +24,11 @@
 //     spellings verbatim: Go's pure resolver rejects the all-digit ones
 //     and looks the others up in DNS, so folding them onto an allow-like
 //     entry (one that means less inspection) could exempt a connection
-//     that lands somewhere else.
+//     that lands somewhere else. Per-host TLS entries use it too
+//     (DialEquivalentPatternKey / DialEquivalentLookupKeys): an entry is
+//     mixed-direction — a client certificate or tls_verify: false lowers
+//     protection toward the named host, a ca_bundle or tls_verify: true
+//     raises it — so neither over- nor under-folding is safe there.
 //
 // The package imports only the standard library so that internal/config,
 // internal/connector and internal/connector/transport can all use it

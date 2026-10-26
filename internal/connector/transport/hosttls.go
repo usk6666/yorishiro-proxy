@@ -9,8 +9,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
+
+	"github.com/usk6666/yorishiro-proxy/internal/hostcanon"
 )
 
 // HostTLSConfig holds per-host TLS configuration for upstream connections.
@@ -151,16 +152,33 @@ func (c *HostTLSConfig) CABundleHash() (string, error) {
 
 // HostTLSRegistry manages per-host TLS configurations and a global default.
 // It is safe for concurrent use.
+//
+// Hostnames are compared in the dial-equivalent host form (USK-1384):
+// hostcanon.DialEquivalentPatternKey on Set / Remove and
+// hostcanon.DialEquivalentLookupKeys on Lookup, so "localhost." finds the
+// "localhost" entry and "::ffff:127.0.0.1" the "127.0.0.1" entry. Legacy
+// inet_aton IPv4 spellings ("127.1", "0x7f.0.0.1") are compared as written:
+// Go's pure resolver does not read them as addresses, so folding them could
+// send an entry's client certificate, or skip verification, toward whatever
+// DNS returns. Only the comparison key is folded; the ServerName, the SNI
+// and the dial target stay as written (MITM Principle 1).
 type HostTLSRegistry struct {
 	mu     sync.RWMutex
 	global *HostTLSConfig
-	hosts  map[string]*HostTLSConfig
+	hosts  map[string]hostTLSRegistryEntry // key = hostcanon.DialEquivalentPatternKey
+}
+
+// hostTLSRegistryEntry is one registered host pattern, kept as entered for
+// Hosts, with its configuration.
+type hostTLSRegistryEntry struct {
+	pattern string
+	cfg     *HostTLSConfig
 }
 
 // NewHostTLSRegistry creates a new empty registry.
 func NewHostTLSRegistry() *HostTLSRegistry {
 	return &HostTLSRegistry{
-		hosts: make(map[string]*HostTLSConfig),
+		hosts: make(map[string]hostTLSRegistryEntry),
 	}
 }
 
@@ -179,56 +197,54 @@ func (r *HostTLSRegistry) Global() *HostTLSConfig {
 	return r.global
 }
 
-// Set registers a TLS configuration for the given hostname.
-// The hostname is stored lowercase for case-insensitive matching.
+// Set registers a TLS configuration for the given hostname or "*.domain"
+// pattern. Patterns are compared in the dial-equivalent form, so a later
+// Set with an equivalent spelling ("LocalHost." after "localhost")
+// replaces the earlier entry.
 func (r *HostTLSRegistry) Set(hostname string, cfg *HostTLSConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.hosts[strings.ToLower(hostname)] = cfg
+	r.hosts[hostcanon.DialEquivalentPatternKey(hostname)] = hostTLSRegistryEntry{pattern: hostname, cfg: cfg}
 }
 
-// Remove removes the TLS configuration for the given hostname.
+// Remove removes the TLS configuration registered under the given hostname
+// or any dial-equivalent spelling of it.
 func (r *HostTLSRegistry) Remove(hostname string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.hosts, strings.ToLower(hostname))
+	delete(r.hosts, hostcanon.DialEquivalentPatternKey(hostname))
 }
 
-// Lookup finds the TLS configuration for the given serverName.
-// It first checks for an exact match, then tries wildcard matches
-// (e.g., "*.example.com" matches "api.example.com"), and finally
+// Lookup finds the TLS configuration for the given serverName (a host
+// without a port). It first checks for an exact match, then for a
+// one-level wildcard match ("*.example.com" matches "api.example.com" but
+// not "a.b.example.com"), both in the dial-equivalent form, and finally
 // falls back to the global configuration.
 // Returns nil if no configuration matches.
 func (r *HostTLSRegistry) Lookup(serverName string) *HostTLSConfig {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	name := strings.ToLower(serverName)
-
-	// Exact match.
-	if cfg, ok := r.hosts[name]; ok {
-		return cfg
+	exact, wildcard := hostcanon.DialEquivalentLookupKeys(serverName)
+	if e, ok := r.hosts[exact]; ok {
+		return e.cfg
 	}
-
-	// Wildcard match: check "*.domain.com" patterns.
-	if idx := strings.IndexByte(name, '.'); idx >= 0 {
-		wildcard := "*" + name[idx:]
-		if cfg, ok := r.hosts[wildcard]; ok {
-			return cfg
+	if wildcard != "" {
+		if e, ok := r.hosts[wildcard]; ok {
+			return e.cfg
 		}
 	}
-
-	// Fallback to global.
 	return r.global
 }
 
-// Hosts returns a copy of all registered host-specific configurations.
+// Hosts returns a copy of all registered host-specific configurations,
+// keyed by the pattern as it was passed to Set.
 func (r *HostTLSRegistry) Hosts() map[string]*HostTLSConfig {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	result := make(map[string]*HostTLSConfig, len(r.hosts))
-	for k, v := range r.hosts {
-		result[k] = v
+	for _, e := range r.hosts {
+		result[e.pattern] = e.cfg
 	}
 	return result
 }
