@@ -402,6 +402,12 @@ type Stack struct {
 	// (USK-1161). May be nil (no tracking).
 	LiveConns *connector.LiveConns
 
+	// RateLimiter is the Policy / Agent rate-limit policy (the same
+	// instance as Deps.RateLimiter). TCP forward listeners piggybacking on
+	// this Stack check it once per accepted connection, after the scope
+	// gate. May be nil (unlimited).
+	RateLimiter *connector.RateLimiter
+
 	// TransparentMode is "redirect" for a transparent listener, empty
 	// otherwise (USK-1316).
 	TransparentMode string
