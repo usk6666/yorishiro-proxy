@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -16,7 +17,7 @@ func TestBuildPlainHTTPStack_Basic(t *testing.T) {
 	defer upstreamB.Close()
 
 	cfg := &BuildConfig{}
-	stack, err := BuildPlainHTTPStack(clientB, upstreamB, "example.com:80", cfg)
+	stack, err := BuildPlainHTTPStack(context.Background(), clientB, upstreamB, "example.com:80", cfg)
 	if err != nil {
 		t.Fatalf("BuildPlainHTTPStack: %v", err)
 	}
@@ -49,14 +50,14 @@ func TestBuildPlainHTTPStack_NilConfig(t *testing.T) {
 	defer upstreamA.Close()
 	defer upstreamB.Close()
 
-	if _, err := BuildPlainHTTPStack(clientB, upstreamB, "example.com:80", nil); err == nil {
+	if _, err := BuildPlainHTTPStack(context.Background(), clientB, upstreamB, "example.com:80", nil); err == nil {
 		t.Error("expected error with nil config, got nil")
 	}
 }
 
 func TestBuildPlainHTTPStack_NilConn(t *testing.T) {
 	cfg := &BuildConfig{}
-	if _, err := BuildPlainHTTPStack(nil, nil, "example.com:80", cfg); err == nil {
+	if _, err := BuildPlainHTTPStack(context.Background(), nil, nil, "example.com:80", cfg); err == nil {
 		t.Error("expected error with nil conn, got nil")
 	}
 }

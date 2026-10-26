@@ -46,7 +46,7 @@ func buildNoALPNThroughClient(t *testing.T, ut UpstreamTarget, cfg *BuildConfig)
 			resCh <- result{err: aerr}
 			return
 		}
-		stack, _, _, berr := buildTransparentNoALPNStack(context.Background(), sc, ut, cfg, ClientHelloPeek{SNI: extractHost(ut.TLS)}, 5*time.Second)
+		stack, _, _, berr := buildTransparentNoALPNStack(fixedConnIDCtx(), sc, ut, cfg, ClientHelloPeek{SNI: extractHost(ut.TLS)}, 5*time.Second)
 		if berr != nil {
 			_ = sc.Close()
 		}
@@ -78,6 +78,8 @@ func buildNoALPNThroughClient(t *testing.T, ut UpstreamTarget, cfg *BuildConfig)
 		t.Fatalf("buildTransparentNoALPNStack: %v", res.err)
 	}
 	t.Cleanup(func() { _ = res.stack.Close() })
+	// USK-1278: the stack adopts the ctx conn ID (the one logged as conn_id).
+	assertStackAdoptsConnID(t, res.stack, testFixedConnID)
 	return res.stack
 }
 

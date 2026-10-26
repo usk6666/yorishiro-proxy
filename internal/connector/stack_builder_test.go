@@ -107,7 +107,7 @@ func runRawPassthroughStack(t *testing.T, tlsFingerprint string) {
 			resultCh <- buildResult{nil, err}
 			return
 		}
-		stack, _, _, err := BuildConnectionStack(context.Background(), serverConn, SameUpstreamTarget(target), buildCfg, ClientHelloPeek{})
+		stack, _, _, err := BuildConnectionStack(fixedConnIDCtx(), serverConn, SameUpstreamTarget(target), buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack, err}
 	}()
 
@@ -148,6 +148,8 @@ func runRawPassthroughStack(t *testing.T, tlsFingerprint string) {
 	if stack.ConnID == "" {
 		t.Error("expected non-empty ConnID")
 	}
+	// USK-1278: the stack adopts the ctx conn ID (the one logged as conn_id).
+	assertStackAdoptsConnID(t, stack, testFixedConnID)
 
 	if stack.ClientTopmost() == nil {
 		t.Error("expected non-nil client topmost layer")
@@ -230,7 +232,7 @@ func TestBuildConnectionStack_HTTPMITMStack(t *testing.T) {
 			resultCh <- buildResult{err: err}
 			return
 		}
-		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(context.Background(), serverConn, SameUpstreamTarget(target), buildCfg, ClientHelloPeek{})
+		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(fixedConnIDCtx(), serverConn, SameUpstreamTarget(target), buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack, clientSnap, upstreamSnap, err}
 	}()
 
@@ -270,6 +272,8 @@ func TestBuildConnectionStack_HTTPMITMStack(t *testing.T) {
 	if stack.ConnID == "" {
 		t.Error("expected non-empty ConnID")
 	}
+	// USK-1278: the stack adopts the ctx conn ID (the one logged as conn_id).
+	assertStackAdoptsConnID(t, stack, testFixedConnID)
 
 	if stack.ClientTopmost() == nil {
 		t.Error("expected non-nil client topmost layer")
@@ -410,7 +414,7 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 			resultCh <- buildResult{err: acceptErr}
 			return
 		}
-		stack, clientSnap, upstreamSnap, buildErr := BuildConnectionStack(context.Background(), serverConn, SameUpstreamTarget(target), buildCfg, ClientHelloPeek{})
+		stack, clientSnap, upstreamSnap, buildErr := BuildConnectionStack(fixedConnIDCtx(), serverConn, SameUpstreamTarget(target), buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack, clientSnap, upstreamSnap, buildErr}
 	}()
 
@@ -459,6 +463,8 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 		if stack == nil {
 			t.Fatal("expected non-nil stack")
 		}
+		// USK-1278: the stack adopts the ctx conn ID (the one logged as conn_id).
+		assertStackAdoptsConnID(t, stack, testFixedConnID)
 
 		// Client side should be a *http2.Layer.
 		clientTop := stack.ClientTopmost()

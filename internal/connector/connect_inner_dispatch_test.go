@@ -301,7 +301,7 @@ func TestBuildBytechunkStack(t *testing.T) {
 	defer c.Close()
 	defer d.Close()
 
-	stack, err := BuildBytechunkStack(a, c, "example.com:443", cfg)
+	stack, err := BuildBytechunkStack(context.Background(), a, c, "example.com:443", cfg)
 	if err != nil {
 		t.Fatalf("BuildBytechunkStack: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestBuildBytechunkStack(t *testing.T) {
 // error on nil conns rather than panicking inside bytechunk.New.
 func TestBuildBytechunkStack_NilConn(t *testing.T) {
 	cfg := &BuildConfig{}
-	_, err := BuildBytechunkStack(nil, nil, "example.com:443", cfg)
+	_, err := BuildBytechunkStack(context.Background(), nil, nil, "example.com:443", cfg)
 	if err == nil {
 		t.Fatal("expected error on nil conns, got nil")
 	}

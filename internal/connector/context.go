@@ -30,6 +30,11 @@ func GenerateConnID() string {
 	return hex.EncodeToString(b)
 }
 
+// ConnIDOrGenerate returns the connection ID stored in ctx, or a fresh one.
+func ConnIDOrGenerate(ctx context.Context) string {
+	return GenerateConnID()
+}
+
 // ContextWithConnID returns a new context with the given connection ID.
 func ContextWithConnID(ctx context.Context, connID string) context.Context {
 	return context.WithValue(ctx, ctxKeyConnID, connID)

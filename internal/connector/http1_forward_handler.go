@@ -263,7 +263,7 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 		// Step 5: Build the per-connection stack. After this point the
 		// stack owns both conns; failures must close upstreamConn explicitly
 		// (which BuildPlainHTTPStack does NOT do — it only constructs).
-		stack, berr := BuildPlainHTTPStack(pc, upstreamConn, target, cfg.BuildCfg)
+		stack, berr := BuildPlainHTTPStack(ctx, pc, upstreamConn, target, cfg.BuildCfg)
 		if berr != nil {
 			upstreamConn.Close()
 			connLogger.Warn("plain HTTP stack build failed", "error", berr)

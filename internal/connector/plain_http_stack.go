@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"context"
 	"fmt"
 	"net"
 
@@ -30,6 +31,7 @@ import (
 // (no I/O, no dial). Cancellation belongs to the caller's dial step and
 // to the per-Layer session loop, not to this constructor.
 func BuildPlainHTTPStack(
+	ctx context.Context,
 	clientConn net.Conn,
 	upstreamConn net.Conn,
 	target string,

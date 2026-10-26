@@ -275,6 +275,7 @@ func BuildPlainH2CStack(
 // Ownership: the returned stack owns both conns; callers must defer
 // stack.Close().
 func BuildBytechunkStack(
+	ctx context.Context,
 	clientConn net.Conn,
 	upstreamConn net.Conn,
 	target string,
@@ -514,7 +515,7 @@ func dispatchInnerHTTP1(
 	cfg innerDispatchConfig,
 	logger *slog.Logger,
 ) {
-	stack, err := BuildPlainHTTPStack(pc, upstreamConn, target, cfg.BuildCfg)
+	stack, err := BuildPlainHTTPStack(ctx, pc, upstreamConn, target, cfg.BuildCfg)
 	if err != nil {
 		_ = upstreamConn.Close()
 		logger.Warn("inner plain-HTTP stack build failed",
@@ -575,7 +576,7 @@ func dispatchInnerBytechunk(
 	cfg innerDispatchConfig,
 	logger *slog.Logger,
 ) {
-	stack, err := BuildBytechunkStack(pc, upstreamConn, target, cfg.BuildCfg)
+	stack, err := BuildBytechunkStack(ctx, pc, upstreamConn, target, cfg.BuildCfg)
 	if err != nil {
 		_ = upstreamConn.Close()
 		logger.Warn("inner bytechunk stack build failed",
