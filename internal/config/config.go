@@ -841,7 +841,8 @@ type ProxyConfig struct {
 	// and the IPv6 zone are folded, so "localhost." gets the "localhost"
 	// entry. Legacy inet_aton IPv4 spellings ("127.1", "0x7f.0.0.1") are
 	// compared as written. Validate rejects two keys with the same folded
-	// form. The fold is comparison-only: the dial target, the TLS
+	// form, and an entry whose value is null (USK-1389); write {} for an
+	// entry that inherits the global settings. The fold is comparison-only: the dial target, the TLS
 	// ServerName and the recorded data stay as written.
 	HostTLS map[string]*HostTLSEntry `json:"host_tls,omitempty"`
 
@@ -1076,7 +1077,7 @@ func (c *ProxyConfig) Validate() error {
 	if err := c.validateClientTimeouts(); err != nil {
 		return err
 	}
-	if err := validateHostTLSKeys(c.HostTLS); err != nil {
+	if err := validateHostTLS(c.HostTLS); err != nil {
 		return err
 	}
 	return nil
