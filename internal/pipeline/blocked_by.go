@@ -6,8 +6,8 @@ package pipeline
 // so audit Streams written from session-side recording line up with what
 // the operator can filter on.
 //
-// "rate_limit" is not emitted by any Pipeline Step today: the transparent
-// listener's connection-refusal recorder writes it (like "capacity"). The
+// "rate_limit" is not emitted by any Pipeline Step today: the
+// connection-level gates' refusal recorder writes it (like "capacity"). The
 // session-side recorder also accepts it, so a future RateLimitStep that
 // emits `Result{Action: Drop, BlockedBy: BlockedByRateLimit}` participates
 // in the audit pipeline without further wiring.
@@ -37,12 +37,15 @@ const (
 	// instead of vanishing from both the queue and the flow store.
 	BlockedByInterceptCancelled = "intercept_cancelled"
 
-	// BlockedByRateLimit attributes an audit Stream to a connection the
-	// transparent listener refused because a Policy / Agent rate limit
-	// was exceeded (USK-1374). No Pipeline Step emits it: the connection
-	// is refused at admission, before any Layer or Pipeline exists, and
-	// the proxybuild transparent recorder writes it directly
-	// (connector.TransparentBlockedByRateLimit mirrors this value). The
+	// BlockedByRateLimit attributes an audit Stream to a connection a
+	// connection-level gate refused because a Policy / Agent rate limit
+	// was exceeded: the transparent listener (USK-1374), tcp_forwards and
+	// the CONNECT / plain-HTTP forward / SOCKS5 gates (USK-1381). No
+	// Pipeline Step emits it: the connection is refused at admission,
+	// before any Layer or Pipeline exists, and proxybuild's
+	// blockedConnRecorder writes it directly
+	// (connector.TransparentBlockedByRateLimit and
+	// connector.GateRefusalBlockedByRateLimit mirror this value). The
 	// session-side recorder also accepts it for a future RateLimitStep.
 	BlockedByRateLimit = "rate_limit"
 

@@ -495,8 +495,10 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	headRecorder := buildRequestHeadRecorder(deps.FlowStore, deps.RecordScope, listenerName, logger)
 
 	// Recorder for connections a listener-level gate refuses before any
-	// Envelope exists; the tcp_forwards rate-limit gate uses it.
+	// Envelope exists: the tcp_forwards rate-limit gate, and the CONNECT /
+	// SOCKS5 / plain-HTTP forward rate-limit gates via onGateRefusal.
 	blockedRecorder := newBlockedConnRecorder(deps.FlowStore, listenerName, logger, deps.RecordScope)
+	onGateRefusal := gateRefusalCallback(blockedRecorder)
 
 	// proxybuild.Listener wraps the FullListener so it can interpose
 	// connection.on_connect / on_disconnect lifecycle hooks AND host the
@@ -530,6 +532,9 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		// USK-1189: CONNECT requests the handler cuts off (deadline or
 		// parser limit, after bytes arrived) share the USK-1181 recorder.
 		OnRequestHeadFailure: connectorRequestHeadCallback(headRecorder),
+		// USK-1381: a rate-limit refusal is recorded as a blocked_by
+		// rate_limit Stream.
+		OnGateRefusal: onGateRefusal,
 		// USK-844: thread the configured request timeout into the inner-byte
 		// peek deadline. The provider closure reads the wrapper's atomic
 		// slot so a runtime configure { request_timeout_ms } reaches the
@@ -571,6 +576,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		OnStack:             buildOnStack(p, deps, headRecorder, logger),
 		OnHTTP2Stack:        buildOnHTTP2Stack(pH2, deps, logger),
 		OnUpstreamTLSError:  upstreamTLSErrorRecorder,
+		OnGateRefusal:       onGateRefusal,
 		// USK-844: thread the configured request timeout into the inner-byte
 		// peek deadline (SOCKS5 mirrors CONNECT). See the comment above
 		// CONNECTHandlerConfig.InnerPeekTimeoutProvider for the precedence.
@@ -599,6 +605,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		// USK-1189: a target peek cut off by its deadline is recorded
 		// with the 400 the handler returns.
 		OnRequestHeadFailure: connectorRequestHeadCallback(headRecorder),
+		OnGateRefusal:        onGateRefusal,
 		Logger:               logger,
 	})
 

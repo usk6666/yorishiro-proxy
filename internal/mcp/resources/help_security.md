@@ -368,6 +368,7 @@ What happens to traffic over the limit depends on where it enters. In every live
 
 - HTTP CONNECT tunnel request and the plain HTTP forward proxy: `HTTP/1.1 429 Too Many Requests` with body `yorishiro-proxy: target blocked by rate limit`, after which the connection closes; no tunnel is opened.
 - SOCKS5: the CONNECT reply is `REP 0x02` (connection not allowed by ruleset), then the connection closes.
+- For these three gates every refusal is also recorded as an error Stream with `blocked_by: "rate_limit"`, `failure_reason: "rate_limit"`, `tags.via` (`connect` / `http1-forward` / `socks5`), `tags.target` (the requested `host:port`), `tags.reason`, `tags.rate_limit_type` (`global` / `per_host`) and `tags.rate_limit_effective_rps`, and no message rows. The protocol is `http` for CONNECT and the forward proxy (scheme `http` for the forward, empty for CONNECT) and `raw` for SOCKS5 (no scheme). Find them with `query` `filter.blocked_by: "rate_limit"`; `capture_scope` applies.
 - `transparent_mode` listener and `tcp_forwards`: see below.
 - MCP tool-initiated requests (`resend_*`, `fuzz_*`, `macro` steps) never get a 429: they wait for a token instead, for at most the call's deadline (for a macro step, its `timeout_ms`), and fail with a `rate limit` error only when that wait would outlast it.
 
@@ -384,7 +385,7 @@ What happens to traffic over the limit depends on where it enters. In every live
 - Plaintext `http` / `websocket` / `sse` entries: the same `HTTP/1.1 429 Too Many Requests` bytes as the CONNECT / forward gates, then the connection closes.
 - Every other entry (`raw`, `auto`, `http2`, `grpc`) and every `tls: true` entry: the connection is closed with no byte written -- no 429 inside an un-terminated TLS handshake or after an h2 preface.
 
-A forward's target scope refusal is logged but not recorded as a Stream.
+A forward's target scope refusal is logged but not recorded as a Stream. The same holds for a target scope refusal (403 / `REP 0x02`) on the CONNECT, plain HTTP forward and SOCKS5 gates: only rate-limit refusals are recorded there.
 
 ### `set_rate_limits`
 

@@ -154,7 +154,7 @@ func TestReplacePolicyLimits_LowerRPSDeniesCONNECTBurst(t *testing.T) {
 	cfg := CONNECTHandlerConfig{RateLimiter: rl}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	for i := 0; i < 5; i++ {
-		if connectPolicyReject(cfg, "burst.test:443", false, logger) != nil {
+		if resp, _ := connectPolicyReject(cfg, "burst.test:443", false, logger); resp != nil {
 			t.Fatalf("CONNECT %d denied at 1000 rps", i)
 		}
 	}
@@ -162,7 +162,7 @@ func TestReplacePolicyLimits_LowerRPSDeniesCONNECTBurst(t *testing.T) {
 	rl.SetPolicyLimits(RateLimitConfig{MaxRequestsPerSecond: 1})
 	denied := false
 	for i := 0; i < 5; i++ {
-		if connectPolicyReject(cfg, "burst.test:443", false, logger) != nil {
+		if resp, _ := connectPolicyReject(cfg, "burst.test:443", false, logger); resp != nil {
 			denied = true
 			break
 		}

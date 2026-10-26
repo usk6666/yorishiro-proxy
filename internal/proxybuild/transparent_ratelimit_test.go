@@ -21,6 +21,10 @@ func TestTransparentBlockedByRateLimit_MatchesPipelineLabel(t *testing.T) {
 		t.Fatalf("connector.TransparentBlockedByRateLimit = %q, want pipeline.BlockedByRateLimit %q",
 			connector.TransparentBlockedByRateLimit, pipeline.BlockedByRateLimit)
 	}
+	if connector.GateRefusalBlockedByRateLimit != pipeline.BlockedByRateLimit {
+		t.Fatalf("connector.GateRefusalBlockedByRateLimit = %q, want pipeline.BlockedByRateLimit %q",
+			connector.GateRefusalBlockedByRateLimit, pipeline.BlockedByRateLimit)
+	}
 }
 
 // T7 (USK-1374): Deps.RateLimiter reaches the transparent handler built by

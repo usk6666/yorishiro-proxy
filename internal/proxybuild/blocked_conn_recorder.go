@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
@@ -41,14 +42,17 @@ type blockedConn struct {
 // blockedConnRecorder writes one self-contained State="error" Stream per
 // blockedConn. It is the recording seam shared by the listener-level gates
 // that refuse a connection before the Pipeline runs: the transparent
-// listener's Observer.OnBlocked and the tcp_forwards accept-time rate-limit
-// gate. A nil recorder (no flow store) records nothing.
+// listener's Observer.OnBlocked, the tcp_forwards accept-time rate-limit
+// gate, and the CONNECT / plain-HTTP forward / SOCKS5 rate-limit gates
+// (connector.OnGateRefusalFunc, via gateRefusalCallback). A nil recorder
+// (no flow store) records nothing.
 //
 // Each record is one synchronous SaveStream on the refused connection's own
 // goroutine, bounded by a 5s timeout. A refusal costs at most what an
 // admitted connection would have cost (which records at least one Stream),
 // so a refusal flood does not amplify the DB load beyond the traffic that
-// produced it.
+// produced it; the listener's max_connections bounds how many such writes
+// run at once (a refused connection holds its slot until the write ends).
 type blockedConnRecorder struct {
 	store        flow.Writer
 	listenerName string
@@ -106,5 +110,42 @@ func (r *blockedConnRecorder) record(ctx context.Context, b blockedConn) {
 	if err := r.store.SaveStream(saveCtx, st); err != nil {
 		r.logger.Error("blocked connection recorder: audit stream save failed",
 			"stream_id", streamID, "blocked_by", b.BlockedBy, "error", err)
+	}
+}
+
+// gateRefusalCallback adapts r to the connector's CONNECT / plain-HTTP
+// forward / SOCKS5 gate-refusal hook (USK-1381). A nil recorder yields a
+// nil callback, so the handlers only log.
+func gateRefusalCallback(r *blockedConnRecorder) connector.OnGateRefusalFunc {
+	if r == nil {
+		return nil
+	}
+	return func(ctx context.Context, g connector.GateRefusal) {
+		protocol, scheme := gateRefusalProtocolScheme(g.Via)
+		r.record(ctx, blockedConn{
+			Protocol:      protocol,
+			Scheme:        scheme,
+			ClientAddr:    g.ClientAddr,
+			ScopeHost:     g.Host,
+			BlockedBy:     g.BlockedBy,
+			FailureReason: g.BlockedBy,
+			Tags:          g.Tags,
+		})
+	}
+}
+
+// gateRefusalProtocolScheme maps a refusing gate to its Stream protocol
+// and scheme. A CONNECT and a plain-HTTP forward are HTTP exchanges; only
+// the forward has a known scheme (the CONNECT tunnel's inner transport
+// was never established). A SOCKS5 tunnel is a transport, recorded raw
+// with no scheme.
+func gateRefusalProtocolScheme(via string) (protocol, scheme string) {
+	switch via {
+	case "http1-forward":
+		return string(envelope.ProtocolHTTP), "http"
+	case "connect":
+		return string(envelope.ProtocolHTTP), ""
+	default:
+		return string(envelope.ProtocolRaw), ""
 	}
 }
