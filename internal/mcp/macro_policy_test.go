@@ -49,6 +49,16 @@ func newBurstOneHostLimiter(t *testing.T) *connector.RateLimiter {
 	return rl
 }
 
+// boundedCtx returns a context that expires after 2s, so a regression that
+// makes a SendFunc wait on an empty rate bucket fails the test instead of
+// blocking for the bucket's ~1000s refill interval.
+func boundedCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 // macroSendFuncsUnderTest enumerates both macro SendFunc constructors so
 // every policy assertion runs against each.
 func macroSendFuncsUnderTest() []struct {
@@ -110,7 +120,7 @@ func TestMacroSendFuncs_RateLimit_ScopeRefusalConsumesNoToken(t *testing.T) {
 			s := mkServerFromLegacyDeps(legacyDeps{targetScope: ts, rateLimiter: rl})
 			send := tc.mk(s)
 
-			_, err := send(context.Background(), &macro.SendRequest{
+			_, err := send(boundedCtx(t), &macro.SendRequest{
 				Method: "GET", URL: "http://blocked.example.com/x", StepID: "s1",
 			})
 			if err == nil || !strings.Contains(err.Error(), "target scope") {
@@ -143,7 +153,7 @@ func TestMacroSendFuncs_SafetyInput_BlocksDestructiveBody(t *testing.T) {
 			s := mkServerFromLegacyDeps(legacyDeps{safetyEngine: engine, rateLimiter: rl})
 			send := tc.mk(s)
 
-			_, err = send(context.Background(), &macro.SendRequest{
+			_, err = send(boundedCtx(t), &macro.SendRequest{
 				Method: "POST",
 				URL:    echo.URL + "/q",
 				Body:   []byte("query=DROP TABLE users;"),
@@ -179,12 +189,12 @@ func TestMacroSendFuncs_Budget_RefusesWhenExhausted(t *testing.T) {
 			s := mkServerFromLegacyDeps(legacyDeps{budgetManager: bm})
 			send := tc.mk(s)
 
-			if _, err := send(context.Background(), &macro.SendRequest{
+			if _, err := send(boundedCtx(t), &macro.SendRequest{
 				Method: "GET", URL: echo.URL + "/1", StepID: "s1",
 			}); err != nil {
 				t.Fatalf("first step: unexpected error: %v", err)
 			}
-			_, err := send(context.Background(), &macro.SendRequest{
+			_, err := send(boundedCtx(t), &macro.SendRequest{
 				Method: "GET", URL: echo.URL + "/2", StepID: "s2",
 			})
 			if !errors.Is(err, errBudgetExhausted) {
