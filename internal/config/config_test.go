@@ -35,16 +35,6 @@ func TestValidate_InvalidFields(t *testing.T) {
 			errSub: "max_connections must be >= 1",
 		},
 		{
-			name:   "request_timeout zero",
-			modify: func(c *Config) { c.RequestTimeout = 0 },
-			errSub: "request_timeout must be > 0",
-		},
-		{
-			name:   "request_timeout negative",
-			modify: func(c *Config) { c.RequestTimeout = -time.Second },
-			errSub: "request_timeout must be > 0",
-		},
-		{
 			name:   "peek_timeout zero",
 			modify: func(c *Config) { c.PeekTimeout = 0 },
 			errSub: "peek_timeout must be > 0",
@@ -209,7 +199,7 @@ func TestValidate_ValidFields(t *testing.T) {
 		},
 		{
 			name:   "minimal valid non-default timeouts",
-			modify: func(c *Config) { c.PeekTimeout = time.Nanosecond; c.RequestTimeout = time.Nanosecond },
+			modify: func(c *Config) { c.PeekTimeout = time.Nanosecond },
 		},
 		{
 			name:   "dial_timeout zero",
@@ -259,7 +249,6 @@ func TestDefault_FieldsHaveSensibleDefaults(t *testing.T) {
 		{"LogLevel", cfg.LogLevel, false},
 		{"LogFormat", cfg.LogFormat, false},
 		{"PeekTimeout", cfg.PeekTimeout, false},
-		{"RequestTimeout", cfg.RequestTimeout, false},
 		{"MaxConnections", cfg.MaxConnections, false},
 		{"InsecureSkipVerify", cfg.InsecureSkipVerify, true},
 		{"CACertPath", cfg.CACertPath, true},

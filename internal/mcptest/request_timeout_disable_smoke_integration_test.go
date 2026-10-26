@@ -2,7 +2,7 @@
 
 // USK-1185 smoke coverage: MCP `configure { request_timeout_ms: 0 }`
 // disables the client request-head bound on the live data path, even when
-// the boot-time config set a short request_timeout (which also seeds the
+// the -config file set a short request_timeout_ms (which also seeds the
 // plain-HTTP forward peek's static value).
 package mcptest_test
 
@@ -20,8 +20,7 @@ import (
 )
 
 func TestE2E_RequestTimeoutZero_TrickledHeadAnswered(t *testing.T) {
-	// request_timeout is a JSON time.Duration (nanoseconds): 200ms.
-	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: `{"request_timeout": 200000000}`})
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: `{"request_timeout_ms": 200}`})
 	upstream := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
 		_, _ = io.WriteString(w, "path="+r.URL.Path)
 	}))

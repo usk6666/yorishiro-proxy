@@ -414,6 +414,8 @@ How long an HTTP/1.x client keep-alive connection waits for the first byte of th
 
 When `request_timeout_ms` is also enabled the wait is the longer of the two; with only one of them enabled, each bounds only its own phase (this value the wait for the first byte, `request_timeout_ms` the rest of the head). Values below `115000` can race Firefox, which reuses keep-alive connections for up to 115 s: the proxy may close a connection just as the browser sends its next request on it. HTTP/2 connections are not covered yet. Changes apply to the next request.
 
+**Config file**: `request_timeout_ms` and `client_idle_timeout_ms` can also be set at the top level of the `-config` file (same meaning and range; omitted = the default; an out-of-range value stops the server at startup). That is only the boot value: a value set here replaces it, and nothing re-applies the file later (not `proxy_start`, not a `SIGHUP` policy reload) until the process restarts.
+
 ### client_cert (object, optional)
 Global mTLS client certificate configuration for upstream connections.
 - **cert_path** (string): Path to PEM-encoded client certificate. Set to `""` to disable.

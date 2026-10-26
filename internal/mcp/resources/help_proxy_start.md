@@ -149,6 +149,8 @@ How long an HTTP/1.x client keep-alive connection waits for the first byte of th
 
 When `request_timeout_ms` is also enabled the wait is the longer of the two; with only one of them enabled, each bounds only its own phase (this value the wait for the first byte, `request_timeout_ms` the rest of the head). Values below `115000` can race Firefox, which reuses keep-alive connections for up to 115 s: the proxy may close a connection just as the browser sends its next request on it. HTTP/2 connections are not covered yet. Omitted: the current value is kept. Changes apply to the next request.
 
+**Config file**: both `request_timeout_ms` and `client_idle_timeout_ms` can also be set at the top level of the `-config` file, with the same meaning and range (`0` = disabled, omitted = the default). An out-of-range value stops the server at startup. The file sets the value the server boots with — `query` `status` reports it before the first `proxy_start` — and it applies to every listener (including `tcp_forwards`) until `configure` or `proxy_start` changes it; nothing re-applies the file afterwards (a `proxy_start` that omits the field keeps the current value, and a `SIGHUP` policy reload does not apply it). Restart the process to return to the file's value.
+
 ### transparent_mode (string, optional)
 Listener mode.
 - `none` (default when nothing is configured): the explicit proxy (CONNECT / SOCKS5 / plain-HTTP forward).
