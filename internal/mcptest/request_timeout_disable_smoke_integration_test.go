@@ -2,7 +2,7 @@
 
 // USK-1185 smoke coverage: MCP `configure { request_timeout_ms: 0 }`
 // disables the client request-head bound on the live data path, even when
-// the boot-time config set a short request_timeout (which also seeds the
+// the -config file set a short request_timeout_ms (which also seeds the
 // plain-HTTP forward peek's static value).
 package mcptest_test
 

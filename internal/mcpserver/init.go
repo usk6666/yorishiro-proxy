@@ -634,6 +634,10 @@ func NewLiveManager(
 	if store != nil {
 		store.OnClose(rejections.Close)
 	}
+	// USK-1186: the static request-head bound from the config file's
+	// request_timeout_ms (default when omitted, 0 when disabled); the
+	// Manager seeding below carries the disabled state itself.
+	staticRequestTimeout := bootRequestTimeout(proxyCfg)
 	factoryOpts := func(ctx context.Context, name, addr string, lo proxybuild.ListenerOptions) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
 			// USK-1316: per-listener transparent mode + test seams.
@@ -661,7 +665,7 @@ func NewLiveManager(
 			GRPCSafetyEngine:        perProtoSafety.GRPC,
 			SafetyInputLogOnly:      perProtoSafety.LogOnly,
 			PeekTimeout:             cfg.PeekTimeout,
-			RequestTimeout:          cfg.RequestTimeout,
+			RequestTimeout:          staticRequestTimeout,
 			MaxConnections:          cfg.MaxConnections,
 			PassthroughList:         passthrough,
 			Scope:                   targetScope,
@@ -712,19 +716,18 @@ func NewLiveManager(
 		return nil, fmt.Errorf("init proxybuild manager: %w", err)
 	}
 	mgr.SetPeekTimeout(cfg.PeekTimeout)
-	// USK-844: seed the Manager-level RequestTimeout slot so MCP
-	// configure / proxy_start reads currentRequestTimeout from a populated
-	// state instead of 0, and so listeners started later inherit the
-	// config-file value via StartNamed's tunable-fan-out.
-	mgr.SetRequestTimeout(cfg.RequestTimeout)
+	// USK-844 / USK-1186: seed the Manager-level client timeout state from
+	// the config file's request_timeout_ms / client_idle_timeout_ms so MCP
+	// configure / proxy_start and query read a populated state, and so
+	// listeners started later inherit it via StartNamed's tunable fan-out.
+	applyBootClientTimeouts(mgr, proxyCfg)
 	mgr.SetMaxConnections(cfg.MaxConnections)
 
-	// proxyCfg + issuer are reachable via buildCfg; kept on the parameter
-	// list for future cleanup work (USK-697 connector-adapter migration).
+	// issuer is reachable via buildCfg; kept on the parameter list for
+	// future cleanup work (USK-697 connector-adapter migration).
 	// safetyEngine is the read-only Policy Layer view consumed by the
 	// `security` MCP tool — wired via mcp.NewPipeline in
 	// buildMCPComponents, not via proxybuild.Deps.
-	_ = proxyCfg
 	_ = issuer
 	_ = safetyEngine
 	return mgr, nil

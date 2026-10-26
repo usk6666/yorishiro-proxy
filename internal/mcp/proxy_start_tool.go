@@ -1320,12 +1320,11 @@ func (s *Server) currentTLSFingerprint() string {
 }
 
 // validateClientTimeoutMs checks a client-side timeout from proxy_start /
-// configure (USK-1185): 0 (disabled) or minTimeoutMs-maxTimeoutMs.
+// configure (USK-1185): 0 (disabled) or
+// config.MinClientTimeoutMs-config.MaxClientTimeoutMs. The bounds are shared
+// with the config-file keys of the same name (USK-1186).
 func validateClientTimeoutMs(name string, ms int) error {
-	if ms == 0 || (ms >= minTimeoutMs && ms <= maxTimeoutMs) {
-		return nil
-	}
-	return fmt.Errorf("%s must be 0 (disabled) or between %d and %d, got %d", name, minTimeoutMs, maxTimeoutMs, ms)
+	return config.ValidateClientTimeoutMs(name, ms)
 }
 
 // applyClientTimeouts validates and applies request_timeout_ms and

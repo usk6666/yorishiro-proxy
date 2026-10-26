@@ -269,7 +269,6 @@ func TestConfig_Validate_TLSFingerprint(t *testing.T) {
 	base := func(fingerprint string) *Config {
 		return &Config{
 			MaxConnections: 1,
-			RequestTimeout: time.Second,
 			PeekTimeout:    time.Second,
 			TLSFingerprint: fingerprint,
 		}

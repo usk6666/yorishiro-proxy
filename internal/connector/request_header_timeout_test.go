@@ -3,8 +3,6 @@ package connector
 import (
 	"testing"
 	"time"
-
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 )
 
 // TestBuildConfig_EffectiveRequestHeaderTimeout pins the USK-1162 accessor
@@ -49,12 +47,6 @@ func TestBuildConfig_RequestHeaderTimeout_NilSafe(t *testing.T) {
 	c.SetRequestHeaderTimeout(time.Second) // must not panic
 	if got := c.EffectiveRequestHeaderTimeout(); got != DefaultRequestHeaderTimeout {
 		t.Errorf("nil BuildConfig = %v, want default %v", got, DefaultRequestHeaderTimeout)
-	}
-}
-
-func TestDefaultRequestHeaderTimeout_MatchesConfigDefault(t *testing.T) {
-	if want := config.Default().RequestTimeout; DefaultRequestHeaderTimeout != want {
-		t.Errorf("DefaultRequestHeaderTimeout = %v, want config.Default().RequestTimeout = %v", DefaultRequestHeaderTimeout, want)
 	}
 }
 

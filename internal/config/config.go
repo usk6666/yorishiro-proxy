@@ -27,9 +27,6 @@ func (c *Config) Validate() error {
 	if c.MaxConnections < 1 {
 		return fmt.Errorf("max_connections must be >= 1, got %d", c.MaxConnections)
 	}
-	if c.RequestTimeout <= 0 {
-		return fmt.Errorf("request_timeout must be > 0, got %s", c.RequestTimeout)
-	}
 	if c.PeekTimeout <= 0 {
 		return fmt.Errorf("peek_timeout must be > 0, got %s", c.PeekTimeout)
 	}
@@ -179,13 +176,6 @@ type Config struct {
 	// PeekTimeout is the timeout for protocol detection on new connections.
 	PeekTimeout time.Duration `json:"peek_timeout"`
 
-	// RequestTimeout bounds receiving a client's request head: each HTTP/1.x
-	// request line + header section, the CONNECT request, and the
-	// client-side TLS MITM handshake (USK-1162), plus the plain-HTTP
-	// forward target peek and CONNECT / SOCKS5 inner peek (USK-844). The
-	// request body is not covered.
-	RequestTimeout time.Duration `json:"request_timeout"`
-
 	// DialTimeout is the timeout for establishing upstream TCP connections
 	// (including any upstream proxy CONNECT handshake). Defaults to 30s.
 	// Validated but not currently read by any dial path: each data-path
@@ -314,7 +304,6 @@ func Default() *Config {
 		LogLevel:        "info",
 		LogFormat:       "text",
 		PeekTimeout:     30 * time.Second,
-		RequestTimeout:  60 * time.Second,
 		DialTimeout:     30 * time.Second,
 		MaxConnections:  DefaultMaxConnections,
 		CleanupInterval: time.Hour,
@@ -880,13 +869,18 @@ type ProxyConfig struct {
 	// RequestTimeoutMs is the boot value of request_timeout_ms (USK-1186):
 	// the client-side request-head receive deadline. Nil keeps the default
 	// (60s); 0 disables it; otherwise MinClientTimeoutMs..MaxClientTimeoutMs.
-	RequestTimeoutMs *int `json:"-"`
+	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty"`
 
 	// ClientIdleTimeoutMs is the boot value of client_idle_timeout_ms
 	// (USK-1186): the HTTP/1.x client keep-alive idle wait. Nil keeps the
 	// default (120s); 0 disables it; otherwise
 	// MinClientTimeoutMs..MaxClientTimeoutMs.
-	ClientIdleTimeoutMs *int `json:"-"`
+	//
+	// Both are pointers so an omitted key stays distinct from 0. They seed
+	// the proxybuild.Manager once at boot (mcpserver.NewLiveManager); MCP
+	// configure / proxy_start replace that value, and a SIGHUP reload
+	// validates but does not re-apply them.
+	ClientIdleTimeoutMs *int `json:"client_idle_timeout_ms,omitempty"`
 
 	// SOCKS5Username is the username for SOCKS5 password authentication.
 	SOCKS5Username string `json:"socks5_username,omitempty"`
@@ -1067,6 +1061,9 @@ func (c *ProxyConfig) Validate() error {
 		return err
 	}
 	if err := ValidateTransparentPeekTimeoutMs(c.TransparentPeekTimeoutMs); err != nil {
+		return err
+	}
+	if err := c.validateClientTimeouts(); err != nil {
 		return err
 	}
 	return nil

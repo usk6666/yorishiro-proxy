@@ -914,7 +914,7 @@ func (c *BuildConfig) SetMaxConcurrentStreams(v uint32) {
 
 // DefaultRequestHeaderTimeout is the request-head bound applied when neither
 // BuildConfig.RequestHeaderTimeout nor a runtime override is set (USK-1162).
-// It matches config.Default().RequestTimeout.
+// It is also the default of the request_timeout_ms config-file / MCP key.
 const DefaultRequestHeaderTimeout = 60 * time.Second
 
 // EffectiveRequestHeaderTimeout returns the bound on receiving a client's
