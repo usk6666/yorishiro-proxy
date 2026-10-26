@@ -129,7 +129,7 @@ func RedialUpstreamH1(
 func redialUpstreamH1Conn(ctx context.Context, ut UpstreamTarget, shape UpstreamTLSShape, host, scheme string, cfg *BuildConfig) (net.Conn, error) {
 	target := ut.Dial
 	if scheme == "http" {
-		return dialPlainUpstream(ContextWithDialTarget(ctx, target), target, cfg)
+		return dialPlainUpstream(ctx, target, cfg)
 	}
 
 	hostTLS, err := resolvePerHostTLS(ut.tlsAuthority(), cfg)

@@ -54,7 +54,10 @@ type UpstreamProxyRotation struct {
 	// Valid values:
 	//   - per_request: expand at every outbound TCP dial
 	//   - per_connection: cache by inbound proxy ConnID
-	//   - per_target_host: cache by (listener, upstream host)
+	//   - per_target_host: cache by (listener, upstream host:port dialled);
+	//     every dial to that target — including HTTP/1 keep-alive and
+	//     HTTP/2 GOAWAY redials, and plaintext CONNECT / SOCKS5 tunnels —
+	//     reuses the cached URL until its cache entry expires
 	//   - sticky: mint once for the listener's lifetime
 	Policy string `json:"policy" jsonschema:"rotation policy: per_request | per_connection | per_target_host | sticky"`
 }
