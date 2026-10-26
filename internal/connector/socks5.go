@@ -72,7 +72,9 @@ func (e *SOCKS5RateLimitError) Error() string { return ErrSOCKS5BlockedByRateLim
 // Unwrap returns ErrSOCKS5BlockedByRateLimit.
 func (e *SOCKS5RateLimitError) Unwrap() error { return ErrSOCKS5BlockedByRateLimit }
 
-// SOCKS5ScopeError is what Negotiate returns on a scope refusal (USK-1403).
+// SOCKS5ScopeError is what Negotiate returns on a scope refusal (USK-1403):
+// errors.Is(err, ErrSOCKS5BlockedByScope) holds, and errors.As yields the
+// scope check's reason so the per-listener handler can record it.
 type SOCKS5ScopeError struct {
 	Reason string
 }
@@ -248,7 +250,8 @@ func NewSOCKS5Negotiator(logger *slog.Logger) *SOCKS5Negotiator {
 //   - Failed authentication writes STATUS=0x01 then returns ErrSOCKS5AuthFailed.
 //   - Unsupported CMD returns REP=0x07 then ErrSOCKS5UnsupportedCommand.
 //   - Unsupported ATYP returns REP=0x08 then ErrSOCKS5UnsupportedAddrType.
-//   - TargetScope denial returns REP=0x02 then ErrSOCKS5BlockedByScope.
+//   - TargetScope denial returns REP=0x02 then a *SOCKS5ScopeError
+//     (errors.Is ErrSOCKS5BlockedByScope).
 //   - RateLimit denial returns REP=0x02 then a *SOCKS5RateLimitError
 //     (errors.Is ErrSOCKS5BlockedByRateLimit).
 func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (context.Context, string, error) {
@@ -328,7 +331,7 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 		n.logger(ctx).Info("socks5 target blocked by scope",
 			"target", target, "reason", reason)
 		_ = writeSOCKS5Reply(conn, socks5ReplyConnectionNotAllowed)
-		return ctx, target, ErrSOCKS5BlockedByScope
+		return ctx, target, &SOCKS5ScopeError{Reason: nonEmptyScopeReason(reason)}
 	}
 
 	// Step 4: RateLimit check.
