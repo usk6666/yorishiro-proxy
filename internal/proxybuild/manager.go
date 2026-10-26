@@ -716,22 +716,21 @@ func (m *Manager) PeekTimeout() time.Duration {
 //
 // Mirrors SetPeekTimeout to keep the operator surface symmetric.
 func (m *Manager) SetRequestTimeout(d time.Duration) {
+	// The listener and BuildConfig writes stay under m.mu so concurrent
+	// Set / Disable calls cannot interleave and leave Manager, Listener and
+	// BuildConfig state out of step. Both targets are plain atomic stores
+	// that never call back into Manager.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.requestTimeout = d
 	m.requestTimeoutDisabled = false
-	listeners := make([]*Listener, 0, len(m.listeners))
 	for _, entry := range m.listeners {
-		listeners = append(listeners, entry.stack.Listener)
-	}
-	bc := m.buildCfg
-	m.mu.Unlock()
-	for _, l := range listeners {
-		l.SetRequestTimeout(d)
+		entry.stack.Listener.SetRequestTimeout(d)
 	}
 	// USK-1162: the same knob bounds the client-side request head on every
 	// HTTP/1.x request, the CONNECT request, and the client-side TLS MITM
 	// handshake. Nil-safe when no BuildConfig is bound.
-	bc.SetRequestHeaderTimeout(d)
+	m.buildCfg.SetRequestHeaderTimeout(d)
 }
 
 // RequestTimeout returns the configured HTTP request header read timeout
@@ -763,19 +762,15 @@ func (m *Manager) RequestTimeout() time.Duration {
 // SetRequestTimeout. Disabled is a state of its own — SetRequestTimeout(0)
 // still means "fall back to defaults".
 func (m *Manager) DisableRequestTimeout() {
+	// Writes stay under m.mu; see SetRequestTimeout.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.requestTimeout = 0
 	m.requestTimeoutDisabled = true
-	listeners := make([]*Listener, 0, len(m.listeners))
 	for _, entry := range m.listeners {
-		listeners = append(listeners, entry.stack.Listener)
+		entry.stack.Listener.DisableRequestTimeout()
 	}
-	bc := m.buildCfg
-	m.mu.Unlock()
-	for _, l := range listeners {
-		l.DisableRequestTimeout()
-	}
-	bc.DisableRequestHeaderTimeout()
+	m.buildCfg.DisableRequestHeaderTimeout()
 }
 
 // RequestTimeoutDisabled reports whether request_timeout_ms is disabled
@@ -796,24 +791,24 @@ func (m *Manager) SetClientIdleTimeout(d time.Duration) {
 	if d < 0 {
 		d = 0
 	}
+	// Writes stay under m.mu; see SetRequestTimeout.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.clientIdleTimeout = d
 	m.clientIdleDisabled = false
-	bc := m.buildCfg
-	m.mu.Unlock()
-	bc.SetClientIdleTimeout(d)
+	m.buildCfg.SetClientIdleTimeout(d)
 }
 
 // DisableClientIdleTimeout switches the client keep-alive idle bound off
 // (client_idle_timeout_ms: 0, USK-1185) until the next
 // SetClientIdleTimeout.
 func (m *Manager) DisableClientIdleTimeout() {
+	// Writes stay under m.mu; see SetRequestTimeout.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.clientIdleTimeout = 0
 	m.clientIdleDisabled = true
-	bc := m.buildCfg
-	m.mu.Unlock()
-	bc.DisableClientIdleTimeout()
+	m.buildCfg.DisableClientIdleTimeout()
 }
 
 // ClientIdleTimeout returns the effective client keep-alive idle bound
