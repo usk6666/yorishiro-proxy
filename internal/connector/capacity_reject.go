@@ -136,6 +136,9 @@ func LogCapacityRejection(logger *slog.Logger, limiter *RejectWarnLimiter, info 
 	if info.Target != "" {
 		attrs = append(attrs, "target", info.Target)
 	}
+	if info.OriginalDst != "" {
+		attrs = append(attrs, "original_dst", info.OriginalDst)
+	}
 	logger.Debug("connection rejected: at capacity", attrs...)
 
 	warn, suppressed := true, int64(0)

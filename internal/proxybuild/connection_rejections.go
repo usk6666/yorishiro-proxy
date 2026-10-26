@@ -172,6 +172,7 @@ func (c *ConnectionRejections) Record(info connector.RejectInfo) {
 		Method:          info.Method,
 		Target:          info.Target,
 		TargetTruncated: info.TargetTruncated,
+		OriginalDst:     info.OriginalDst,
 		Wrote503:        info.WroteResponse,
 		MaxConnections:  info.MaxConnections,
 		Recorded:        recorded,
@@ -380,6 +381,9 @@ func (c *ConnectionRejections) write(rec rejectionRecord) {
 	}
 	if info.ForwardPort != "" {
 		tags["forward_port"] = info.ForwardPort
+	}
+	if info.OriginalDst != "" {
+		tags[connector.TagOriginalDst] = info.OriginalDst
 	}
 	tags["wrote_503"] = strconv.FormatBool(info.WroteResponse)
 

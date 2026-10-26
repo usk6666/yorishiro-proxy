@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // USK-1379: a capacity rejection on a transparent listener carries the
@@ -161,5 +163,32 @@ func TestFullListener_OnReject_ExplicitListenerHasNoOriginalDst(t *testing.T) {
 	}
 	if got := calls.Load(); got != 0 {
 		t.Errorf("resolver calls = %d, want 0", got)
+	}
+}
+
+func TestLogCapacityRejection_OriginalDstAttr(t *testing.T) {
+	tests := []struct {
+		name        string
+		originalDst string
+		want        bool
+	}{
+		{name: "transparent rejection logs original_dst", originalDst: "192.0.2.10:80", want: true},
+		{name: "no original dst omits the attr", originalDst: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logs, logger := testutil.NewCaptureLogger()
+			LogCapacityRejection(logger, nil, RejectInfo{
+				Listener:    "gw",
+				RemoteAddr:  "10.0.0.2:5555",
+				OriginalDst: tt.originalDst,
+			})
+			if got := logs.Contains("original_dst="); got != tt.want {
+				t.Errorf("log contains original_dst = %v, want %v; output:\n%s", got, tt.want, logs.Output())
+			}
+			if tt.want && !logs.Contains("original_dst="+tt.originalDst) {
+				t.Errorf("log lacks original_dst=%s; output:\n%s", tt.originalDst, logs.Output())
+			}
+		})
 	}
 }
