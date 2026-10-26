@@ -364,7 +364,7 @@ logged.
 
 Rate limits use the same two-layer architecture as target scope. The Policy Layer defines upper bounds (set via the policy file or config file; replaceable only by the operator's `SIGHUP` reload); the Agent Layer can set equal or stricter limits at runtime.
 
-Requests that exceed rate limits receive a `429 Too Many Requests` response. At the connection-level gates -- an HTTP CONNECT tunnel request and the plain HTTP forward proxy -- that is `HTTP/1.1 429 Too Many Requests` with body `yorishiro-proxy: target blocked by rate limit`, after which the connection closes; no tunnel is opened and the target is not contacted. Elsewhere the response carries an `X-Blocked-By: rate_limit` header.
+Requests that exceed rate limits receive a `429 Too Many Requests` response. At the connection-level gates -- an HTTP CONNECT tunnel request and the plain HTTP forward proxy -- that is `HTTP/1.1 429 Too Many Requests` with body `yorishiro-proxy: target blocked by rate limit`, after which the connection closes; no tunnel is opened and the target is not contacted. Elsewhere the response carries an `X-Blocked-By: rate_limit` header. MCP tool-initiated requests (`resend_*`, `fuzz_*`, `macro` steps) never get a 429: they wait for a token instead, for at most the call's deadline (for a macro step, its `timeout_ms`).
 
 **Applicability**: Both Policy Layer and Agent Layer rate limits apply to **all** proxy traffic -- live proxied traffic (HTTP CONNECT tunnel, plain HTTP forward proxy, SOCKS5 tunnel, and every route of a `transparent_mode` listener) and MCP tool-initiated requests (the same list as for `target_scope`). The effective rate (the stricter of policy and agent) is shared across both paths.
 
