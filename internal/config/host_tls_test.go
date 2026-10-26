@@ -58,3 +58,45 @@ func TestProxyConfig_Validate_HostTLSDuplicateFoldedKeys(t *testing.T) {
 		})
 	}
 }
+
+// USK-1389: a host_tls entry whose value is JSON null decodes to a nil
+// *HostTLSEntry, which the startup wiring dereferences. Validate rejects it
+// and names the entry — also for a single-entry map, ahead of the
+// duplicate-key check, and with the same key on every run.
+func TestProxyConfig_Validate_HostTLSNullEntry(t *testing.T) {
+	tests := []struct {
+		name    string
+		hostTLS string
+		wantKey string // "" means Validate must pass
+	}{
+		{name: "single null entry", hostTLS: `{"x":null}`, wantKey: `host_tls["x"]`},
+		{name: "null beside a valid entry", hostTLS: `{"a":{},"x":null}`, wantKey: `host_tls["x"]`},
+		{name: "several nulls name the first in sorted order", hostTLS: `{"y":null,"x":null}`, wantKey: `host_tls["x"]`},
+		{name: "null reported before a duplicate key", hostTLS: `{"x":null,"x.":{}}`, wantKey: `host_tls["x"]`},
+		{name: "empty object inherits the global settings", hostTLS: `{"x":{}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg ProxyConfig
+			if err := json.Unmarshal([]byte(`{"host_tls":`+tt.hostTLS+`}`), &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			for i := 0; i < 5; i++ { // map order varies; the message must not
+				err := cfg.Validate()
+				if tt.wantKey == "" {
+					if err != nil {
+						t.Fatalf("Validate() = %v, want nil", err)
+					}
+					return
+				}
+				if err == nil {
+					t.Fatalf("Validate() = nil, want an error for a null host_tls entry")
+				}
+				msg := err.Error()
+				if !strings.Contains(msg, tt.wantKey) || !strings.Contains(msg, "null") {
+					t.Fatalf("Validate() = %q, want it to name %s as null", msg, tt.wantKey)
+				}
+			}
+		})
+	}
+}
