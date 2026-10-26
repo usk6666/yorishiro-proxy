@@ -189,6 +189,10 @@ var errInnerPeekFailed = errors.New("connector: inner-byte peek returned no byte
 // connection has no TLS material to hash; folding it into the same pool
 // would require a second key shape and is out of scope for USK-762.
 //
+// Redial: the upstream Layer's scheme "http" is what RedialUpstreamH2 keys
+// on, so a GOAWAY / pre-warm redial of this stack's upstream re-dials plain
+// TCP as cleartext h2c — never TLS (USK-1383).
+//
 // Ownership: the returned ConnectionStack owns clientConn and upstreamConn
 // via its layers; callers must defer stack.Close() exactly as the
 // CONNECT-MITM path does. The stack does not register an upstream H2 Layer
