@@ -598,7 +598,8 @@ func TestInterceptStep_GRPCStart_Release(t *testing.T) {
 // drop of a held Send-direction native-gRPC Start/Data envelope yields the
 // same Respond + Receive GRPCEnd(PERMISSION_DENIED) terminator as a
 // SafetyFilter block, attributed to intercept_drop. Receive-direction drops
-// (skip one streamed message) and gRPC-Web (USK-1220) keep plain Drop.
+// (skip one streamed message) keep plain Drop. gRPC-Web Send Start/Data get
+// the same terminator (USK-1220).
 func TestInterceptStep_GRPC_Drop_Terminator(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -628,8 +629,22 @@ func TestInterceptStep_GRPC_Drop_Terminator(t *testing.T) {
 			msg:   &envelope.GRPCDataMessage{Service: "Greeter", Method: "SayHello", Payload: []byte("body")},
 		},
 		{
-			name:  "grpc-web data send",
-			dir:   envelope.Send,
+			name:        "grpc-web data send",
+			dir:         envelope.Send,
+			proto:       envelope.ProtocolGRPCWeb,
+			msg:         &envelope.GRPCDataMessage{Service: "Greeter", Method: "SayHello", Payload: []byte("body")},
+			wantRespond: true,
+		},
+		{
+			name:        "grpc-web start send",
+			dir:         envelope.Send,
+			proto:       envelope.ProtocolGRPCWeb,
+			msg:         &envelope.GRPCStartMessage{Service: "Greeter", Method: "SayHello"},
+			wantRespond: true,
+		},
+		{
+			name:  "grpc-web data receive",
+			dir:   envelope.Receive,
 			proto: envelope.ProtocolGRPCWeb,
 			msg:   &envelope.GRPCDataMessage{Service: "Greeter", Method: "SayHello", Payload: []byte("body")},
 		},

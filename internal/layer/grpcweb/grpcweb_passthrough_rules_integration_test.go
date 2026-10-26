@@ -123,7 +123,7 @@ func TestGRPCWeb_MalformedRequestBlockedBySafety(t *testing.T) {
 			}
 
 			proxyAddr, _, _, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{safetyEngine: safety})
-			_ = sendRawGRPCWebHTTP1RequestWithHeaders(t, proxyAddr, target, "application/grpc-web+proto", tt.extra, body)
+			resp := sendRawGRPCWebHTTP1RequestWithHeaders(t, proxyAddr, target, "application/grpc-web+proto", tt.extra, body)
 
 			select {
 			case <-sessionDone:
@@ -131,11 +131,19 @@ func TestGRPCWeb_MalformedRequestBlockedBySafety(t *testing.T) {
 				t.Fatal("timeout waiting for session to complete")
 			}
 
+			// USK-1220: the block answers the client with the gRPC-Web
+			// terminator (HTTP 200 + trailer frame, grpc-status 7) and
+			// sends nothing upstream.
+			assertGRPCWebTerminator(t, resp, "application/grpc-web+proto", "7", "safety_filter")
 			upstreamLn.Close()
-			for i, r := range captured() {
+			reqs := captured()
+			for i, r := range reqs {
 				if bytes.Contains(r, tt.frame) {
 					t.Errorf("upstream request %d carries the blocked frame: %q", i, r)
 				}
+			}
+			if len(reqs) != 0 {
+				t.Errorf("upstream received %d requests, want 0", len(reqs))
 			}
 		})
 	}

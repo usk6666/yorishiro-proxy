@@ -25,6 +25,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
@@ -344,8 +345,9 @@ func TestProxybuild_TCPForward_H1_GRPCWeb_QueryAndHeaderLayoutReachUpstream(t *t
 }
 
 // T10: a destructive-sql payload carried only in the gRPC-Web query is
-// now scanned by the gRPC Input SafetyFilter and blocked. The client-side
-// terminator shape is USK-1220's concern and deliberately not asserted.
+// now scanned by the gRPC Input SafetyFilter and blocked. USK-1220: the
+// client gets the gRPC-Web terminator (HTTP 200, a single trailer frame
+// with grpc-status 7) in the request's content-type.
 func TestProxybuild_TCPForward_H1_GRPCWeb_SafetyBlocksDestructiveQuery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -360,8 +362,32 @@ func TestProxybuild_TCPForward_H1_GRPCWeb_SafetyBlocksDestructiveQuery(t *testin
 	}
 	fwdAddr, store := startH1ForwardListenerWithGRPCSafety(t, ctx, up.addr, safety)
 
-	_ = exchangeRaw(t, fwdAddr, grpcWebRequest("/hello.HelloService/SayHello?q=DROP/**/TABLE/**/users", fwdAddr,
+	got := exchangeRaw(t, fwdAddr, grpcWebRequest("/hello.HelloService/SayHello?q=DROP/**/TABLE/**/users", fwdAddr,
 		[]string{"Content-Type: application/grpc-web+proto"}, buildLPMBody([]byte("ping"))))
+	if len(got) == 0 {
+		t.Fatal("client received no response; want the gRPC-Web terminator")
+	}
+	startLine, headers, body := splitRawHTTP(t, got)
+	if startLine != "HTTP/1.1 200 OK" {
+		t.Errorf("client status line = %q, want %q", startLine, "HTTP/1.1 200 OK")
+	}
+	if ct := headerLinesNamed(headers, "content-type"); len(ct) != 1 || !strings.EqualFold(ct[0], "content-type: application/grpc-web+proto") {
+		t.Errorf("client content-type = %q, want application/grpc-web+proto", ct)
+	}
+	parsed, perr := grpcweb.DecodeBody(body, false)
+	if perr != nil {
+		t.Fatalf("decode client body %q: %v", body, perr)
+	}
+	if len(parsed.DataFrames) != 0 || parsed.TrailerFrame == nil {
+		t.Fatalf("client body = %d data frames, trailer %v; want only a trailer frame", len(parsed.DataFrames), parsed.TrailerFrame != nil)
+	}
+	tr, terr := grpcweb.ParseTrailers(parsed.TrailerFrame.Payload)
+	if terr != nil {
+		t.Fatalf("parse trailers: %v", terr)
+	}
+	if tr["grpc-status"] != "7" || !strings.Contains(tr["grpc-message"], pipeline.BlockedBySafetyFilter) {
+		t.Errorf("client trailers = %v, want grpc-status 7 and a grpc-message naming %s", tr, pipeline.BlockedBySafetyFilter)
+	}
 
 	deadline := time.Now().Add(3 * time.Second)
 	blocked := false
