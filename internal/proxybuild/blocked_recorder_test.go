@@ -203,6 +203,43 @@ func TestBuildPipelineDropRecorder_FallbackToUpdateOnConflict(t *testing.T) {
 	}
 }
 
+// TestBuildPipelineDropRecorder_FallbackRetagsProtocol pins USK-1220: when
+// the fallback updates a row that already exists (on HTTP/2 the h2-frame
+// overlay recorder creates it with Protocol="http" before the first
+// semantic envelope), the blocked envelope's derived protocol is written
+// too — under RecordStep.maybeRetagProtocol's rule, so an "http" envelope
+// leaves the stored protocol alone. A gRPC-Web Start blocked by a policy
+// Step ends the RPC, so no later envelope reaches RecordStep to re-tag it.
+func TestBuildPipelineDropRecorder_FallbackRetagsProtocol(t *testing.T) {
+	tests := []struct {
+		proto envelope.Protocol
+		msg   envelope.Message
+		want  string
+	}{
+		{envelope.ProtocolGRPCWeb, &envelope.GRPCStartMessage{Service: "pkg.Echo", Method: "Say"}, "grpc-web"},
+		{envelope.ProtocolGRPC, &envelope.GRPCStartMessage{Service: "pkg.Echo", Method: "Say"}, "grpc"},
+		{envelope.ProtocolHTTP, &envelope.HTTPMessage{Method: "POST"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.proto), func(t *testing.T) {
+			store := &recordingFlowStore{saveErrOnce: errors.New("UNIQUE constraint failed: streams.id")}
+			rec := buildPipelineDropRecorder(store, "live", silentLogger(), newBlockedStreamSet())
+			rec(context.Background(), &envelope.Envelope{
+				StreamID:  "stream-existing",
+				Protocol:  tt.proto,
+				Direction: envelope.Send,
+				Message:   tt.msg,
+			}, pipeline.BlockedByTargetScope)
+			if len(store.updates) != 1 {
+				t.Fatalf("UpdateStream count = %d, want 1 (fallback path)", len(store.updates))
+			}
+			if got := store.updates[0].update.Protocol; got != tt.want {
+				t.Errorf("UpdateStream Protocol = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBlockedStreamSet_AddContains verifies concurrent-safe membership.
 func TestBlockedStreamSet_AddContains(t *testing.T) {
 	s := newBlockedStreamSet()

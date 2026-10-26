@@ -203,11 +203,10 @@ func requestPathChecked(p envelope.Protocol) bool {
 //
 // USK-829: when the envelope is an HTTP message, synthesize a 403
 // terminator so the client sees a clean close instead of hanging on its
-// read timeout. A Send native gRPC Start / Data gets the grpc-status 7
-// PERMISSION_DENIED terminator the SafetyFilter and intercept drops
-// already use (grpcPolicyDropResult, USK-1376), which ends the RPC; a
-// gRPC-Web envelope keeps Drop until it has a protocol-correct terminator
-// of its own. Raw and WebSocket envelopes keep the silent Drop —
+// read timeout. A Send native gRPC or gRPC-Web Start / Data gets the
+// grpc-status 7 PERMISSION_DENIED terminator the SafetyFilter and
+// intercept drops already use (grpcPolicyDropResult, USK-1376 /
+// USK-1220), which ends the RPC. Raw and WebSocket envelopes keep the silent Drop —
 // protocol-correct terminators for them are deferred (D2-D5).
 func targetScopeBlock(env *envelope.Envelope) Result {
 	switch env.Message.(type) {

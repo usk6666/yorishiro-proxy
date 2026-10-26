@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,6 +39,8 @@ import (
 	intHTTP2 "github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
@@ -414,6 +417,38 @@ type pipelineOpts struct {
 	transformEngine *grpcrules.TransformEngine
 	interceptEngine *grpcrules.InterceptEngine
 	safetyEngine    *grpcrules.SafetyEngine
+	// queue is the HoldQueue the InterceptStep holds matching envelopes on
+	// (nil = no holding).
+	queue *common.HoldQueue
+	// plugins, when non-nil, installs PluginStepPre after SafetyStep
+	// (production order: Safety -> PluginPre -> Intercept).
+	plugins *pluginv2.Engine
+	// probe, when non-nil, observes the session's dial / policy-drop /
+	// completion signals (startGRPCWebHTTP1Proxy only).
+	probe *sessionProbe
+}
+
+// sessionProbe records per-session signals from the harness: how many
+// times the upstream dial ran, which BlockedBy attributions reached
+// SessionOptions.OnPipelineDrop, and how many sessions finished.
+type sessionProbe struct {
+	dials     atomic.Int32
+	completed atomic.Int32
+
+	mu        sync.Mutex
+	blockedBy []string
+}
+
+func (p *sessionProbe) addBlocked(v string) {
+	p.mu.Lock()
+	p.blockedBy = append(p.blockedBy, v)
+	p.mu.Unlock()
+}
+
+func (p *sessionProbe) blocked() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.blockedBy...)
 }
 
 func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
@@ -422,12 +457,17 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 		pipeline.NewHostScopeStep(nil),
 		pipeline.NewHTTPScopeStep(nil),
 		pipeline.NewSafetyStep(nil, nil, opts.safetyEngine, logger),
+	}
+	if opts.plugins != nil {
+		steps = append(steps, pipeline.NewPluginStepPre(opts.plugins, nil, logger))
+	}
+	steps = append(steps,
 		pipeline.NewTransformStep(nil, nil, opts.transformEngine, nil),
-		pipeline.NewInterceptStep(nil, nil, opts.interceptEngine, nil, nil, nil, logger),
+		pipeline.NewInterceptStep(nil, nil, opts.interceptEngine, nil, opts.queue, nil, logger),
 		pipeline.NewRecordStep(store, logger,
 			pipeline.WithWireEncoder(envelope.ProtocolGRPCWeb, grpcweb.EncodeWireBytes),
 		),
-	}
+	)
 	return pipeline.New(steps...)
 }
 
@@ -493,10 +533,21 @@ func startGRPCWebHTTP1Proxy(
 		p := buildPipeline(store, opts)
 
 		session.RunSession(streamCtx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+			if opts.probe != nil {
+				opts.probe.dials.Add(1)
+			}
 			rawUp := <-stack.UpstreamTopmost().Channels()
 			return grpcweb.Wrap(rawUp, grpcweb.RoleClient), nil
 		}, p, session.SessionOptions{
+			OnPipelineDrop: func(_ context.Context, _ *envelope.Envelope, blockedBy string) {
+				if opts.probe != nil {
+					opts.probe.addBlocked(blockedBy)
+				}
+			},
 			OnComplete: func(cctx context.Context, streamID string, err error) {
+				if opts.probe != nil {
+					defer opts.probe.completed.Add(1)
+				}
 				result.record(err)
 				state := "complete"
 				if err != nil && !errors.Is(err, io.EOF) {

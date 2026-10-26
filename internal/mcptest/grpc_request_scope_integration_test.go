@@ -8,18 +8,15 @@
 package mcptest_test
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
-	nethttp "net/http"
 	"strings"
 	"testing"
 	"time"
 
-	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -209,73 +206,54 @@ func TestE2E_GRPCRequestScope_CONNECT_PathPrefixAllow(t *testing.T) {
 }
 
 // sendGRPCWebAs drives one gRPC-Web (binary) POST over CONNECT + TLS(h2)
-// with :authority set to authority. It returns the HTTP status, or an
-// error (a blocked gRPC-Web request is dropped, so the client times out).
-func sendGRPCWebAs(proxyAddr, upstreamHostPort, authority, fullMethod string) (int, error) {
-	tr := &http2.Transport{
-		TLSClientConfig: &tls.Config{
-			ServerName:         hostOnly(upstreamHostPort),
-			InsecureSkipVerify: true, //nolint:gosec // proxy MITM cert is ephemeral
-			NextProtos:         []string{"h2"},
-			MinVersion:         tls.VersionTLS12,
-		},
-		DialTLSContext: func(dctx context.Context, _, _ string, cfg *tls.Config) (net.Conn, error) {
-			rawConn, err := openCONNECTTunnel(dctx, proxyAddr, upstreamHostPort)
-			if err != nil {
-				return nil, err
-			}
-			tc := tls.Client(rawConn, cfg)
-			if err := tc.HandshakeContext(dctx); err != nil {
-				_ = rawConn.Close()
-				return nil, err
-			}
-			return tc, nil
-		},
-	}
-	defer tr.CloseIdleConnections()
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	req, err := nethttp.NewRequestWithContext(ctx, "POST", "https://"+upstreamHostPort+fullMethod,
-		bytes.NewReader(grpcweb.EncodeFrame(false, false, []byte("usk-1376"))))
-	if err != nil {
-		return 0, err
-	}
-	req.Host = authority
-	req.Header.Set("Content-Type", "application/grpc-web+proto")
-	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode, nil
+// with :authority set to authority (sendGRPCWebH2).
+func sendGRPCWebAs(proxyAddr, upstreamHostPort, authority, fullMethod string) (*grpcWebH2Response, error) {
+	return sendGRPCWebH2(proxyAddr, upstreamHostPort, authority, fullMethod, "application/grpc-web+proto",
+		grpcweb.EncodeFrame(false, false, []byte("usk-1376")))
 }
 
 // E4: gRPC-Web over HTTP/2 with a denied :authority never reaches the
-// upstream and leaves a grpc-web target_scope audit Stream.
+// upstream, is answered promptly with the gRPC-Web terminator (HTTP 200 +
+// trailer frame, grpc-status 7 naming target_scope — USK-1220) and leaves
+// a grpc-web target_scope audit Stream.
 func TestE2E_GRPCRequestScope_GRPCWebH2_DeniedAuthority(t *testing.T) {
 	h, proxyAddr, up := startGRPCScopeProxy(t, "grpc-web", hostScopePolicyConfig)
 	_, port, _ := net.SplitHostPort(up)
 
-	if code, err := sendGRPCWebAs(proxyAddr, up, "vhost.example:"+port, mcptest.GRPCWebSafetyEchoMethod); err != nil || code != 200 {
-		t.Fatalf("non-denied :authority: status %d err %v, want 200", code, err)
+	if resp, err := sendGRPCWebAs(proxyAddr, up, "vhost.example:"+port, mcptest.GRPCWebSafetyEchoMethod); err != nil || resp.status != 200 {
+		t.Fatalf("non-denied :authority: %+v err %v, want 200", resp, err)
 	}
 	if got := h.GRPCWebObservedHits.Total(); got != 1 {
 		t.Fatalf("upstream hits after the allowed call = %d, want 1", got)
 	}
+	if got := h.GRPCWebObservedHits.Requests(); got != 1 {
+		t.Fatalf("upstream requests after the allowed call = %d, want 1", got)
+	}
 
-	if code, err := sendGRPCWebAs(proxyAddr, up, "denied.example:"+port, mcptest.GRPCWebSafetyEchoMethod); err == nil && code == 200 {
-		t.Errorf("denied :authority answered 200")
+	resp, err := sendGRPCWebAs(proxyAddr, up, "denied.example:"+port, mcptest.GRPCWebSafetyEchoMethod)
+	if err != nil {
+		t.Fatalf("denied :authority: %v, want the gRPC-Web terminator", err)
+	}
+	if resp.status != 200 {
+		t.Errorf("denied :authority HTTP status = %d, want 200", resp.status)
+	}
+	assertGRPCWebBlockTrailers(t, "application/grpc-web+proto", resp.body, "target_scope")
+	if resp.elapsed > grpcWebBlockedMaxWait {
+		t.Errorf("denied :authority answered after %v, want < %v", resp.elapsed, grpcWebBlockedMaxWait)
 	}
 	if got := h.GRPCWebObservedHits.Total(); got != 1 {
 		t.Errorf("upstream hits = %d, want 1 — the denied :authority reached the upstream", got)
 	}
 	waitBlockedStream(t, h, "grpc-web")
+	// Total only counts well-formed calls; checked after the audit Stream
+	// lands so a payload-stripped leak arriving late is still caught.
+	if got := h.GRPCWebObservedHits.Requests(); got != 1 {
+		t.Errorf("upstream requests = %d, want 1 — the denied :authority (possibly payload-stripped) reached the upstream", got)
+	}
 }
 
 // writeProxyRequestNoWait writes one raw request to the forward proxy and
-// reads whatever comes back within 3s (a blocked gRPC-Web request is
-// dropped without a response).
+// reads whatever comes back within 3s (the reply is not asserted).
 func writeProxyRequestNoWait(t *testing.T, proxyAddr, request string) string {
 	t.Helper()
 	c, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)

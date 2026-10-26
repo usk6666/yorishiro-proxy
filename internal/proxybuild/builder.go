@@ -2558,6 +2558,7 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 			State:      "error",
 			BlockedBy:  blockedBy,
 			AppendTags: st.Tags,
+			Protocol:   dropRetagProtocol(env.Protocol),
 		}); uerr != nil {
 			if logger != nil {
 				logger.Error("proxybuild: pipeline-drop stream save failed",
@@ -2570,6 +2571,25 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 			}
 		}
 	}
+}
+
+// dropRetagProtocol returns the Stream.Protocol the drop recorder's
+// UpdateStream fallback writes: the blocked envelope's protocol, under the
+// same rule as RecordStep.maybeRetagProtocol — empty (keep the stored
+// value) for "" and "http".
+//
+// The fallback runs when a row already exists. On HTTP/2 that row can be
+// the one the h2-frame overlay recorder created with Protocol="http"
+// before the first semantic envelope; RecordStep would re-tag it to the
+// derived protocol, but a gRPC-Web Start blocked by a policy Step never
+// reaches RecordStep, and since the block now ends the RPC (USK-1220) no
+// later envelope does either. Without this the audit Stream stayed "http"
+// and query(protocol="grpc-web", blocked_by=...) missed it.
+func dropRetagProtocol(p envelope.Protocol) string {
+	if p == "" || p == envelope.ProtocolHTTP {
+		return ""
+	}
+	return string(p)
 }
 
 // buildTLSStackBuildErrorRecorder returns a connector.OnUpstreamTLSErrorFunc

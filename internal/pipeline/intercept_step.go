@@ -100,8 +100,8 @@ func (s *InterceptStep) WithScopeRecheck(host *HostScopeStep, http *HTTPScopeSte
 // then HTTPScopeStep), against env and returns the first non-Continue
 // Result verbatim — targetScopeBlock's Result with BlockedBy=target_scope:
 // Respond with a synthetic 403 for an HTTP request, Respond with
-// grpc-status 7 for a Send native gRPC Start / Data, Drop otherwise
-// (gRPC-Web, WebSocket, raw). It returns the zero Result when both
+// grpc-status 7 for a Send native gRPC / gRPC-Web Start / Data, Drop
+// otherwise (WebSocket, raw). It returns the zero Result when both
 // allow env or are nil. Both Steps are Send-only, so a Receive envelope
 // always passes.
 //
@@ -309,11 +309,11 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		// timeout. The session loop dispatches Respond via client.Send
 		// (dispatchClientAction / wsRelayDirection).
 		//
-		// USK-1202: a held Send-direction native-gRPC Start / Data gets
-		// the same grpc-status 7 PERMISSION_DENIED terminator as a
-		// SafetyFilter block. A Receive-direction gRPC drop skips one
-		// streamed message and keeps Drop; WS (Close frame) and gRPC-Web
-		// (USK-1220) also keep Drop.
+		// USK-1202 / USK-1220: a held Send-direction native-gRPC or
+		// gRPC-Web Start / Data gets the same grpc-status 7
+		// PERMISSION_DENIED terminator as a SafetyFilter block. A
+		// Receive-direction gRPC drop skips one streamed message and
+		// keeps Drop; WS (Close frame) also keeps Drop.
 		switch env.Message.(type) {
 		case *envelope.HTTPMessage:
 			return Result{
@@ -367,8 +367,9 @@ func (s *InterceptStep) forwardModified(ctx context.Context, env *envelope.Envel
 		annotations = recheck.Annotations
 		// USK-829: SafetyStep now returns Respond (with a synthetic
 		// 403 envelope) for HTTPMessage blocks instead of Drop. The
-		// recheck must forward both Action shapes — Drop for WS /
-		// gRPC-Web, Respond for HTTPMessage and native gRPC (USK-1202) —
+		// recheck must forward both Action shapes — Drop for WS,
+		// Respond for HTTPMessage, native gRPC and gRPC-Web (USK-1202 /
+		// USK-1220) —
 		// so the modify_and_forward bypass is rejected with the same
 		// wire behaviour as a direct SafetyStep block.
 		if recheck.Action == Drop || recheck.Action == Respond {

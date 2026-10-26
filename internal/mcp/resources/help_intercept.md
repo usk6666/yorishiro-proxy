@@ -87,7 +87,8 @@ Apply the typed payload and forward the result. The modified item is checked aga
 Discard the held item.
 - HTTP (request or response): the client receives `403 Forbidden` (`blocked_by: intercept_drop`).
 - Native gRPC request Start / Data: the call ends with `grpc-status: 7` (PERMISSION_DENIED) and `grpc-message: blocked by intercept_drop`.
-- WebSocket frames, gRPC-Web, gRPC responses, SSE events and raw chunks are discarded.
+- gRPC-Web request Start / Data: the client receives HTTP `200` whose body is a single gRPC-Web trailer frame with `grpc-status: 7` and `grpc-message: blocked by intercept_drop` (in the request's content-type, base64 for `-text`); no part of the request reaches the upstream.
+- WebSocket frames, gRPC / gRPC-Web responses, SSE events and raw chunks are discarded.
 
 ### Raw override
 With `"params": {"mode": "raw", "raw_override_base64": "..."}`, `modify_and_forward` forwards the decoded bytes in place of the held item, without a typed payload. Use it only on `raw` holds — for those, `raw.bytes_override` does the same and is the preferred form. On other holds (HTTP, WebSocket, gRPC, SSE) it currently breaks the connection (tracked in USK-1169).

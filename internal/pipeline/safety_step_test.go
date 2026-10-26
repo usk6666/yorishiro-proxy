@@ -308,31 +308,41 @@ func TestSafetyStep_GRPCStart_DangerousMethod_Respond(t *testing.T) {
 	}
 }
 
-// TestSafetyStep_GRPCWeb_DangerousPayload_StillDrop guards the USK-1202 scope
-// boundary: gRPC-Web keeps Drop until USK-1220 gives it a terminator.
-func TestSafetyStep_GRPCWeb_DangerousPayload_StillDrop(t *testing.T) {
+// TestSafetyStep_GRPCWeb_Respond pins USK-1220: a gRPC-Web Send Start or
+// Data block yields the same Respond + Receive GRPCEnd(PERMISSION_DENIED)
+// terminator as native gRPC (USK-1202). The grpcweb Layer renders it as an
+// HTTP 200 response carrying a trailer frame, and the session ends the RPC so
+// nothing reaches the upstream.
+func TestSafetyStep_GRPCWeb_Respond(t *testing.T) {
 	grpcEngine := newTestGRPCSafetyEngine(t)
+	grpcEngine.AddRule(common.CompiledRule{
+		ID:      "custom:method",
+		Name:    "block method",
+		Pattern: regexp.MustCompile(`^DropAll$`),
+		Targets: []common.Target{grpcrules.TargetMethod},
+	})
 	step := NewSafetyStep(nil, nil, grpcEngine, nil)
 
-	env := &envelope.Envelope{
-		Direction: envelope.Send,
-		Protocol:  envelope.ProtocolGRPCWeb,
-		Message: &envelope.GRPCDataMessage{
-			Service: "Admin",
-			Method:  "Query",
-			Payload: []byte("DROP TABLE users"),
-		},
+	tests := []struct {
+		name string
+		msg  envelope.Message
+	}{
+		{"data", &envelope.GRPCDataMessage{Service: "Admin", Method: "Query", Payload: []byte("DROP TABLE users")}},
+		{"start", &envelope.GRPCStartMessage{Service: "Admin", Method: "DropAll"}},
 	}
-
-	result := step.Process(context.Background(), env)
-	if result.Action != Drop {
-		t.Errorf("GRPCWeb_Dangerous: got action %v, want Drop (USK-1220 scope)", result.Action)
-	}
-	if result.BlockedBy != BlockedBySafetyFilter {
-		t.Errorf("GRPCWeb_Dangerous: BlockedBy = %q, want %q", result.BlockedBy, BlockedBySafetyFilter)
-	}
-	if result.Response != nil {
-		t.Errorf("GRPCWeb_Dangerous: Response = %+v, want nil", result.Response)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := &envelope.Envelope{
+				StreamID:  "stream-web",
+				FlowID:    "flow-web",
+				Sequence:  1,
+				Direction: envelope.Send,
+				Protocol:  envelope.ProtocolGRPCWeb,
+				Message:   tt.msg,
+			}
+			result := step.Process(context.Background(), env)
+			assertGRPCPolicyDropResult(t, result, env, BlockedBySafetyFilter)
+		})
 	}
 }
 

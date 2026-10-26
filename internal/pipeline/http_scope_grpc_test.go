@@ -41,21 +41,15 @@ func grpcTLSCtx() envelope.EnvelopeContext {
 }
 
 // assertGRPCTargetScopeBlock asserts the target_scope block shape for env:
-// native gRPC gets the grpc-status 7 PERMISSION_DENIED terminator, gRPC-Web
-// keeps Drop (no gRPC-Web terminator exists yet).
+// native gRPC and gRPC-Web (USK-1220) both get the grpc-status 7
+// PERMISSION_DENIED terminator, on the blocked envelope's own protocol.
 func assertGRPCTargetScopeBlock(t *testing.T, env *envelope.Envelope, r Result) {
 	t.Helper()
 	if r.BlockedBy != BlockedByTargetScope {
 		t.Fatalf("Action=%v BlockedBy=%q, want a %q block", r.Action, r.BlockedBy, BlockedByTargetScope)
 	}
-	if env.Protocol != envelope.ProtocolGRPC {
-		if r.Action != Drop {
-			t.Errorf("gRPC-Web block Action = %v, want Drop", r.Action)
-		}
-		return
-	}
 	if r.Action != Respond || r.Response == nil {
-		t.Fatalf("native gRPC block Action = %v (Response %v), want Respond with a gRPC End", r.Action, r.Response)
+		t.Fatalf("%s block Action = %v (Response %v), want Respond with a gRPC End", env.Protocol, r.Action, r.Response)
 	}
 	end, ok := r.Response.Message.(*envelope.GRPCEndMessage)
 	if !ok {
@@ -64,8 +58,8 @@ func assertGRPCTargetScopeBlock(t *testing.T, env *envelope.Envelope, r Result) 
 	if end.Status != grpcStatusPermissionDenied || end.Message != "blocked by "+BlockedByTargetScope {
 		t.Errorf("End = status %d %q, want %d %q", end.Status, end.Message, grpcStatusPermissionDenied, "blocked by "+BlockedByTargetScope)
 	}
-	if r.Response.Direction != envelope.Receive || r.Response.Protocol != envelope.ProtocolGRPC {
-		t.Errorf("Response direction/protocol = %v/%v, want Receive/grpc", r.Response.Direction, r.Response.Protocol)
+	if r.Response.Direction != envelope.Receive || r.Response.Protocol != env.Protocol {
+		t.Errorf("Response direction/protocol = %v/%v, want Receive/%v", r.Response.Direction, r.Response.Protocol, env.Protocol)
 	}
 }
 
@@ -321,8 +315,8 @@ func TestScopeChain_PathScopedAllow_GRPC(t *testing.T) {
 }
 
 // U10: a target_scope block of a Send native gRPC envelope answers
-// grpc-status 7 (unified with the Safety / intercept drop shape);
-// gRPC-Web keeps Drop.
+// grpc-status 7 (unified with the Safety / intercept drop shape); so does
+// a gRPC-Web one since USK-1220.
 func TestHostScopeStep_GRPCBlockShape(t *testing.T) {
 	scope := hostLegScope(nil, []connector.TargetRule{{Hostname: "127.0.0.1"}})
 	step := NewHostScopeStep(scope)
