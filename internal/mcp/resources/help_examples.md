@@ -254,6 +254,8 @@ Confirm the fingerprint has changed and `persisted` is true.
 ```
 The response contains a `plugins[]` array with `name`, `path`, `enabled`, ordered `registrations[]` (`{protocol, event, phase}`), and `vars` (with `redact_keys` already applied — secrets show as `"<redacted>"`).
 
+Each plugin also carries `fail_open_count` (always present) and, once non-zero, `fail_open_by_kind` and `last_fail_open` (`{kind, action, protocol, event, phase, reason, at}`): hook outcomes the engine refused or could not evaluate and treated as CONTINUE, so the message was forwarded anyway. Check it after sending test traffic — e.g. `kind: "respond_shape_mismatch"` means a "blocking" hook returned `action.RESPOND` where `action.RESPOND_GRPC` was needed (or vice versa) and did not block.
+
 ## TLS Passthrough Management
 
 ### Bypass TLS for pinned services

@@ -140,6 +140,8 @@ For runtime introspection, use the `plugin_introspect` MCP tool — read-only li
 {}
 ```
 
+After sending test traffic through the proxy, check each plugin's `fail_open_count` in the same result. It counts hook outcomes the engine refused or could not evaluate and treated as CONTINUE — the message was forwarded as if the hook had not acted. `last_fail_open.kind` names the cause: `respond_shape_mismatch` (RESPOND vs RESPOND_GRPC does not match the hook's protocol), `action_not_allowed` (DROP / RESPOND on an event that accepts CONTINUE only), `respond_on_informational`, `hook_error` (`fail()` / exception / step budget), `invalid_return` (e.g. a bare `"RESPOND"` string), `invalid_mutation`, `body_too_large` (hook skipped for a body over 1 MiB), `chunk_too_large`, `unsupported_message`, `dispatch_error`. A non-zero count on a plugin that is meant to block means it is not blocking. Full field reference: `docs(topic="plugin_introspect")`.
+
 The legacy `plugin` MCP tool (`list`/`reload`/`enable`/`disable`) was removed in USK-695; there is no replacement for `reload`/`enable`/`disable` by design.
 
 ## Notes
