@@ -979,38 +979,6 @@ func TestSchemeDefaultPort(t *testing.T) {
 	}
 }
 
-// USK-1262: an invalid port string is reported as invalid, never folded
-// into 0 (which matches no ports rule).
-func TestParseStrictPort(t *testing.T) {
-	tests := []struct {
-		portStr string
-		want    int
-		ok      bool
-	}{
-		{"8080", 8080, true},
-		{"008080", 8080, true},
-		{"1", 1, true},
-		{"65535", 65535, true},
-		{"", 0, false},
-		{"0", 0, false},
-		{"65536", 0, false},
-		{"4294975376", 0, false},
-		{"abc", 0, false},
-		{"http", 0, false},
-		{"+8080", 0, false},
-		{"-80", 0, false},
-		{" 8080", 0, false},
-		{"8080 ", 0, false},
-		{"٨٠", 0, false},
-	}
-	for _, tt := range tests {
-		got, ok := parseStrictPort(tt.portStr)
-		if got != tt.want || ok != tt.ok {
-			t.Errorf("parseStrictPort(%q) = (%d, %v), want (%d, %v)", tt.portStr, got, ok, tt.want, tt.ok)
-		}
-	}
-}
-
 func TestContainsInt(t *testing.T) {
 	tests := []struct {
 		name  string

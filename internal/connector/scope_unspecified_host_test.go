@@ -32,24 +32,11 @@ func loopbackDenyScope() *TargetScope {
 
 // unspecifiedDialHosts are every spelling of an empty or unspecified host
 // the scope can be handed by a gate or an MCP helper. The legacy forms
-// ("0", "0.0", "0x0", "00") fold to 0.0.0.0 through parseLegacyIPv4: a
+// ("0", "0.0", "0x0", "00") fold to 0.0.0.0 through hostcanon.ParseLegacyIPv4: a
 // libc resolver or an upstream proxy reads them as that address.
 var unspecifiedDialHosts = []string{
 	"", "0.0.0.0", "::", "[::]", "::ffff:0.0.0.0", "[::ffff:0.0.0.0]",
 	"0:0::0", "::%lo", "[::%lo]", "0.0.0.0.", "0", "0.0", "0x0", "00",
-}
-
-func TestUnspecifiedOrEmptyHost(t *testing.T) {
-	for _, h := range unspecifiedDialHosts {
-		if !unspecifiedOrEmptyHost(h) {
-			t.Errorf("unspecifiedOrEmptyHost(%q) = false, want true", h)
-		}
-	}
-	for _, h := range []string{"0.0.0.1", "127.0.0.1", "10.0.0.0", "::1", "::2", "0.example", "localhost", "[]", ".", "0x"} {
-		if unspecifiedOrEmptyHost(h) {
-			t.Errorf("unspecifiedOrEmptyHost(%q) = true, want false", h)
-		}
-	}
 }
 
 // T5: every scope entry point refuses an empty or unspecified dial host

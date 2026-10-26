@@ -106,6 +106,9 @@ internal/
                            #   connect_handler.go (CONNECT tunnel), socks5_handler.go,
                            #   h2_dispatch.go, h2_pool.go, h2c_handler.go,
                            #   transport/ (TLS / uTLS / mTLS dial; per-host TLS config)
+  hostcanon/               # Stdlib-only host comparison forms shared by host-matching seams:
+                           #   Fold (deny-like: TargetScope, RateLimiter; folds legacy IPv4),
+                           #   FoldDialEquivalent (allow-like: TLS / raw passthrough lists)
   proxybuild/              # Live data-path stack assembly + multi-listener Manager
                            #   builder.go (BuildLiveStack), manager.go,
                            #   listener.go (lifecycle wrapper)

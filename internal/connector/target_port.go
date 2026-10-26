@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"strconv"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/hostcanon"
 )
 
 // SplitTargetHostPort splits a dial target "host:port" into host and a
@@ -39,27 +40,11 @@ func SplitTargetHostPort(target string) (host string, port int, err error) {
 	if portStr == "" || strings.Trim(portStr, "0123456789") != "" {
 		return "", 0, fmt.Errorf("invalid target %q: port %q is not a decimal port number", target, portStr)
 	}
-	port, ok := parseStrictPort(portStr)
+	port, ok := hostcanon.ParseStrictPort(portStr)
 	if !ok {
 		return "", 0, fmt.Errorf("invalid target %q: port %q is out of range 1-65535", target, portStr)
 	}
 	return host, port, nil
-}
-
-// parseStrictPort reads a port string with SplitTargetHostPort's rule: a
-// non-empty run of ASCII decimal digits (leading zeros allowed) whose
-// value is in 1..65535. ok is false for anything else — a sign,
-// whitespace, a service name, 0, or a value net.Dial would wrap modulo
-// 2^32 (USK-1262).
-func parseStrictPort(portStr string) (port int, ok bool) {
-	if portStr == "" || strings.Trim(portStr, "0123456789") != "" {
-		return 0, false
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1 || port > 65535 {
-		return 0, false
-	}
-	return port, true
 }
 
 // isIPv6Literal reports whether s (without brackets) is an IPv6 address,

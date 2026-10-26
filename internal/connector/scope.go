@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/hostcanon"
 )
 
 // TargetScope controls which network targets are allowed or blocked using a
@@ -50,7 +51,7 @@ type TargetRule struct {
 	// Hostname matches the target hostname (case-insensitive).
 	// Supports wildcard prefix "*.example.com" to match all subdomains.
 	// An IPv6 literal may be written bare ("::1") or bracketed ("[::1]").
-	// Rule and target are compared in canonical form (canonicalScopeHost),
+	// Rule and target are compared in canonical form (hostcanon.Fold),
 	// so every spelling that may dial the same host matches: any textual form
 	// of an IPv6 address, with or without a zone ("[fe80::1%eth0]" matches
 	// "fe80::1"); an IPv4-mapped IPv6 address and its IPv4 address
@@ -61,7 +62,7 @@ type TargetRule struct {
 	// reads those as the address — Go's pure resolver looks the hex ones up
 	// in DNS — so as a dial host they are refused outright whenever any
 	// rule exists, and the folding only lets a deny catch them in a Host /
-	// :authority name; see canonicalScopeHost) (USK-1129, USK-1250,
+	// :authority name; see hostcanon.Fold) (USK-1129, USK-1250,
 	// USK-1273). The stored rule is never rewritten. Empty matches any host (Policy layer only; the Agent
 	// layer requires a hostname).
 	Hostname string `json:"hostname"`
@@ -103,14 +104,14 @@ func NewTargetScope() *TargetScope {
 // Before step 1, when either layer has any rule, a hostname whose last
 // label is a number but that is not a valid IPv4 address ("1.2.3.4.5",
 // "999999999999") is BLOCKED: a resolver may still read it as an address
-// no rule can name (USK-1250, see numericHostUnparsable). So is an empty
+// no rule can name (USK-1250, see hostcanon.NumericUnparsable). So is an empty
 // host or an unspecified address ("0.0.0.0", "::" and their spellings),
 // which Go's dialer reads as the proxy host itself (USK-1312, see
-// unspecifiedOrEmptyHost). So is an IPv4 address in any spelling other
+// hostcanon.UnspecifiedOrEmpty). So is an IPv4 address in any spelling other
 // than canonical dotted-quad decimal ("0x7f.0.0.1", "2130706433",
 // "127.1", "127.0.0.1."), which resolvers read differently — Go's pure
 // resolver sends the hex forms to DNS — so an allow for the address must
-// not admit it (USK-1273, see legacyIPv4Spelling). So is a port outside
+// not admit it (USK-1273, see hostcanon.LegacyIPv4Spelling). So is a port outside
 // 0..65535, which no TCP dial uses as written (USK-1262). With no rules at
 // all (open mode) all four are allowed like any other target.
 //
@@ -179,9 +180,9 @@ func (s *TargetScope) checkTargetLocked(scheme, hostname string, port int, path 
 // either layer has any rule, a dial host that a resolver or the dialer may
 // read as a destination no rule can name is refused before deny and allow
 // evaluation — an empty or unspecified host, which Go dials as the proxy
-// host itself (USK-1312, unspecifiedOrEmptyHost), an unparsable numeric
-// host (USK-1250, numericHostUnparsable), and a non-canonical IPv4
-// spelling that resolvers disagree on (USK-1273, legacyIPv4Spelling). The
+// host itself (USK-1312, hostcanon.UnspecifiedOrEmpty), an unparsable numeric
+// host (USK-1250, hostcanon.NumericUnparsable), and a non-canonical IPv4
+// spelling that resolvers disagree on (USK-1273, hostcanon.LegacyIPv4Spelling). The
 // order matters: the legacy "0" / "0x0" fold into 0.0.0.0 and keep the
 // unspecified reason. A port outside 0..65535 is refused too (USK-1262):
 // no TCP dial can use it as written, and a caller that parsed a port
@@ -197,13 +198,13 @@ func (s *TargetScope) dialHostFailClosedLocked(hostname string, port int) (reaso
 	if port < 0 || port > 65535 {
 		return ReasonPortOutOfRange, true
 	}
-	if unspecifiedOrEmptyHost(hostname) {
+	if hostcanon.UnspecifiedOrEmpty(hostname) {
 		return unspecifiedHostReason, true
 	}
-	if numericHostUnparsable(hostname) {
+	if hostcanon.NumericUnparsable(hostname) {
 		return numericHostReason, true
 	}
-	if legacyIPv4Spelling(hostname) {
+	if hostcanon.LegacyIPv4Spelling(hostname) {
 		return legacyIPv4Reason, true
 	}
 	return "", false
@@ -374,7 +375,7 @@ func (s *TargetScope) CheckURL(u *url.URL) (allowed bool, reason string) {
 }
 
 // urlScopePort reads the port of u.Host for CheckURL. ok is false when a
-// port is present but fails parseStrictPort, or when the host part has
+// port is present but fails hostcanon.ParseStrictPort, or when the host part has
 // colons that are not a bracketed IPv6 literal. A bare IPv6 host
 // ("2001:db8::1", which net/url splits at its last colon) keeps the
 // u.Port() reading it always had.
@@ -409,7 +410,7 @@ func urlScopePort(scheme string, u *url.URL) (port int, ok bool) {
 	if portStr == "" {
 		return schemeDefaultPort(scheme), true
 	}
-	return parseStrictPort(portStr)
+	return hostcanon.ParseStrictPort(portStr)
 }
 
 // SetPolicyRules sets the policy layer rules at initialization. The only
@@ -668,7 +669,7 @@ func ruleCoversRule(covering, covered TargetRule) bool {
 //   - "*.example.com" covers "sub.example.com" (exact is subset of wildcard)
 //   - "*.example.com" covers "*.example.com" (same wildcard)
 //   - "example.com" covers "example.com" (same exact)
-//   - "::1" covers "[::1]" (same IPv6 address, see canonicalScopeHost)
+//   - "::1" covers "[::1]" (same IPv6 address, see hostcanon.Fold)
 //   - "10.0.0.5" covers "::ffff:10.0.0.5" and vice versa (same address)
 //   - "*.example.com" does NOT cover "*.other.com"
 //   - a non-empty covering hostname does NOT cover "" (any host)
@@ -676,8 +677,8 @@ func hostnameCoveredBy(covering, covered string) bool {
 	if covering == "" {
 		return true
 	}
-	coveringLower := canonicalScopeHost(covering)
-	coveredLower := canonicalScopeHost(covered)
+	coveringLower := hostcanon.Fold(covering)
+	coveredLower := hostcanon.Fold(covered)
 
 	// Exact match.
 	if coveringLower == coveredLower {
@@ -747,14 +748,14 @@ func PathPrefixMatches(path, prefix string) bool {
 // matchHostname performs case-insensitive hostname matching with wildcard support.
 // Pattern "*.example.com" matches "sub.example.com" but not "example.com".
 // Exact patterns match exactly; both sides are compared in canonical form
-// (canonicalScopeHost), so a rule matches every spelling of its host that
+// (hostcanon.Fold), so a rule matches every spelling of its host that
 // dials the same destination (IPv6 forms and zones, IPv4-mapped IPv6, one
 // trailing dot, legacy IPv4). A wildcard compares after the trailing dot
 // is stripped: "a.internal." matches "*.internal", the apex "internal."
 // does not.
 func matchHostname(pattern, hostname string) bool {
-	pattern = canonicalScopeHost(pattern)
-	hostname = canonicalScopeHost(hostname)
+	pattern = hostcanon.Fold(pattern)
+	hostname = hostcanon.Fold(hostname)
 
 	if strings.HasPrefix(pattern, "*.") {
 		suffix := pattern[1:] // ".example.com"
@@ -791,7 +792,7 @@ func containsStringFold(slice []string, val string) bool {
 // It deliberately takes no port string (USK-1262): it used to parse one
 // leniently and return 0 for anything strconv.Atoi refused, and 0 matches
 // no ports rule — an unparsable port silently became "matches nothing"
-// (fail open). Port strings are read with parseStrictPort, whose failure
+// (fail open). Port strings are read with hostcanon.ParseStrictPort, whose failure
 // each caller turns into a refusal when the scope has rules.
 func schemeDefaultPort(scheme string) int {
 	switch scheme {
@@ -813,11 +814,11 @@ func TargetRuleEqual(a, b TargetRule) bool {
 }
 
 // targetRuleEqual reports whether two TargetRule values are equal.
-// Hostnames compare in canonical form (canonicalScopeHost), so "::1" and
+// Hostnames compare in canonical form (hostcanon.Fold), so "::1" and
 // "[::1]", "example.com." and "example.com", and "::ffff:10.0.0.5" and
 // "10.0.0.5" are one rule.
 func targetRuleEqual(a, b TargetRule) bool {
-	if canonicalScopeHost(a.Hostname) != canonicalScopeHost(b.Hostname) {
+	if hostcanon.Fold(a.Hostname) != hostcanon.Fold(b.Hostname) {
 		return false
 	}
 	if a.PathPrefix != b.PathPrefix {

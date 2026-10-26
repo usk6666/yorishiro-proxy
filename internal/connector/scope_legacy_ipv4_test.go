@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// USK-1273: canonicalScopeHost folds legacy inet_aton IPv4 spellings
+// USK-1273: hostcanon.Fold folds legacy inet_aton IPv4 spellings
 // ("0x7f.0.0.1", "2130706433", "127.1", "0177.0.0.1") into dotted-quad for
 // comparison, which is exact for a deny but widens an allow: Go's pure
 // resolver does not read those spellings as addresses. It sends the hex
@@ -30,7 +30,7 @@ func loopbackAllowScope() *TargetScope {
 }
 
 // legacyIPv4DialHosts are non-canonical spellings of an IPv4 address that
-// canonicalScopeHost folds into a dotted-quad (all but "10.0.5" fold into
+// hostcanon.Fold folds into a dotted-quad (all but "10.0.5" fold into
 // 127.0.0.1).
 var legacyIPv4DialHosts = []string{
 	"0x7f.0.0.1",      // hex first part: Go's pure resolver sends it to DNS
@@ -47,23 +47,6 @@ var legacyIPv4DialHosts = []string{
 	"0x7f.0.0.1.",     // hex with a trailing dot
 	"[127.0.0.1]",     // bracketed IPv4
 	"10.0.5",          // short form of an address the allow does not name
-}
-
-func TestLegacyIPv4Spelling(t *testing.T) {
-	for _, h := range legacyIPv4DialHosts {
-		if !legacyIPv4Spelling(h) {
-			t.Errorf("legacyIPv4Spelling(%q) = false, want true", h)
-		}
-	}
-	for _, h := range []string{
-		"127.0.0.1", "10.0.0.5", "0.0.0.0", "255.255.255.255", // canonical
-		"::ffff:127.0.0.1", "[::ffff:7f00:1]", "::1", "[::1]", "fe80::1%eth0", // IPv6 is dialed as an IP literal
-		"localhost", "example.com", "foo.0x7f", "1.2.3.4.5", "0x", "", ".", "[]", // not an IPv4 address
-	} {
-		if legacyIPv4Spelling(h) {
-			t.Errorf("legacyIPv4Spelling(%q) = true, want false", h)
-		}
-	}
 }
 
 // T1 / T2: every scope entry point refuses a non-canonical IPv4 dial host
@@ -169,7 +152,7 @@ func TestTargetScope_LegacyIPv4DialHost_OpenModeUnchanged(t *testing.T) {
 // Host / :authority value on a connection dialing the allowed address is a
 // legitimate Host-injection value (plan B) and stays allowed; a deny for
 // the folded address still blocks it. (Characterization: wiring the new
-// predicate into nameDenyLocked or numericHostUnparsable turns this red.)
+// predicate into nameDenyLocked or hostcanon.NumericUnparsable turns this red.)
 func TestTargetScope_LegacyIPv4NameLegUnchanged(t *testing.T) {
 	const dial = "127.0.0.1:80"
 	allow := loopbackAllowScope()

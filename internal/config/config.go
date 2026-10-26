@@ -932,7 +932,11 @@ type ProxyConfig struct {
 	// RawPassthroughHosts is a list of "host:port" targets that bypass L7
 	// parsing. Traffic to these hosts is relayed as raw bytes through the
 	// ByteChunk layer, enabling HTTP request-smuggling diagnosis.
-	// Matching is case-insensitive exact match (wildcard deferred to N4).
+	// There are no wildcards. Entries and targets are compared after folding
+	// spellings verified to dial the same destination — case, one trailing
+	// dot, IPv6 text form, IPv4-mapped IPv6, zone, leading-zero port — but
+	// not legacy IPv4 spellings such as "127.1" (IsRawPassthrough, USK-1385).
+	// Stored entries are kept as written.
 	RawPassthroughHosts []string `json:"raw_passthrough_hosts,omitempty"`
 
 	// InterceptQueue configures the intercept-queue hold timeout, timeout-
