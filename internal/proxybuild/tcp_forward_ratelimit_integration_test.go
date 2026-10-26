@@ -125,6 +125,11 @@ func TestProxybuild_TCPForwardRateLimit_RawOverLimitClosed(t *testing.T) {
 	if !strings.Contains(out, "tcp forward target blocked by rate limit") || !strings.Contains(out, "limit_type=global") {
 		t.Errorf("missing Info 'tcp forward target blocked by rate limit' with limit_type; logs:\n%s", out)
 	}
+	// The refusal Stream and its Info log share the connection's conn_id
+	// (minted at admission, before the gate runs).
+	if st.ConnID != "" && !strings.Contains(out, "conn_id="+st.ConnID) {
+		t.Errorf("rate-limit log does not carry the refusal Stream's conn_id %q; logs:\n%s", st.ConnID, out)
+	}
 }
 
 // TestProxybuild_TCPForwardRateLimit_HTTPGets429 is test-plan 2: a
