@@ -3,6 +3,7 @@
 package proxybuild_test
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -60,6 +61,45 @@ register_hook("http", "` + tc.event + `", deny)
 			_ = h.mgr.StopAll(context.Background())
 			if f := waitFlow(h.store, "receive", "", func(b []byte) bool {
 				return strings.HasPrefix(string(b), "HTTP/1.1 200")
+			}); f == nil {
+				t.Errorf("no receive flow with the upstream response recorded; flows:%s", describeFlows(h.store))
+			}
+		})
+	}
+}
+
+// USK-1388: the HTTP/2 mirror of the case above. An http hook's
+// action.RESPOND_GRPC over h2 reaches httpaggregator, whose Send also
+// requires *HTTPMessage; the refused RESPOND must leave the original
+// exchange intact. Only on_request discriminates the fix: on this path
+// upstreamToClient does not deliver a Receive-direction Respond envelope
+// (it forwards the original response), so on_response guards the
+// end-to-end behavior without reaching the aggregator's Send. The h2c
+// harness helpers live in plugin_raw_wins_h2_integration_test.go.
+func TestPluginRespondShape_H2_RespondGRPCRefused(t *testing.T) {
+	for _, event := range []string{"on_request", "on_response"} {
+		t.Run(event, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			upAddr, seen := startCapturingH2CUpstream(t)
+			h, fwd := startRawWinsForwardDeps(t, ctx, `
+def deny(msg, ctx):
+    return action.RESPOND_GRPC(status=7, message="denied by plugin")
+register_hook("http", "`+event+`", deny)
+`, upAddr, "http2", nil)
+
+			status, body := doH2C(t, ctx, fwd, "GET", "/shape", nil)
+			if status != 200 || body != "upstream:/shape" {
+				t.Errorf("client got %d %q, want 200 upstream:/shape from the upstream", status, body)
+			}
+			path, hdr, _ := seen.snapshot()
+			if path != "/shape" || hdr.Get("X-Marker") != "orig" {
+				t.Errorf("upstream saw path=%q x-marker=%q, want the client request", path, hdr.Get("X-Marker"))
+			}
+			waitAnyFlow(t, h.store, "receive")
+			if f := waitFlow(h.store, "receive", "", func(b []byte) bool {
+				return bytes.Contains(b, []byte("upstream:/shape"))
 			}); f == nil {
 				t.Errorf("no receive flow with the upstream response recorded; flows:%s", describeFlows(h.store))
 			}
