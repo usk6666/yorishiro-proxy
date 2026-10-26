@@ -32,6 +32,9 @@ import (
 //     break wire").
 //   - Plugin Starlark runtime errors are already converted into Continue
 //     by Engine.Dispatch's per-hook handler, so the chain keeps moving.
+//   - Every outcome treated as Continue this way (disallowed action,
+//     runtime error, invalid return value) is counted on the plugin's
+//     fail-open stats, surfaced by Engine.Introspect.
 //   - msg is passed verbatim as the plugin's first positional argument.
 //     Callers typically build it via one of the BuildLifecycle*Dict
 //     helpers below (frozen *starlark.Dict). Mutations to msg by a hook
@@ -69,6 +72,7 @@ func (e *Engine) FireLifecycle(ctx context.Context, protocol, event string, env 
 	for _, hook := range hooks {
 		action, err := e.dispatchLifecycleHook(ctx, hook, env, msg)
 		if err != nil {
+			hook.stats.record(hook, failOpenKindOf(err), action, err.Error())
 			if errors.Is(err, ErrDisallowedAction) {
 				e.logger.WarnContext(ctx, "pluginv2: lifecycle hook returned disallowed action; treating as continue",
 					slog.String("plugin", hook.PluginName),
@@ -136,10 +140,17 @@ func (e *Engine) dispatchLifecycleHook(ctx context.Context, hook Hook, env *enve
 			slog.String("hook", hook.Protocol+"."+hook.Event),
 			slog.String("error", callErr.Error()),
 		)
+		// A cancelled ctx is teardown, not a plugin failing open.
+		if ctx == nil || ctx.Err() == nil {
+			hook.stats.record(hook, FailOpenHookError, ActionContinue, callErr.Error())
+		}
 		return ActionContinue, nil
 	}
 
-	action, _ := interpretReturnValue(ret, hook, e.logger)
+	action, _, invalid := interpretReturnValue(ret, hook, e.logger)
+	if invalid != "" {
+		hook.stats.record(hook, FailOpenInvalidReturn, ActionContinue, invalid)
+	}
 	if action == ActionContinue {
 		return ActionContinue, nil
 	}

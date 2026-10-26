@@ -62,10 +62,11 @@ func (e *Engine) Introspect() []PluginIntrospectInfo {
 			name = pluginName(lp.config.Path)
 		}
 		info := PluginIntrospectInfo{
-			Name:    name,
-			Path:    lp.config.Path,
-			Enabled: true,
-			Vars:    redactVars(lp.config.Vars, lp.config.RedactKeys),
+			Name:     name,
+			Path:     lp.config.Path,
+			Enabled:  true,
+			Vars:     redactVars(lp.config.Vars, lp.config.RedactKeys),
+			FailOpen: lp.stats.snapshot(),
 		}
 		if len(lp.registrations) > 0 {
 			info.Registrations = make([]HookRegistration, 0, len(lp.registrations))

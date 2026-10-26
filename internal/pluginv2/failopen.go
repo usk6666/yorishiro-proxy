@@ -1,6 +1,11 @@
 package pluginv2
 
-import "time"
+import (
+	"errors"
+	"sync"
+	"time"
+	"unicode/utf8"
+)
 
 // FailOpenKind classifies a hook outcome the engine could not honour and
 // therefore treated as CONTINUE (fail-open). The string values are stable
@@ -89,3 +94,106 @@ type FailOpenStats struct {
 // FailOpenReasonCap bounds FailOpenRecord.Reason in bytes. The cut lands on
 // a UTF-8 rune boundary.
 const FailOpenReasonCap = 1024
+
+// pluginStats holds one loaded plugin's fail-open counters. A pointer is
+// shared by the loadedPlugin (read by Introspect) and every Hook it
+// registered (written by Dispatch / FireLifecycle), so counters follow the
+// plugin instance rather than its name — names are not unique. The record
+// path takes only the per-plugin mutex, never Engine.mu. Counters live
+// for the process lifetime (the engine is never reloaded).
+type pluginStats struct {
+	mu     sync.Mutex
+	total  int64
+	byKind map[FailOpenKind]int64
+	last   *FailOpenRecord
+}
+
+// record counts one fail-open outcome of hook. nil-safe: hooks registered
+// directly via Registry.Register (tests) carry no stats.
+func (s *pluginStats) record(hook Hook, kind FailOpenKind, action Action, reason string) {
+	if s == nil {
+		return
+	}
+	rec := &FailOpenRecord{
+		Kind:     kind,
+		Protocol: hook.Protocol,
+		Event:    hook.Event,
+		Phase:    string(hook.Phase),
+		Reason:   truncateUTF8(reason, FailOpenReasonCap),
+		At:       time.Now(),
+	}
+	if action != ActionContinue {
+		rec.Action = action.String()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.total++
+	if s.byKind == nil {
+		s.byKind = make(map[FailOpenKind]int64)
+	}
+	s.byKind[kind]++
+	s.last = rec
+}
+
+// snapshot returns a copy of the counters safe to hand to callers.
+func (s *pluginStats) snapshot() FailOpenStats {
+	if s == nil {
+		return FailOpenStats{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := FailOpenStats{Total: s.total}
+	if len(s.byKind) > 0 {
+		out.ByKind = make(map[FailOpenKind]int64, len(s.byKind))
+		for k, v := range s.byKind {
+			out.ByKind[k] = v
+		}
+	}
+	if s.last != nil {
+		last := *s.last
+		out.Last = &last
+	}
+	return out
+}
+
+// failOpenKindError tags a refusal with its FailOpenKind while keeping the
+// wrapped error's text and errors.Is chain (ErrDisallowedAction) intact.
+type failOpenKindError struct {
+	kind FailOpenKind
+	err  error
+}
+
+func (e *failOpenKindError) Error() string { return e.err.Error() }
+func (e *failOpenKindError) Unwrap() error { return e.err }
+
+// failOpenKindOf classifies an error Engine.Dispatch / dispatchLifecycleHook
+// returns. Classification is by type / sentinel, never by message text.
+func failOpenKindOf(err error) FailOpenKind {
+	var ke *failOpenKindError
+	switch {
+	case errors.As(err, &ke):
+		return ke.kind
+	case errors.Is(err, ErrDisallowedAction):
+		return FailOpenActionNotAllowed
+	case errors.Is(err, ErrChunkTooLarge):
+		return FailOpenChunkTooLarge
+	case errors.Is(err, ErrBodyTooLarge):
+		return FailOpenBodyTooLarge
+	case errors.Is(err, ErrUnsupportedMessageType):
+		return FailOpenUnsupportedMessage
+	default:
+		return FailOpenDispatchError
+	}
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a rune.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}

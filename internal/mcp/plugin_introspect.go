@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"time"
+	"unicode/utf8"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -82,7 +84,10 @@ func (s *Server) registerPluginIntrospect() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "plugin_introspect",
 		Description: "List loaded plugins with their (protocol, event, phase) hook registrations and " +
-			"the redacted PluginConfig.Vars map. Returns an empty list when no plugin engine is configured. " +
+			"the redacted PluginConfig.Vars map. fail_open_count counts hook outcomes the engine refused or could not " +
+			"evaluate and treated as CONTINUE (e.g. a RESPOND whose shape does not match the hook, a hook runtime error) — " +
+			"the message was forwarded anyway; last_fail_open shows the most recent one. " +
+			"Returns an empty list when no plugin engine is configured. " +
 			"Full reference: call docs(topic=\"plugin_introspect\").",
 	}, s.handlePluginIntrospect)
 }
@@ -104,13 +109,49 @@ func (s *Server) handlePluginIntrospect(_ context.Context, _ *gomcp.CallToolRequ
 				Phase:    r.Phase,
 			})
 		}
-		plugins = append(plugins, pluginIntrospectPlugin{
+		p := pluginIntrospectPlugin{
 			Name:          info.Name,
 			Path:          info.Path,
 			Enabled:       info.Enabled,
 			Registrations: regs,
 			Vars:          info.Vars,
-		})
+			FailOpenCount: info.FailOpen.Total,
+		}
+		if len(info.FailOpen.ByKind) > 0 {
+			p.FailOpenByKind = make(map[string]int64, len(info.FailOpen.ByKind))
+			for k, v := range info.FailOpen.ByKind {
+				p.FailOpenByKind[string(k)] = v
+			}
+		}
+		if last := info.FailOpen.Last; last != nil {
+			p.LastFailOpen = &pluginFailOpenRecord{
+				Kind:     string(last.Kind),
+				Action:   last.Action,
+				Protocol: last.Protocol,
+				Event:    last.Event,
+				Phase:    last.Phase,
+				Reason:   s.failOpenReasonForOutput(last.Reason),
+				At:       last.At.UTC().Format(time.RFC3339),
+			}
+		}
+		plugins = append(plugins, p)
 	}
 	return nil, &pluginIntrospectResult{Plugins: plugins}, nil
+}
+
+// failOpenReasonForOutput prepares a fail-open reason for the agent. A
+// hook_error reason is the plugin's own error text, which can carry values
+// the plugin read from traffic, so every reason goes through the Output
+// Filter (RFC-001 §3.7) before it leaves the MCP boundary, then is cut to
+// failOpenReasonOutputCap bytes on a rune boundary.
+func (s *Server) failOpenReasonForOutput(reason string) string {
+	masked := string(s.filterOutputBody([]byte(reason)))
+	if len(masked) <= failOpenReasonOutputCap {
+		return masked
+	}
+	cut := failOpenReasonOutputCap
+	for cut > 0 && !utf8.RuneStart(masked[cut]) {
+		cut--
+	}
+	return masked[:cut]
 }
