@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -285,6 +286,103 @@ func TestPluginStepPre_DispatcherErrorIsLoggedAndContinued(t *testing.T) {
 		errStr, _ := rec["error"].(string)
 		if !strings.Contains(errStr, "disallowed") {
 			t.Errorf("log error = %q, want it to contain %q", errStr, "disallowed")
+		}
+	}
+	if !found {
+		t.Errorf("no 'hook outcome rejected' Warn log; got logs:\n%s", logBuf.String())
+	}
+}
+
+// TestPluginStepPre_RespondShapeMismatchIsLoggedAndContinued drives the real
+// PluginStepPre with two hooks on (grpc-web, on_start, pre_pipeline): the
+// first returns an HTTP-shaped action.RESPOND, which no gRPC-Web Channel can
+// render, so Engine.Dispatch refuses it. The dispatcher must log that at
+// Warn (naming the plugin and pointing at action.RESPOND_GRPC), the second
+// hook must still run and its metadata edit must survive, and the step must
+// return Continue rather than Respond.
+func TestPluginStepPre_RespondShapeMismatchIsLoggedAndContinued(t *testing.T) {
+	eng := pluginv2.NewEngine(nil)
+	eng.Registry().Register(pluginv2.Hook{
+		Protocol: pluginv2.ProtoGRPCWeb, Event: pluginv2.EventOnStart,
+		Phase: pluginv2.PhasePrePipeline, PluginName: "http-responder",
+		Fn: hookCallable("respond", func(args starlark.Tuple) (starlark.Value, error) {
+			return &pluginv2.RespondAction{HTTPResponse: &pluginv2.HTTPRespondPayload{
+				StatusCode: 403,
+				Headers:    []envelope.KeyValue{{Name: "Content-Type", Value: "text/plain"}},
+				Body:       []byte("denied"),
+			}}, nil
+		}),
+	})
+	eng.Registry().Register(pluginv2.Hook{
+		Protocol: pluginv2.ProtoGRPCWeb, Event: pluginv2.EventOnStart,
+		Phase: pluginv2.PhasePrePipeline, PluginName: "tagger",
+		Fn: hookCallable("tag", func(args starlark.Tuple) (starlark.Value, error) {
+			msg, ok := args[0].(*pluginv2.MessageDict)
+			if !ok {
+				return nil, fmt.Errorf("arg 0 not *MessageDict: %T", args[0])
+			}
+			md := pluginv2.NewHeadersValue([]envelope.KeyValue{{Name: "x-tagged", Value: "yes"}})
+			if err := msg.SetKey(starlark.String("metadata"), md); err != nil {
+				return nil, err
+			}
+			return starlark.None, nil
+		}),
+	})
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	step := NewPluginStepPre(eng, nil, logger)
+	env := &envelope.Envelope{
+		StreamID:  "s",
+		FlowID:    "f",
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolGRPCWeb,
+		Message:   &envelope.GRPCStartMessage{Service: "pkg.Echo", Method: "Say"},
+	}
+	r := step.Process(context.Background(), env)
+
+	if r.Action != Continue {
+		t.Fatalf("Action = %v (Response %+v), want Continue (mismatched RESPOND must be refused)", r.Action, r.Response)
+	}
+	if r.Envelope == nil {
+		t.Fatal("Envelope nil, want the tagger hook's mutated envelope")
+	}
+	start, ok := r.Envelope.Message.(*envelope.GRPCStartMessage)
+	if !ok {
+		t.Fatalf("Message type %T, want *GRPCStartMessage", r.Envelope.Message)
+	}
+	var tagged bool
+	for _, kv := range start.Metadata {
+		if kv.Name == "x-tagged" && kv.Value == "yes" {
+			tagged = true
+		}
+	}
+	if !tagged {
+		t.Errorf("Metadata = %v, want the second hook's x-tagged: yes", start.Metadata)
+	}
+
+	var found bool
+	for _, line := range bytes.Split(bytes.TrimSpace(logBuf.Bytes()), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("unmarshal log line %q: %v", line, err)
+		}
+		if rec["msg"] != "plugin: hook outcome rejected; treating as continue" {
+			continue
+		}
+		found = true
+		if rec["level"] != "WARN" {
+			t.Errorf("log level = %v, want WARN", rec["level"])
+		}
+		if rec["plugin"] != "http-responder" {
+			t.Errorf("log plugin = %v, want http-responder", rec["plugin"])
+		}
+		errStr, _ := rec["error"].(string)
+		if !strings.Contains(errStr, "action.RESPOND_GRPC") {
+			t.Errorf("log error = %q, want it to point at action.RESPOND_GRPC", errStr)
 		}
 	}
 	if !found {

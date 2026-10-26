@@ -284,3 +284,62 @@ register_hook("grpc", "on_start", deny)
 		t.Errorf("upstream dialed %d times; want 0 (plugin responded on Start)", got)
 	}
 }
+
+// TestGRPC_PluginHTTPRespond_Refused: an HTTP-shaped action.RESPOND on
+// grpc.on_start — a shape the gRPC Layer cannot render — is refused (Warn +
+// CONTINUE), so the RPC reaches the upstream and the client gets the echo.
+// Previously the session ended with "grpc: Send: unsupported Message type
+// *envelope.HTTPMessage" and the client saw codes.Canceled.
+func TestGRPC_PluginHTTPRespond_Refused(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ca, issuer := makeCA(t)
+	srv := &echoServer{
+		unary: func(_ context.Context, req []byte) ([]byte, error) { return append([]byte("echo:"), req...), nil },
+	}
+	upAddr, upStop := startGRPCUpstream(t, ca, issuer, srv)
+	defer upStop()
+
+	script := filepath.Join(t.TempDir(), "http_respond.star")
+	if err := os.WriteFile(script, []byte(`
+def deny(msg, ctx):
+    return action.RESPOND(status_code=403, headers=[("Content-Type", "text/plain")], body=b"denied")
+
+register_hook("grpc", "on_start", deny)
+`), 0o600); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	eng := pluginv2.NewEngine(nil)
+	if err := eng.LoadPlugins(ctx, []pluginv2.PluginConfig{{Path: script, OnError: "abort"}}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+
+	probe := &sessionProbe{}
+	proxyAddr, store := startGRPCMITMProxy(t, ctx, ca, issuer, pipelineOpts{plugins: eng, probe: probe})
+
+	cc := dialGRPCViaProxy(ctx, t, proxyAddr, upAddr)
+	defer cc.Close()
+
+	callCtx, callCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer callCancel()
+	req := []byte("hi")
+	var resp []byte
+	if err := cc.Invoke(callCtx, echoFullMethod(echoMethodUnary), &req, &resp); err != nil {
+		t.Fatalf("Invoke: %v (want the upstream echo; a refused RESPOND must not cancel the RPC)", err)
+	}
+	if want := "echo:hi"; string(resp) != want {
+		t.Errorf("resp = %q, want %q", resp, want)
+	}
+
+	probe.waitCompleted(t, 5*time.Second)
+	if got := probe.dials.Load(); got != 1 {
+		t.Errorf("upstream dialed %d times; want 1", got)
+	}
+	if b := probe.blocked(); len(b) != 0 {
+		t.Errorf("OnPipelineDrop attributions = %v, want none", b)
+	}
+	if st := firstGRPCStream(t, store, 5*time.Second); st.Protocol != "grpc" {
+		t.Errorf("Stream.Protocol = %q, want grpc", st.Protocol)
+	}
+}
