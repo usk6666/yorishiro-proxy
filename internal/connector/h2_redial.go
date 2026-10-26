@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 )
@@ -33,6 +34,17 @@ import (
 // stale (recursive GOAWAY chain). Browser-equivalent semantics: every
 // GOAWAY observed mid-CONNECT triggers a fresh dial transparently; no
 // cap on chain length (the per-CONNECT lifecycle is the natural bound).
+//
+// Transport: the fresh conn matches the stale Layer's scheme, the same rule
+// RedialUpstreamH1 applies. A stale Layer built with scheme "http" comes
+// from BuildPlainH2CStack (cleartext h2c inside a plaintext CONNECT /
+// SOCKS5 tunnel) and sits on plain TCP, so the redial is a plain dial via
+// dialPlainUpstream — the first dial's own helper (upstream proxy, rate
+// limit) — with no TLS, uTLS or ALPN, and the fresh Layer keeps scheme
+// "http" for later chain generations (USK-1383). Inventing a TLS handshake
+// the first connection never had would only fail against an h2c origin.
+// Every other scheme (including a zero-value Layer's "") redials over TLS
+// offering only h2.
 //
 // ut carries the stack's dial target / TLS authority split (USK-1315;
 // UpstreamTargetOf): the fresh conn dials ut.Dial, sends the TLS authority's
@@ -72,26 +84,24 @@ func RedialUpstreamH2(
 	if extractHost(target) == "" {
 		return nil, fmt.Errorf("connector: RedialUpstreamH2: invalid target %q", target)
 	}
-	host := ut.tlsHost()
-	if host == "" {
-		return nil, fmt.Errorf("connector: RedialUpstreamH2: invalid TLS authority %q", ut.tlsAuthority())
-	}
-
-	hostTLS, err := resolvePerHostTLS(ut.tlsAuthority(), cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	// Offer only h2 — by definition the prior negotiation produced h2 (we
-	// were holding a *http2.Layer). Re-negotiating to anything else would
-	// invalidate the per-stream layering already established on the client
-	// side of the stack.
-	upstreamConn, _, err := dialUpstreamWithALPN(ctx, target, host,
-		[]string{ALPNProtocolH2},
-		hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg,
-	)
-	if err != nil {
-		return nil, err
+	// Compare against "http" exactly (never `!= "https"`): only a Layer
+	// built as cleartext h2c takes the plain path; anything else —
+	// including a zero-value Layer — keeps the TLS dial.
+	scheme := "https"
+	var upstreamConn net.Conn
+	if stale.Scheme() == "http" {
+		scheme = "http"
+		conn, err := dialPlainUpstream(ctx, target, cfg)
+		if err != nil {
+			return nil, err
+		}
+		upstreamConn = conn
+	} else {
+		conn, err := redialUpstreamH2TLS(ctx, ut, cfg)
+		if err != nil {
+			return nil, err
+		}
+		upstreamConn = conn
 	}
 
 	// Reuse the original Layer's EnvelopeContext template. The TLS snapshot
@@ -109,7 +119,7 @@ func RedialUpstreamH2(
 	connID := redialConnIDLabel(envCtx.ConnID, generation)
 
 	fresh, err := http2.New(upstreamConn, connID, http2.ClientRole,
-		http2.WithScheme("https"),
+		http2.WithScheme(scheme),
 		http2.WithEnvelopeContext(envCtx),
 		http2.WithBodySpillDir(cfg.BodySpillDir),
 		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
@@ -126,6 +136,30 @@ func RedialUpstreamH2(
 	}
 
 	return fresh, nil
+}
+
+// redialUpstreamH2TLS dials the TLS replacement conn for an "https" stack,
+// resolving per-host TLS by ut's TLS authority and offering only h2 — by
+// definition the prior negotiation produced h2 (the caller held a
+// *http2.Layer). Re-negotiating to anything else would invalidate the
+// per-stream layering already established on the client side of the stack.
+func redialUpstreamH2TLS(ctx context.Context, ut UpstreamTarget, cfg *BuildConfig) (net.Conn, error) {
+	host := ut.tlsHost()
+	if host == "" {
+		return nil, fmt.Errorf("connector: RedialUpstreamH2: invalid TLS authority %q", ut.tlsAuthority())
+	}
+	hostTLS, err := resolvePerHostTLS(ut.tlsAuthority(), cfg)
+	if err != nil {
+		return nil, err
+	}
+	conn, _, err := dialUpstreamWithALPN(ctx, ut.Dial, host,
+		[]string{ALPNProtocolH2},
+		hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
 }
 
 // redialConnIDLabel composes the ConnID suffix for a fresh redial Layer.

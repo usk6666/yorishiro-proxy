@@ -361,6 +361,15 @@ func (l *Layer) EnvelopeContextTemplate() envelope.EnvelopeContext {
 	return l.opts.ctx
 }
 
+// Scheme returns the HTTP scheme ("http" or "https") this Layer was built
+// with (see [WithScheme]); the zero-value Layer reports "". The connector
+// GOAWAY redial uses it to redial over the same transport the original
+// stack was built on: "http" stacks (cleartext h2c, BuildPlainH2CStack) sit
+// on plain TCP, every other Layer on TLS.
+func (l *Layer) Scheme() string {
+	return l.opts.scheme
+}
+
 // LastReaderError returns the most recent non-EOF error observed by the
 // reader goroutine.
 func (l *Layer) LastReaderError() error {
