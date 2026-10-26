@@ -783,10 +783,11 @@ func (m *Manager) RequestTimeoutDisabled() bool {
 
 // SetClientIdleTimeout sets client_idle_timeout_ms (USK-1185): how long a
 // client-facing HTTP/1.x keep-alive connection waits for the first byte of
-// the next request. Non-positive values restore
-// connector.DefaultClientIdleTimeout. Clears a previous
-// DisableClientIdleTimeout. Next-request semantics. HTTP/2 does not read it
-// yet.
+// the next request, and how long a client-facing HTTP/2 connection may have
+// no open stream before it is sent GOAWAY and closed (USK-1188).
+// Non-positive values restore connector.DefaultClientIdleTimeout. Clears a
+// previous DisableClientIdleTimeout. Applies from the next request (HTTP/1.x)
+// or the next idle period (HTTP/2).
 func (m *Manager) SetClientIdleTimeout(d time.Duration) {
 	if d < 0 {
 		d = 0

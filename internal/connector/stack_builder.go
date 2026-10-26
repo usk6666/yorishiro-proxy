@@ -859,6 +859,10 @@ type resolvedTLS struct {
 // fast path, the ALPN h2 stack, the CONNECT plaintext h2c inner stack and the
 // tcp_forwards h2c stack. Keeping the list in one place means a new
 // client-facing knob cannot reach some of those sites and miss the others.
+//
+// client_idle_timeout_ms (ClientIdleDeadline) is passed as a resolver, so a
+// runtime change applies to existing connections from their next idle
+// period (USK-1188).
 func clientH2ServerOptions(cfg *BuildConfig, scheme string, envCtx envelope.EnvelopeContext, enableConnectProtocol bool) []http2.Option {
 	opts := []http2.Option{
 		http2.WithScheme(scheme),
@@ -868,6 +872,7 @@ func clientH2ServerOptions(cfg *BuildConfig, scheme string, envCtx envelope.Enve
 		http2.WithMaxBodySize(cfg.MaxBodySize),
 		http2.WithStateReleaser(cfg.PluginV2Engine),
 		http2.WithEnableConnectProtocol(enableConnectProtocol),
+		http2.WithClientIdleTimeout(cfg.ClientIdleDeadline),
 	}
 	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
 		opts = append(opts, mcsOpt)
@@ -1017,7 +1022,9 @@ func (c *BuildConfig) ClientHandshakeContext(ctx context.Context) (context.Conte
 // value from SetClientIdleTimeout when positive, else
 // DefaultClientIdleTimeout. ok=false means the bound is disabled. Safe on
 // a nil receiver (default, enabled). The HTTP/1.x Layer combines it with
-// the request-head bound as max(idle, header) when both are enabled.
+// the request-head bound as max(idle, header) when both are enabled; the
+// client-facing HTTP/2 Layer uses it alone as the longest time with no open
+// stream before GOAWAY (USK-1188).
 func (c *BuildConfig) ClientIdleDeadline() (d time.Duration, ok bool) {
 	if c == nil {
 		return DefaultClientIdleTimeout, true
