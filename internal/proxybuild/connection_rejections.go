@@ -516,6 +516,9 @@ type ConnectionRejectionEntry struct {
 	Target string `json:"target,omitempty"`
 	// TargetTruncated reports that Target was cut at 512 bytes.
 	TargetTruncated bool `json:"target_truncated,omitempty"`
+	// OriginalDst is the original destination of a connection refused on
+	// a transparent listener (host:port), when it was resolvable.
+	OriginalDst string `json:"original_dst,omitempty"`
 	// Wrote503 reports that a 503 response was written to the client.
 	Wrote503 bool `json:"wrote_503"`
 	// MaxConnections is the cap in force at the time.

@@ -32,6 +32,12 @@ type RejectInfo struct {
 	Target string
 	// TargetTruncated reports that Target was cut at MaxRejectTargetLen.
 	TargetTruncated bool
+	// OriginalDst is the connection's original destination in
+	// netip.AddrPort.String() form, set only for a rejection on a
+	// transparent listener whose original destination resolved to a
+	// usable address (USK-1379). Empty on explicit listeners, TCP
+	// forwards, and when resolution failed.
+	OriginalDst string
 	// WroteResponse reports that the 503 response reached the socket.
 	WroteResponse bool
 	// MaxConnections is the cap in force when the connection was refused.
