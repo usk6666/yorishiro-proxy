@@ -62,6 +62,13 @@ type retryingUpstreamChannel struct {
 	// wrapper built under the same Manager. May be nil — every counter
 	// call is nil-safe.
 	metrics *H1UpstreamMetrics
+
+	// recordPeer (USK-1302) re-records the Stream's upstream peer when a
+	// replay moves the exchange onto the redialed Layer, so the Stream
+	// names the socket the request actually went out on rather than the
+	// stale one the dial closure stamped. Typically
+	// pipeline.Pipeline.RecordUpstreamPeer. May be nil.
+	recordPeer func(ctx context.Context, streamID string, envCtx envelope.EnvelopeContext)
 }
 
 // newRetryingUpstreamChannel constructs the wrapper around an already-
@@ -191,6 +198,11 @@ func (r *retryingUpstreamChannel) Send(ctx context.Context, env *envelope.Envelo
 		wrapped = r.wrapper(freshCh)
 	}
 	r.inner.Store(&wrapped)
+
+	// USK-1302: the request now goes out on freshLayer's socket.
+	if r.recordPeer != nil && env != nil && env.StreamID != "" {
+		r.recordPeer(ctx, env.StreamID, freshLayer.EnvelopeContextTemplate())
+	}
 
 	// Replay the same envelope. The fresh inner.Send registers the new
 	// Channel in the redialed Layer's pendingQ atomically with the wire

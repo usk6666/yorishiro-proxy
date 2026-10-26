@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
@@ -191,5 +192,159 @@ func TestRecordStep_RawReceiveFirst_ProjectsServerAddr(t *testing.T) {
 	got := serverAddrUpdates(w)
 	if len(got) != 1 || got[0].update.ServerAddr != "127.0.0.1:25" {
 		t.Errorf("server addr updates = %+v, want one with 127.0.0.1:25", got)
+	}
+}
+
+// failingUpdateWriter fails the first failN UpdateStream calls, then
+// records like mockWriter.
+type failingUpdateWriter struct {
+	*mockWriter
+	failN int
+}
+
+func (f *failingUpdateWriter) UpdateStream(ctx context.Context, id string, u flow.StreamUpdate) error {
+	if f.failN > 0 {
+		f.failN--
+		return errors.New("store unavailable")
+	}
+	return f.mockWriter.UpdateStream(ctx, id, u)
+}
+
+// sendOpener records a Stream through the Pipeline the way the live
+// session does before the lazy upstream dial runs.
+func sendOpener(t *testing.T, p *Pipeline, streamID string) {
+	t.Helper()
+	p.Run(context.Background(), &envelope.Envelope{
+		StreamID: streamID, FlowID: streamID + "-f0", Direction: envelope.Send,
+		Protocol: envelope.ProtocolHTTP, Raw: []byte("GET / HTTP/1.1\r\n\r\n"),
+		Message: &envelope.HTTPMessage{Method: "GET", Path: "/"},
+		Context: envelope.EnvelopeContext{ConnID: "c1"},
+	})
+}
+
+func receiveFrom(streamID string, peer net.Addr, proxy string) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID: streamID, FlowID: streamID + "-r", Direction: envelope.Receive, Sequence: 1,
+		Protocol: envelope.ProtocolHTTP, Raw: []byte("HTTP/1.1 200 OK\r\n\r\n"),
+		Message: &envelope.HTTPMessage{Status: 200},
+		Context: envelope.EnvelopeContext{ConnID: "c1", ServerAddr: peer, UpstreamProxy: proxy},
+	}
+}
+
+func TestPipeline_RecordUpstreamPeer_WritesWithoutReceive(t *testing.T) {
+	peerA := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8443}
+	peerB := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 9443}
+	const proxyURL = "http://proxy.example:3128"
+
+	w := &mockWriter{}
+	p := New(NewRecordStep(w, nil))
+	ctx := context.Background()
+	sendOpener(t, p, "s1")
+
+	// Dial-time stamp: the upstream socket exists, nothing received yet.
+	p.RecordUpstreamPeer(ctx, "s1", envelope.EnvelopeContext{ServerAddr: peerA, UpstreamProxy: proxyURL})
+	got := serverAddrUpdates(w)
+	if len(got) != 1 {
+		t.Fatalf("server addr updates after dial-time stamp = %d, want 1; updates=%+v", len(got), w.updates)
+	}
+	if got[0].streamID != "s1" || got[0].update.ServerAddr != "127.0.0.1:8443" || got[0].update.UpstreamProxy != proxyURL {
+		t.Errorf("dial-time update = %+v, want s1 / 127.0.0.1:8443 / %s", got[0], proxyURL)
+	}
+
+	// The same socket stamped again, then its first Receive: no extra write.
+	p.RecordUpstreamPeer(ctx, "s1", envelope.EnvelopeContext{ServerAddr: peerA, UpstreamProxy: proxyURL})
+	p.Run(ctx, receiveFrom("s1", peerA, proxyURL))
+	if got := serverAddrUpdates(w); len(got) != 1 {
+		t.Fatalf("server addr updates after same-value stamp + Receive = %d, want 1", len(got))
+	}
+
+	// A Receive from a different socket (swapped upstream) overwrites.
+	p.Run(ctx, receiveFrom("s1", peerB, ""))
+	got = serverAddrUpdates(w)
+	if len(got) != 2 {
+		t.Fatalf("server addr updates after different-socket Receive = %d, want 2", len(got))
+	}
+	if got[1].update.ServerAddr != "127.0.0.2:9443" {
+		t.Errorf("overwrite ServerAddr = %q, want 127.0.0.2:9443", got[1].update.ServerAddr)
+	}
+}
+
+func TestRecordStep_ReceiveFromDifferentSocket_OverwritesServerAddr(t *testing.T) {
+	// The value written is the socket actually used: a later Receive from
+	// a different upstream socket (h1 stale-conn replay, swapped Layer)
+	// corrects an earlier projection; a repeat of the same value is free.
+	w := &mockWriter{}
+	p := New(NewRecordStep(w, nil))
+	ctx := context.Background()
+	peerA := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1001}
+	peerB := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1002}
+
+	p.Run(ctx, receiveFrom("s1", peerA, "http://p:1"))
+	p.Run(ctx, receiveFrom("s1", peerB, ""))
+	p.Run(ctx, receiveFrom("s1", peerB, ""))
+
+	got := serverAddrUpdates(w)
+	if len(got) != 2 {
+		t.Fatalf("server addr updates = %d, want 2 (A, then B once); updates=%+v", len(got), got)
+	}
+	if got[1].update.ServerAddr != "127.0.0.1:1002" {
+		t.Errorf("second update ServerAddr = %q, want 127.0.0.1:1002", got[1].update.ServerAddr)
+	}
+}
+
+func TestPipeline_RecordUpstreamPeer_NoOps(t *testing.T) {
+	peer := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
+	ctx := context.Background()
+
+	t.Run("nil server addr", func(t *testing.T) {
+		w := &mockWriter{}
+		p := New(NewRecordStep(w, nil))
+		sendOpener(t, p, "s1")
+		p.RecordUpstreamPeer(ctx, "s1", envelope.EnvelopeContext{UpstreamProxy: "http://p:1"})
+		if n := len(serverAddrUpdates(w)); n != 0 {
+			t.Errorf("server addr updates = %d, want 0", n)
+		}
+	})
+	t.Run("empty stream id", func(t *testing.T) {
+		w := &mockWriter{}
+		p := New(NewRecordStep(w, nil))
+		p.RecordUpstreamPeer(ctx, "", envelope.EnvelopeContext{ServerAddr: peer})
+		if n := len(w.updates); n != 0 {
+			t.Errorf("UpdateStream calls = %d, want 0", n)
+		}
+	})
+	t.Run("nil pipeline", func(t *testing.T) {
+		var p *Pipeline
+		p.RecordUpstreamPeer(ctx, "s1", envelope.EnvelopeContext{ServerAddr: peer})
+	})
+	t.Run("pipeline without record step", func(t *testing.T) {
+		New().RecordUpstreamPeer(ctx, "s1", envelope.EnvelopeContext{ServerAddr: peer})
+	})
+	t.Run("record step without store", func(t *testing.T) {
+		New(NewRecordStep(nil, nil)).RecordUpstreamPeer(ctx, "s1", envelope.EnvelopeContext{ServerAddr: peer})
+	})
+}
+
+func TestPipeline_RecordUpstreamPeer_FailedWriteRetries(t *testing.T) {
+	peer := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
+	w := &failingUpdateWriter{mockWriter: &mockWriter{}}
+	p := New(NewRecordStep(w, nil))
+	ctx := context.Background()
+	sendOpener(t, p, "s1")
+	w.failN = 1
+
+	p.RecordUpstreamPeer(ctx, "s1", envelope.EnvelopeContext{ServerAddr: peer})
+	if w.failN != 0 {
+		t.Fatalf("dial-time stamp did not attempt a write (failN = %d, want 0)", w.failN)
+	}
+	if got := serverAddrUpdates(w.mockWriter); len(got) != 0 {
+		t.Fatalf("failed write recorded %d updates, want 0", len(got))
+	}
+	// The failed write must not consume the gate: the next projection
+	// of the same socket retries.
+	p.Run(ctx, receiveFrom("s1", peer, ""))
+	got := serverAddrUpdates(w.mockWriter)
+	if len(got) != 1 || got[0].update.ServerAddr != "127.0.0.1:443" {
+		t.Errorf("server addr updates after retry = %+v, want one with 127.0.0.1:443", got)
 	}
 }

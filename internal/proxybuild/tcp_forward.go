@@ -677,11 +677,13 @@ func (m *Manager) handleTCPForwardConnL7(
 		connLogger.Debug("tcp forward L7 fell back to non-http1 stack",
 			"client_topmost", fmt.Sprintf("%T", stack.ClientTopmost()),
 			"upstream_topmost", fmt.Sprintf("%T", stack.UpstreamTopmost()))
-		dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-			ch, ok := <-stack.UpstreamTopmost().Channels()
+		dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
+			upL := stack.UpstreamTopmost()
+			ch, ok := <-upL.Channels()
 			if !ok {
 				return nil, fmt.Errorf("proxybuild: tcp forward L7-fallback upstream channel closed before yielding")
 			}
+			recordUpstreamLayerPeer(dctx, parentStack.Pipeline, env, upL)
 			return ch, nil
 		}
 		if err := runSingleChannelSession(connCtx, stack, dial, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {

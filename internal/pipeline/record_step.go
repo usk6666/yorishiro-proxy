@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"log/slog"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -178,10 +179,14 @@ type RecordStep struct {
 	// bound to a listener (resend / fuzz pipelines).
 	listenerName string
 
-	// serverAddrProjected tracks streamIDs whose ConnInfo.ServerAddr /
-	// UpstreamProxy have already been projected from an upstream-leg
-	// envelope, so the projection costs one UpdateStream per Stream. Same
-	// no-eviction, bounded-by-stream-count rationale as protocolRetagged.
+	// serverAddrProjected maps a streamID to the ConnInfo.ServerAddr /
+	// UpstreamProxy pair last written for it (upstreamPeerKey), whether
+	// stamped when the Stream was handed to an upstream socket
+	// (Pipeline.RecordUpstreamPeer) or projected from a Receive envelope.
+	// A write happens only when the pair differs from the last one, so a
+	// normal Stream costs one UpdateStream and a Stream moved to another
+	// socket (h1 stale-conn replay) is corrected. Same no-eviction,
+	// bounded-by-stream-count rationale as protocolRetagged.
 	serverAddrProjected sync.Map
 
 	// USK-802 per-Stream record caps. grpcMaxPerStream gates
@@ -909,39 +914,67 @@ func (s *RecordStep) updateStreamTLS(ctx context.Context, env *envelope.Envelope
 //     stream rewrite the same values.
 //   - USK-1116: the upstream socket's peer and the upstream proxy it was
 //     dialed through, if any. Only upstream-leg Layer templates carry
-//     ServerAddr; written once per Stream.
+//     ServerAddr. Usually already written when the Stream was handed to
+//     its upstream socket (Pipeline.RecordUpstreamPeer, USK-1302); the
+//     Receive projection then writes only if the socket differs.
 func (s *RecordStep) projectUpstreamConnInfo(ctx context.Context, env *envelope.Envelope) {
 	if env.Context.TLS != nil {
 		s.updateStreamTLS(ctx, env)
 	}
 	if env.Context.ServerAddr != nil {
-		s.updateStreamServerAddr(ctx, env)
+		s.updateStreamServerAddr(ctx, env.StreamID, env.Context.ServerAddr, env.Context.UpstreamProxy)
 	}
 }
 
-// updateStreamServerAddr projects env.Context.ServerAddr / UpstreamProxy
-// into Stream.ConnInfo (USK-1116). The values are per upstream socket and
-// the upstream-leg template carries them on every Receive envelope, so
-// only the first Receive per StreamID writes (serverAddrProjected gate,
-// like protocolRetagged). Overlay envelopes built without the upstream
-// template carry no ServerAddr and never reach here, so they do not
-// consume the gate. A failed write forgets the gate so a later envelope
-// retries.
-func (s *RecordStep) updateStreamServerAddr(ctx context.Context, env *envelope.Envelope) {
-	if env.StreamID == "" {
+// RecordUpstreamPeer records the upstream socket a Stream has been handed
+// to — envCtx.ServerAddr (the socket peer) and envCtx.UpstreamProxy, taken
+// from the chosen upstream Layer's envelope context template — on the
+// Stream's ConnInfo, independently of whether anything is ever received
+// on it (USK-1302). The live data path calls it from each lazy upstream
+// dial once the upstream Layer is picked, right before the first Send
+// goes upstream; the raw relay calls it when its session ends.
+//
+// It is a no-op for a nil Pipeline, a Pipeline without a RecordStep (or
+// whose RecordStep has no store), an empty streamID and a nil ServerAddr
+// — a Stream that never reached an upstream socket keeps both fields
+// empty. Like AdmitsRawRelay it runs only the RecordStep, never the other
+// Steps.
+func (p *Pipeline) RecordUpstreamPeer(ctx context.Context, streamID string, envCtx envelope.EnvelopeContext) {
+	if p == nil || streamID == "" || envCtx.ServerAddr == nil {
 		return
 	}
-	if _, loaded := s.serverAddrProjected.LoadOrStore(env.StreamID, struct{}{}); loaded {
+	for _, step := range p.steps {
+		if rs, ok := step.(*RecordStep); ok && rs.store != nil {
+			rs.updateStreamServerAddr(ctx, streamID, envCtx.ServerAddr, envCtx.UpstreamProxy)
+		}
+	}
+}
+
+// updateStreamServerAddr writes serverAddr / upstreamProxy into the
+// Stream's ConnInfo (USK-1116, USK-1302) when the pair differs from the
+// one last written for streamID (serverAddrProjected), so repeated
+// projections of the same socket — every Receive envelope carries it —
+// are write-free while a Stream moved to another socket is corrected.
+// Overlay envelopes built without the upstream template carry no
+// ServerAddr and never reach here. A failed write forgets the pair so a
+// later projection retries. The store cannot clear a column, so an
+// UpstreamProxy written once is not removed by a later direct socket.
+func (s *RecordStep) updateStreamServerAddr(ctx context.Context, streamID string, serverAddr net.Addr, upstreamProxy string) {
+	if streamID == "" || serverAddr == nil {
 		return
 	}
 	update := flow.StreamUpdate{
-		ServerAddr:    env.Context.ServerAddr.String(),
-		UpstreamProxy: env.Context.UpstreamProxy,
+		ServerAddr:    serverAddr.String(),
+		UpstreamProxy: upstreamProxy,
 	}
-	if err := s.store.UpdateStream(ctx, env.StreamID, update); err != nil {
-		s.serverAddrProjected.Delete(env.StreamID)
+	key := update.ServerAddr + "\x00" + update.UpstreamProxy
+	if prev, loaded := s.serverAddrProjected.Swap(streamID, key); loaded && prev == key {
+		return
+	}
+	if err := s.store.UpdateStream(ctx, streamID, update); err != nil {
+		s.serverAddrProjected.CompareAndDelete(streamID, key)
 		s.logger.Error("record step: server address update failed",
-			"stream_id", env.StreamID,
+			"stream_id", streamID,
 			"error", err,
 		)
 	}

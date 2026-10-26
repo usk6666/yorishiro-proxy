@@ -152,7 +152,7 @@ type connAddrsDetail struct {
 
 // waitConnAddrsStream polls query("flows") (with the optional filter)
 // until a completed entry satisfies match AND its detail carries a
-// server_addr (projected from the first upstream envelope), then returns
+// server_addr (written once the stream reaches an upstream socket), then returns
 // the query("flow") detail. Fails the test on timeout.
 func waitConnAddrsStream(t *testing.T, h *mcptest.Harness, filter map[string]any, match func(connAddrsEntry) bool) connAddrsDetail {
 	t.Helper()

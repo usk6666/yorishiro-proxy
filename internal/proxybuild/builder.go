@@ -879,16 +879,48 @@ func buildOnStack(p *pipeline.Pipeline, deps Deps, headRecorder requestHeadRecor
 			return
 		}
 
-		dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-			ch, ok := <-stack.UpstreamTopmost().Channels()
+		dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
+			upL := stack.UpstreamTopmost()
+			ch, ok := <-upL.Channels()
 			if !ok {
 				return nil, fmt.Errorf("proxybuild: upstream topmost closed before yielding a channel for %s", target)
 			}
+			recordUpstreamLayerPeer(dctx, p, env, upL)
 			return ch, nil
 		}
 		if err := runSingleChannelSession(ctx, stack, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Debug("proxybuild: session ended with error", "target", target, "error", err)
 		}
+	}
+}
+
+// recordUpstreamPeer records on env's Stream the upstream socket it has
+// just been handed to (USK-1302): envCtx is the chosen upstream Layer's
+// envelope context template, carrying ServerAddr / UpstreamProxy. Called
+// from the lazy upstream dial closures after the Layer is picked and
+// before the first Send goes upstream, so a Stream that never receives
+// anything still names the socket it went to. A dial that fails never
+// gets here, so its Stream keeps both fields empty.
+func recordUpstreamPeer(ctx context.Context, p *pipeline.Pipeline, env *envelope.Envelope, envCtx envelope.EnvelopeContext) {
+	if env == nil || env.StreamID == "" {
+		return
+	}
+	p.RecordUpstreamPeer(ctx, env.StreamID, envCtx)
+}
+
+// recordUpstreamLayerPeer is recordUpstreamPeer for an upstream Layer
+// known only through the layer.Layer interface: it reads the Layer's
+// envelope context template when the Layer exposes one.
+func recordUpstreamLayerPeer(ctx context.Context, p *pipeline.Pipeline, env *envelope.Envelope, l layer.Layer) {
+	switch v := l.(type) {
+	case interface {
+		EnvelopeContextTemplate() envelope.EnvelopeContext
+	}:
+		recordUpstreamPeer(ctx, p, env, v.EnvelopeContextTemplate())
+	case interface {
+		EnvelopeContext() envelope.EnvelopeContext
+	}:
+		recordUpstreamPeer(ctx, p, env, v.EnvelopeContext())
 	}
 }
 
@@ -932,6 +964,20 @@ func runRawRelaySession(ctx context.Context, stack *connector.ConnectionStack, p
 	if clientRaw != nil && refuseRawRelay(ctx, clientRaw.EnvelopeContext(), p, opts) {
 		clientRaw.ReleaseState()
 		return nil
+	}
+	// USK-1302: a raw relay has no lazy dial, so the upstream socket's
+	// peer is recorded when the session ends — a Stream whose upstream
+	// sent nothing gets it there; when upstream did send, the Receive
+	// projection already wrote the same value and this is write-free.
+	// Captured now: stack.Close clears the stack's Layer list.
+	if upstreamRaw, ok := stack.UpstreamTopmost().(*bytechunk.Layer); ok {
+		onComplete := opts.OnComplete
+		opts.OnComplete = func(cbCtx context.Context, streamID string, err error) {
+			p.RecordUpstreamPeer(cbCtx, streamID, upstreamRaw.EnvelopeContext())
+			if onComplete != nil {
+				onComplete(cbCtx, streamID, err)
+			}
+		}
 	}
 	err := session.RunPreDialedStackSession(ctx, stack, p, opts)
 	if clientRaw != nil {
@@ -1132,11 +1178,16 @@ func runHTTP1Exchange(
 			return connector.WrapH1UpstreamForDispatch(ch, reqProto, streamGRPCWebOpts)
 		}
 		dispatched := dispatchWrap(upCh)
+		// USK-1302: the Stream now has an upstream socket; record its
+		// peer whether or not anything is ever received on it.
+		recordUpstreamPeer(dctx, p, env, upstreamH1.EnvelopeContextTemplate())
 		// USK-999: wrap in a retrying upstream channel that absorbs the
 		// ~5% race window left by USK-998 Phase 1 (server FIN between
 		// HealthCheck and Write). On *http1.StaleUpstreamError{ReplaySafe:true}
 		// the wrapper force-redials the chain and replays the Send once.
-		return newRetryingUpstreamChannel(dispatched, chain, dispatchWrap, logger, target, metrics), nil
+		retrying := newRetryingUpstreamChannel(dispatched, chain, dispatchWrap, logger, target, metrics)
+		retrying.recordPeer = p.RecordUpstreamPeer
+		return retrying, nil
 	}
 	if err := session.RunStackSessionExchange(ctx, stack, dispatchedCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Debug("proxybuild: http1 exchange ended with error", "target", target, "error", err)
@@ -1342,6 +1393,9 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 						if env != nil {
 							reqProto = env.Protocol
 						}
+						// USK-1302: record the peer of the Layer this
+						// stream actually opened on (pooled or redialed).
+						recordUpstreamPeer(dctx, p, env, upL.EnvelopeContextTemplate())
 						return connector.WrapH2UpstreamForDispatchFull(
 							upCh, reqProto, lopts, streamGRPCOpts, streamGRPCWebOpts, streamAggOpts,
 						), nil
