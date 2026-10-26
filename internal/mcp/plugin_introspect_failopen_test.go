@@ -10,6 +10,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // loadFailOpenEngine loads script from a fresh temp file and dispatches
@@ -127,5 +128,42 @@ register_hook("http", "on_request", hook)
 	}
 	if _, err := time.Parse(time.RFC3339, r.At); err != nil {
 		t.Errorf("last_fail_open.at = %q is not RFC3339: %v", r.At, err)
+	}
+}
+
+// The stored reason is cut at pluginv2.FailOpenReasonCap before the Output
+// Filter runs, so a sensitive value straddling that cut survives as an
+// unmatched fragment at the end. When earlier matches shrink the text
+// (a ~780-byte e-mail becomes "[MASKED:email]"), that fragment would land
+// inside the 256-byte output cap and reach the agent unmasked.
+func TestPluginIntrospect_TruncatedReason_StraddlingFragmentNotLeaked(t *testing.T) {
+	engine, err := safety.NewEngine(safety.Config{
+		OutputRules: []safety.RuleConfig{
+			{Preset: "credit-card", Action: "mask"},
+			{Preset: "email", Action: "mask"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("safety.NewEngine: %v", err)
+	}
+	// "fail: " (6) + 783 + "@x.co" (5) + 220 spaces puts the card number at
+	// byte 1014, so the 1 KiB cut keeps only "4111 1111 ".
+	eng := loadFailOpenEngine(t, `
+def hook(msg, ctx):
+    fail("a" * 783 + "@x.co" + " " * 220 + "4111 1111 1111 1111 tail")
+
+register_hook("http", "on_request", hook)
+`)
+	s := newServer(context.Background(), nil, nil, nil,
+		WithPluginv2Engine(eng), WithSafetyEngine(engine))
+	p := introspectOnly(t, s)
+	if p.LastFailOpen == nil {
+		t.Fatal("last_fail_open = nil, want a record")
+	}
+	if strings.Contains(p.LastFailOpen.Reason, "4111") {
+		t.Errorf("last_fail_open.reason = %q leaks a fragment of the card number cut at the 1 KiB reason cap", p.LastFailOpen.Reason)
+	}
+	if !strings.Contains(p.LastFailOpen.Reason, "[MASKED:email]") {
+		t.Errorf("last_fail_open.reason = %q, want the masked e-mail kept", p.LastFailOpen.Reason)
 	}
 }
