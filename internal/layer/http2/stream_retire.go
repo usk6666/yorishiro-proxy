@@ -66,6 +66,7 @@ func (l *Layer) retireOnSend(streamID uint32, event StreamEvent) {
 	l.retired = append(l.retired, streamID)
 	l.retirePending.Store(true)
 	l.retireMu.Unlock()
+	l.signalStreamsChanged()
 }
 
 // retireOnRecv applies a receive-side END_STREAM to an existing stream and
@@ -77,6 +78,7 @@ func (l *Layer) retireOnRecv(streamID uint32, event StreamEvent) {
 	}
 	l.conn.Streams().Remove(streamID)
 	l.cleanupRetired(streamID)
+	l.signalStreamsChanged()
 }
 
 // retireAfterRecvRST retires a stream that HandleRSTStream closed. Reader
@@ -84,6 +86,7 @@ func (l *Layer) retireOnRecv(streamID uint32, event StreamEvent) {
 func (l *Layer) retireAfterRecvRST(streamID uint32) {
 	if l.conn.Streams().RemoveIfClosed(streamID) {
 		l.cleanupRetired(streamID)
+		l.signalStreamsChanged()
 	}
 }
 
@@ -160,11 +163,11 @@ func (l *Layer) discardHeaderFragment(streamID uint32, fragment []byte, endHeade
 				Reason: fmt.Sprintf("too many CONTINUATION frames (>%d) for stream %d", maxContinuationFrames, streamID),
 			}
 		}
-		l.pendingHeaderStream = streamID
+		l.setPendingHeaderStream(streamID)
 		l.pendingAsm = nil
 		return nil
 	}
-	l.pendingHeaderStream = 0
+	l.setPendingHeaderStream(0)
 	l.discard = nil
 	if _, err := l.decoder.Decode(d.buf); err != nil {
 		return &ConnError{

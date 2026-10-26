@@ -175,6 +175,12 @@ func (l *Layer) handleGoAwayFrame(f *frame.Frame) error {
 
 // handleStreamFrame dispatches a frame with non-zero stream ID.
 func (l *Layer) handleStreamFrame(f *frame.Frame) error {
+	// After this Layer sent GOAWAY, frames for peer streams above its
+	// last_stream_id belong to streams that will never be processed
+	// (USK-1188, RFC 9113 §6.8).
+	if f.Header.Type != frame.TypeContinuation && l.afterLocalGoAway(f.Header.StreamID) {
+		return l.handleFrameAfterGoAway(f)
+	}
 	switch f.Header.Type {
 	case frame.TypeHeaders:
 		return l.handleStreamHeaders(f)
@@ -242,11 +248,22 @@ func (l *Layer) handleStreamHeaders(f *frame.Frame) error {
 		}
 	}
 
+	if l.opts.beforeAcceptPeerStream != nil && l.isNewPeerStream(f.Header.StreamID) {
+		l.opts.beforeAcceptPeerStream(f.Header.StreamID)
+	}
 	asm, ch, isNew := l.assemblerFor(f.Header.StreamID, true)
 	if asm == nil {
+		if l.afterLocalGoAway(f.Header.StreamID) {
+			// GOAWAY went out while this new stream's HEADERS was being
+			// handled (USK-1188): ignore the stream, keep HPACK in sync.
+			return l.discardHeaderFragment(f.Header.StreamID, fragment, endHeaders)
+		}
 		return nil
 	}
 	if isNew {
+		if l.opts.afterRegisterPeerStream != nil {
+			l.opts.afterRegisterPeerStream(f.Header.StreamID)
+		}
 		_ = l.conn.Streams().Transition(f.Header.StreamID, EventRecvHeaders)
 		if l.role == ServerRole {
 			l.emitChannel(ch)
@@ -312,10 +329,10 @@ func (l *Layer) handleHeadersOnClosedStream(streamID uint32, fragment []byte, en
 // the HPACK decoder.
 func (l *Layer) updatePendingHeaderStream(asm *eventAssembler, endHeaders bool) {
 	if !endHeaders {
-		l.pendingHeaderStream = asm.streamID
+		l.setPendingHeaderStream(asm.streamID)
 		l.pendingAsm = asm
 	} else {
-		l.pendingHeaderStream = 0
+		l.setPendingHeaderStream(0)
 		l.pendingAsm = nil
 	}
 }
@@ -379,7 +396,7 @@ func (l *Layer) handleStreamContinuation(f *frame.Frame) error {
 		return err
 	}
 	if endHeaders {
-		l.pendingHeaderStream = 0
+		l.setPendingHeaderStream(0)
 		l.pendingAsm = nil
 	}
 	l.finishHeaderFrame(f.Header.StreamID, ch, asm, env, blockEndStream)
@@ -587,6 +604,12 @@ func (l *Layer) assemblerFor(streamID uint32, createIfMissing bool) (*eventAssem
 		return asm, asm.channel, false
 	}
 	if !createIfMissing {
+		return nil, nil, false
+	}
+	// A new peer stream above the last_stream_id of a GOAWAY already sent
+	// is not opened (USK-1188). Checked under l.mu, which the idle GOAWAY
+	// also holds while it decides and marks GoAwaySent.
+	if l.afterLocalGoAway(streamID) {
 		return nil, nil, false
 	}
 

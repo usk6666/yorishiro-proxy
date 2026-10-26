@@ -854,6 +854,32 @@ type resolvedTLS struct {
 	caBundleHash string
 }
 
+// clientH2ServerOptions returns the http2.Options shared by every
+// client-facing (ServerRole) HTTP/2 Layer the connector builds: the pool-hit
+// fast path, the ALPN h2 stack, the CONNECT plaintext h2c inner stack and the
+// tcp_forwards h2c stack. Keeping the list in one place means a new
+// client-facing knob cannot reach some of those sites and miss the others.
+//
+// client_idle_timeout_ms (ClientIdleDeadline) is passed as a resolver, so a
+// runtime change applies to existing connections from their next idle
+// period (USK-1188).
+func clientH2ServerOptions(cfg *BuildConfig, scheme string, envCtx envelope.EnvelopeContext, enableConnectProtocol bool) []http2.Option {
+	opts := []http2.Option{
+		http2.WithScheme(scheme),
+		http2.WithEnvelopeContext(envCtx),
+		http2.WithBodySpillDir(cfg.BodySpillDir),
+		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http2.WithMaxBodySize(cfg.MaxBodySize),
+		http2.WithStateReleaser(cfg.PluginV2Engine),
+		http2.WithEnableConnectProtocol(enableConnectProtocol),
+		http2.WithClientIdleTimeout(cfg.ClientIdleDeadline),
+	}
+	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
+		opts = append(opts, mcsOpt)
+	}
+	return opts
+}
+
 // clientH2MaxConcurrentStreamsOption returns an http2.Option threading the
 // effective SETTINGS_MAX_CONCURRENT_STREAMS into the client-facing
 // (ServerRole) Layer's preface. Returns nil when the effective value is
@@ -996,7 +1022,9 @@ func (c *BuildConfig) ClientHandshakeContext(ctx context.Context) (context.Conte
 // value from SetClientIdleTimeout when positive, else
 // DefaultClientIdleTimeout. ok=false means the bound is disabled. Safe on
 // a nil receiver (default, enabled). The HTTP/1.x Layer combines it with
-// the request-head bound as max(idle, header) when both are enabled.
+// the request-head bound as max(idle, header) when both are enabled; the
+// client-facing HTTP/2 Layer uses it alone as the longest time with no open
+// stream before GOAWAY (USK-1188).
 func (c *BuildConfig) ClientIdleDeadline() (d time.Duration, ok bool) {
 	if c == nil {
 		return DefaultClientIdleTimeout, true
@@ -1662,18 +1690,7 @@ func buildPoolHitFastPath(
 	// is therefore sound without a fresh wait.
 	enableConnectProtocol := resolveEnableConnectProtocol(ctx, pooled, true, connID, target)
 
-	clientH2Opts := []http2.Option{
-		http2.WithScheme("https"),
-		http2.WithEnvelopeContext(clientEnvCtx),
-		http2.WithBodySpillDir(cfg.BodySpillDir),
-		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
-		http2.WithMaxBodySize(cfg.MaxBodySize),
-		http2.WithStateReleaser(cfg.PluginV2Engine),
-		http2.WithEnableConnectProtocol(enableConnectProtocol),
-	}
-	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
-		clientH2Opts = append(clientH2Opts, mcsOpt)
-	}
+	clientH2Opts := clientH2ServerOptions(cfg, "https", clientEnvCtx, enableConnectProtocol)
 	clientLayer, err := http2.New(clientTLSConn, connID+"/client", http2.ServerRole, clientH2Opts...)
 	if err != nil {
 		cfg.HTTP2Pool.Put(poolKey, pooled)
@@ -2112,18 +2129,7 @@ func buildH2Stack(
 	enableConnectProtocol := resolveEnableConnectProtocol(ctx, upstreamH2, !consumed, connID, target)
 
 	// Client-side Layer (ServerRole = local acts as HTTP/2 server).
-	clientH2Opts := []http2.Option{
-		http2.WithScheme("https"),
-		http2.WithEnvelopeContext(clientEnvCtx),
-		http2.WithBodySpillDir(cfg.BodySpillDir),
-		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
-		http2.WithMaxBodySize(cfg.MaxBodySize),
-		http2.WithStateReleaser(cfg.PluginV2Engine),
-		http2.WithEnableConnectProtocol(enableConnectProtocol),
-	}
-	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
-		clientH2Opts = append(clientH2Opts, mcsOpt)
-	}
+	clientH2Opts := clientH2ServerOptions(cfg, "https", clientEnvCtx, enableConnectProtocol)
 	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole, clientH2Opts...)
 	if err != nil {
 		// Upstream Layer is healthy — only the client-side handshake failed.
