@@ -360,3 +360,90 @@ func TestTransparent_HTTPNameAdmit_RequestTimeoutDisabled_TrickledHead(t *testin
 		}
 	})
 }
+
+// T10b: client_idle_timeout_ms also bounds the keep-alive wait on the
+// CONNECT + TLS MITM HTTP/1.x path.
+func TestProxybuild_CONNECT_MITM_ClientIdleTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	upstream := httptest.NewTLSServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		fmt.Fprintf(w, "tls path=%s", r.URL.Path)
+	}))
+	t.Cleanup(upstream.Close)
+	target := strings.TrimPrefix(upstream.URL, "https://")
+	_, proxyAddr := startUSK1185Proxy(t, ctx, &flowStoreCapture{}, func(m *proxybuild.Manager) {
+		m.SetClientIdleTimeout(300 * time.Millisecond)
+	})
+
+	conn, br := usk1162Dial(t, proxyAddr)
+	if _, err := io.WriteString(conn, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n\r\n"); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	// Parse as a CONNECT response: a 2xx to CONNECT has no body.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	connectResp, err := gohttp.ReadResponse(br, &gohttp.Request{Method: gohttp.MethodConnect})
+	if err != nil || connectResp.StatusCode != 200 {
+		t.Fatalf("CONNECT response = %v, err = %v", connectResp, err)
+	}
+	if br.Buffered() != 0 {
+		t.Fatalf("%d unexpected bytes after the CONNECT response", br.Buffered())
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	tc := tls.Client(conn, &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // test against the MITM CA
+		ServerName:         "127.0.0.1",
+		NextProtos:         []string{"http/1.1"},
+	})
+	t.Cleanup(func() { _ = tc.Close() })
+	hsCtx, hsCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer hsCancel()
+	if err := tc.HandshakeContext(hsCtx); err != nil {
+		t.Fatalf("client TLS handshake through the tunnel: %v", err)
+	}
+	tbr := bufio.NewReader(tc)
+	if code, body := usk1162RoundTrip(t, tc, tbr, "GET /one HTTP/1.1\r\nHost: "+target+"\r\n\r\n"); code != 200 || body != "tls path=/one" {
+		t.Fatalf("MITM request 1 = %d %q", code, body)
+	}
+	start := time.Now()
+	if got := usk1162AwaitClose(t, tbr, conn, 3*time.Second); got != "" {
+		t.Errorf("proxy wrote %q to an idle MITM keep-alive connection", got)
+	}
+	if el := time.Since(start); el < 200*time.Millisecond {
+		t.Errorf("idle MITM connection closed after %v, want ~300ms", el)
+	}
+}
+
+// T10c: client_idle_timeout_ms also bounds the keep-alive wait on the
+// target-override HTTP/1.x path (tcp_forwards protocol "http").
+func TestProxybuild_TCPForward_HTTP_ClientIdleTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	upstream := startUSK1162Upstream(t)
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	mgr, _ := startUSK1185Proxy(t, ctx, &flowStoreCapture{}, func(m *proxybuild.Manager) {
+		m.SetClientIdleTimeout(300 * time.Millisecond)
+	})
+	if err := mgr.StartTCPForwards(ctx, proxybuild.TCPForwardParams{
+		Forwards: map[string]*config.ForwardConfig{
+			"0": {Target: host, Protocol: "http"},
+		},
+	}); err != nil {
+		t.Fatalf("StartTCPForwards: %v", err)
+	}
+	fwdAddr := mgr.TCPForwardAddrs()["0"]
+	if fwdAddr == "" {
+		t.Fatal("TCPForwardAddrs missing port 0")
+	}
+
+	conn, br := usk1162Dial(t, fwdAddr)
+	if code, body := usk1162RoundTrip(t, conn, br, "GET /fwd HTTP/1.1\r\nHost: "+host+"\r\n\r\n"); code != 200 || body != "path=/fwd body=" {
+		t.Fatalf("forward request 1 = %d %q", code, body)
+	}
+	start := time.Now()
+	if got := usk1162AwaitClose(t, br, conn, 3*time.Second); got != "" {
+		t.Errorf("proxy wrote %q to an idle forward keep-alive connection", got)
+	}
+	if el := time.Since(start); el < 200*time.Millisecond {
+		t.Errorf("idle forward connection closed after %v, want ~300ms", el)
+	}
+}
