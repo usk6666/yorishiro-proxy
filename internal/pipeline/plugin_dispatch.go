@@ -176,6 +176,12 @@ type rawRefusedKey struct {
 // the chain. CONTINUE+mutate hooks pass their mutated envelope to the next
 // hook in the chain.
 //
+// A RESPOND on a Receive-direction HTTP response is not a Respond Result:
+// the plugin's response replaces the upstream response in place
+// (receiveReplacement) and the Step returns it as a CONTINUE substitute, so
+// later Steps (Intercept, Transform, PluginPost, Record) process the
+// replacement. The remaining hooks of this phase are still skipped.
+//
 // nil engine → pass-through (Result{}). No matching hooks → pass-through.
 func (d *pluginDispatcher) dispatch(ctx context.Context, env *envelope.Envelope, phase pluginv2.Phase) Result {
 	if d.engine == nil {
@@ -211,6 +217,10 @@ func (d *pluginDispatcher) dispatch(ctx context.Context, env *envelope.Envelope,
 		case pluginv2.ActionDrop:
 			return Result{Action: Drop}
 		case pluginv2.ActionRespond:
+			if replacement := d.receiveReplacement(ctx, current, outcome.Respond); replacement != nil {
+				releaseDroppedBody(env, replacement)
+				return Result{Envelope: replacement}
+			}
 			return Result{Action: Respond, Response: d.buildRespondEnvelope(current, outcome.Respond)}
 		}
 		// ActionContinue: apply mutation and pass the resulting envelope to
@@ -418,6 +428,46 @@ func (d *pluginDispatcher) regenerateRaw(ctx context.Context, env *envelope.Enve
 	}
 }
 
+// receiveReplacement realizes a RESPOND on a Receive-direction HTTP
+// response (http.on_response, or ws.on_upgrade on the upstream's 101): the
+// plugin's response supersedes the upstream response in place (RFC-001
+// §9.3). It returns the substitute envelope, or nil when the RESPOND is not
+// a response-side HTTP replacement (a Send-side RESPOND answers the client
+// instead of forwarding; a gRPC RESPOND_GRPC ends the RPC in the session).
+//
+// The substitute keeps the upstream response's identity (StreamID, FlowID,
+// Sequence, Direction, Protocol, Context) so the rest of the chain — later
+// Steps and RecordStep's variant pair — treats it as a modification of that
+// response: the upstream bytes stay the original variant, the plugin's
+// response becomes the modified one. Opaque is cleared so the client Layer
+// writes the substitute from its Message instead of patching the upstream
+// head; Raw is the route encoder's rendering of the substitute (RawBuffer
+// dropped without release, as in applyMessageOnly).
+func (d *pluginDispatcher) receiveReplacement(ctx context.Context, current *envelope.Envelope, payload *pluginv2.RespondAction) *envelope.Envelope {
+	if current.Direction != envelope.Receive || payload == nil || payload.HTTPResponse == nil {
+		return nil
+	}
+	if _, ok := current.Message.(*envelope.HTTPMessage); !ok {
+		return nil
+	}
+	next := *current
+	next.Message = httpRespondMessage(payload.HTTPResponse)
+	next.Opaque = nil
+	next.RawAuthoritative = false
+	next.RawBuffer = nil
+	next.Raw, _ = d.regenerateRaw(ctx, &next, nil)
+	return &next
+}
+
+// httpRespondMessage renders an action.RESPOND payload as an HTTPMessage.
+func httpRespondMessage(p *pluginv2.HTTPRespondPayload) *envelope.HTTPMessage {
+	return &envelope.HTTPMessage{
+		Status:  p.StatusCode,
+		Headers: p.Headers,
+		Body:    p.Body,
+	}
+}
+
 // buildRespondEnvelope synthesizes the response envelope for a RESPOND
 // outcome. The shape follows the *RespondAction payload: an HTTP payload
 // becomes an *HTTPMessage, a gRPC payload a *GRPCEndMessage. No conversion
@@ -440,11 +490,7 @@ func (d *pluginDispatcher) buildRespondEnvelope(env *envelope.Envelope, payload 
 		return resp
 	case payload.HTTPResponse != nil:
 		resp.Protocol = envelope.ProtocolHTTP
-		resp.Message = &envelope.HTTPMessage{
-			Status:  payload.HTTPResponse.StatusCode,
-			Headers: payload.HTTPResponse.Headers,
-			Body:    payload.HTTPResponse.Body,
-		}
+		resp.Message = httpRespondMessage(payload.HTTPResponse)
 	case payload.GRPCResponse != nil:
 		// Preserve env.Protocol so a grpc-web request gets a grpc-web
 		// shaped end frame (the Layer's encoder picks the wire form).

@@ -2880,7 +2880,8 @@ func upgradeExitOrErr(notice *UpgradeNotice, err error) error {
 // errRPCTerminatedByProxy is returned by dispatchClientAction (and so by
 // clientToUpstream) after a Respond carrying a native-gRPC or gRPC-Web
 // GRPCEndMessage was delivered to the client (a SafetyFilter / intercept-drop terminator,
-// or a plugin RESPOND_GRPC). The
+// or a plugin RESPOND_GRPC). dispatchUpstreamAction returns it for the same
+// Respond on the response-side Start (USK-1392). The
 // End closed the client's side of the RPC, so nothing the client sends after
 // it may reach the upstream, and the upstream stream — if one was dialed —
 // must be torn down instead of left half-open. Returning a non-nil error
@@ -2898,8 +2899,11 @@ var errRPCTerminatedByProxy = errors.New("session: RPC terminated by proxy respo
 // HTTP/1.x connection whose request got no response. The non-nil return
 // stops the loop before the RPC's later Data / End are read, so the
 // upstream is never dialed, and drives the errgroup cancel so
-// upstreamToClient leaves its wait for the upstream. Like
-// errRPCTerminatedByProxy, RunSession maps it back to nil.
+// upstreamToClient leaves its wait for the upstream. upstreamToClient
+// returns it too when the response-side Start was Dropped (USK-1392; see
+// upstreamDropExit): the client gets nothing of the upstream response and
+// the upstream stream is torn down. Like errRPCTerminatedByProxy,
+// RunSession maps it back to nil.
 var errRPCDroppedByProxy = errors.New("session: RPC dropped by proxy")
 
 // errRawBlockedByTargetScope is returned by clientToUpstream after a raw
@@ -2977,17 +2981,19 @@ func endsRPC(resp *envelope.Envelope) bool {
 	return ok
 }
 
-// dropsRPC reports whether a Drop of the client-side envelope env refuses a
-// whole native-gRPC or gRPC-Web RPC: env is a Send GRPCStartMessage (USK-1387).
-// The Start is the only gRPC envelope whose Drop leaves the RPC without a
-// head — every later Data / End of the RPC would reach an upstream stream
-// that was never opened — so the session ends there instead of looping.
-// The key is the envelope, not the Step: a plugin DROP on on_start, a
-// BudgetStep exhaustion and an intercept Drop without attribution all take
-// this path. Data / End Drops keep the loop going (plugins cannot DROP them;
-// a Drop of a mid-stream message skips just that message).
+// dropsRPC reports whether a Drop of env refuses a whole native-gRPC or
+// gRPC-Web RPC: env is a GRPCStartMessage in either direction (USK-1387,
+// USK-1392). The Start is the only gRPC envelope whose Drop leaves the RPC
+// without a head — on Send every later Data / End would reach an upstream
+// stream that was never opened, on Receive every later response Data / End
+// would reach a client that never got the response headers — so the session
+// ends there instead of looping. The key is the envelope, not the Step: a
+// plugin DROP on on_start (request or response side), a BudgetStep
+// exhaustion and an intercept Drop of a held Start all take this path.
+// Data / End Drops keep the loop going (plugins cannot DROP them; a Drop of
+// a mid-stream message skips just that message).
 func dropsRPC(env *envelope.Envelope) bool {
-	if env == nil || env.Direction != envelope.Send {
+	if env == nil {
 		return false
 	}
 	if env.Protocol != envelope.ProtocolGRPC && env.Protocol != envelope.ProtocolGRPCWeb {
@@ -3292,17 +3298,12 @@ func upstreamToClient(
 			env.StreamID = clientID
 		}
 
-		env, action, _, blockedBy, blockTags := runPipelineTracked(pctx, p, env, reg)
-		if action == pipeline.Drop {
-			// USK-782: receive-direction Drops (e.g. Safety on a Receive
-			// arm — currently no engine emits one, but the path is wired
-			// for future per-protocol Output Filters) surface to the
-			// audit recorder symmetrically with Send-direction Drops.
-			if blockedBy != "" && onDrop != nil {
-				onDrop(pipeline.WithBlockAnnotations(ctx, blockTags), env, blockedBy)
-			}
-			if upgradePending(notice) {
-				return ErrUpgradePending
+		env, action, resp, blockedBy, blockTags := runPipelineTracked(pctx, p, env, reg)
+		if action == pipeline.Drop || action == pipeline.Respond {
+			exit, derr := dispatchUpstreamAction(ctx, client, uh, notice, onDrop,
+				upstreamOutcome{env: env, action: action, resp: resp, blockedBy: blockedBy, blockTags: blockTags})
+			if exit {
+				return derr
 			}
 			continue
 		}
@@ -3371,6 +3372,98 @@ func upstreamToClient(
 			return ErrUpgradePending
 		}
 	}
+}
+
+// upstreamOutcome is the Pipeline result for one upstream envelope that
+// dispatchUpstreamAction acts on.
+type upstreamOutcome struct {
+	env       *envelope.Envelope
+	action    pipeline.Action
+	resp      *envelope.Envelope
+	blockedBy string
+	blockTags map[string]string
+}
+
+// dispatchUpstreamAction performs a Drop or Respond the Pipeline returned for
+// an upstream (Receive-direction) envelope — the counterpart of
+// dispatchClientAction. The upstream envelope is never forwarded. exit
+// reports that upstreamToClient must return err; otherwise the loop
+// continues with the next upstream envelope.
+//
+//   - BlockedBy attribution (a policy Step) reaches OnPipelineDrop for both
+//     actions, symmetrically with the Send direction (USK-782 / USK-829).
+//   - Respond delivers resp to the client. A native-gRPC / gRPC-Web End
+//     (plugin RESPOND_GRPC on the response-side on_start) ends the RPC like
+//     a Send-side terminator: endingRPC latches, the Layer renders it
+//     Trailers-Only (HTTP 200 + trailer frame on gRPC-Web), and
+//     errRPCTerminatedByProxy tears the upstream down. Any other Respond
+//     (an intercept drop of a held HTTP response answered with the policy
+//     403) ends this exchange: nothing the upstream sends after the
+//     replaced envelope — e.g. the final response behind a held-and-dropped
+//     1xx — may reach the client as a second response.
+//   - A Respond without a response is logged at Warn and handled as a Drop,
+//     so no path silently forwards the envelope it was meant to replace.
+//   - Drop: see upstreamDropExit.
+//
+// A plugin RESPOND on an HTTP response never reaches here: the plugin
+// dispatcher substitutes the response in place and the Pipeline continues.
+func dispatchUpstreamAction(
+	ctx context.Context,
+	client layer.Channel,
+	uh *upstreamHolder,
+	notice *UpgradeNotice,
+	onDrop func(ctx context.Context, env *envelope.Envelope, blockedBy string),
+	o upstreamOutcome,
+) (exit bool, err error) {
+	if o.blockedBy != "" && onDrop != nil {
+		onDrop(pipeline.WithBlockAnnotations(ctx, o.blockTags), o.env, o.blockedBy)
+	}
+	if o.action == pipeline.Respond && o.resp == nil {
+		slog.Warn("session: receive-direction Respond without response; dropping",
+			"stream_id", o.env.StreamID, "protocol", string(o.env.Protocol),
+			"message_type", fmt.Sprintf("%T", o.env.Message))
+		o.action = pipeline.Drop
+	}
+	if o.action == pipeline.Drop {
+		return upstreamDropExit(uh, notice, o.env)
+	}
+	ends := endsRPC(o.resp)
+	if ends {
+		uh.endingRPC.Store(true)
+	}
+	if serr := client.Send(ctx, o.resp); serr != nil {
+		return true, fmt.Errorf("client.Send (respond): %w", serr)
+	}
+	if ends {
+		return true, errRPCTerminatedByProxy
+	}
+	return true, nil
+}
+
+// upstreamDropExit decides how upstreamToClient proceeds after dropping an
+// upstream envelope:
+//
+//   - a gRPC / gRPC-Web Start (response-side on_start DROP, or an intercept
+//     drop of a held response Start) ends the RPC with no status, like a
+//     dropped Send Start (see dropsRPC): errRPCDroppedByProxy;
+//   - a pending upgrade surfaces as ErrUpgradePending;
+//   - an HTTP response (ws.on_upgrade DROP on the 101) ends this exchange:
+//     the client got no response for it, so the HTTP/1.x Layer closes the
+//     client connection and HTTP/2 resets the stream;
+//   - anything else (a streamed gRPC Data, a WS / SSE / raw chunk) skips
+//     just that envelope.
+func upstreamDropExit(uh *upstreamHolder, notice *UpgradeNotice, env *envelope.Envelope) (exit bool, err error) {
+	if dropsRPC(env) {
+		uh.endingRPC.Store(true)
+		return true, errRPCDroppedByProxy
+	}
+	if upgradePending(notice) {
+		return true, ErrUpgradePending
+	}
+	if _, ok := env.Message.(*envelope.HTTPMessage); ok {
+		return true, nil
+	}
+	return false, nil
 }
 
 // relaySendErr maps a failed client.Send of a relayed upstream envelope to
