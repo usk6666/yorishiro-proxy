@@ -641,12 +641,11 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 			return nil, fmt.Errorf("macro step target scope check: %w", err)
 		}
 
-		// SafetyFilter input check: macro steps go through this SendFunc (not
-		// the resend handler), so we must explicitly validate the outbound
-		// request against the safety engine here. This mirrors the check in
-		// handleResendAction / checkInterceptSafety for other MCP tools.
-		if v := s.checkSafetyInput(req.Body, httpReq.URL, httpHeaderToKeyValues(httpReq.Header)); v != nil {
-			return nil, fmt.Errorf("%s", safetyViolationError(v))
+		// SafetyFilter Input, rate limit and budget: macro steps go through
+		// this SendFunc (not the resend pipeline), so the Policy-layer limits
+		// are applied here explicitly.
+		if err := s.admitMacroStep(ctx, "macro step", req.Body, httpReq); err != nil {
+			return nil, err
 		}
 
 		start := time.Now()
@@ -677,6 +676,46 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 			URL:        resp.Request.URL.String(),
 		}, nil
 	}
+}
+
+// admitMacroStep applies the Policy-layer limits every MCP-initiated wire
+// request obeys to one macro step, after template expansion and the
+// TargetScope check. It is shared by both macro SendFuncs (run_macro's
+// macroSendFunc and the fuzz pre/post_macro hookMacroSendFunc) and runs, in
+// order:
+//
+//  1. SafetyFilter Input — a destructive step body / URL / header is refused
+//     before it can consume a rate token or a budget count.
+//  2. Rate limit — waits on the security rate limiter (global + per-host
+//     bucket of the expanded URL's hostname), like resend_* / fuzz_*. The
+//     wait is bounded by the step context, so it counts against the step's
+//     timeout_ms; an overrun fails the step and goes through on_error.
+//  3. Budget — counts exactly one request per wire request toward the
+//     diagnostic budget and refuses the step with errBudgetExhausted when
+//     the budget is spent.
+//
+// A refusal here is surfaced only as the step error (step_results[].error)
+// and, for the budget, in get_budget's counters. Writing no blocked_by audit
+// Stream is a deliberate scope choice, not a technical limit: resend_* /
+// fuzz_* pre-allocate a metadata-only Stream for their refusals
+// (recordBlockedStream / recordBudgetBlockedStream), and the same could be
+// done here. It is skipped to stay consistent with the existing run_macro
+// SafetyFilter refusal, so query filter.blocked_by does not list macro-step
+// refusals.
+//
+// label prefixes the rate-limit / budget error ("macro step" or
+// "hook macro step").
+func (s *Server) admitMacroStep(ctx context.Context, label string, body []byte, httpReq *http.Request) error {
+	if v := s.checkSafetyInput(body, httpReq.URL, httpHeaderToKeyValues(httpReq.Header)); v != nil {
+		return fmt.Errorf("%s", safetyViolationError(v))
+	}
+	if err := s.waitRateLimit(ctx, httpReq.URL.Hostname()); err != nil {
+		return fmt.Errorf("%s rate limit: %w", label, err)
+	}
+	if bm := s.misc.budgetManager; bm != nil && !bm.RecordRequest() {
+		return fmt.Errorf("%s budget: %w", label, errBudgetExhausted)
+	}
+	return nil
 }
 
 // storeFlowFetcher implements macro.FlowFetcher using the flow store.

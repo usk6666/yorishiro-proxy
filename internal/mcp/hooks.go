@@ -694,6 +694,14 @@ func hookMacroSendFunc(s *Server, macroName string) macro.SendFunc {
 			return nil, fmt.Errorf("hook macro step target scope check: %w", err)
 		}
 
+		// SafetyFilter Input, rate limit and budget — the same Policy-layer
+		// limits run_macro's macroSendFunc applies. The fuzz loop's own
+		// per-variant rate wait covers only the variant, so each hook step
+		// is one more request on its own host.
+		if err := s.admitMacroStep(ctx, "hook macro step", req.Body, httpReq); err != nil {
+			return nil, err
+		}
+
 		start := time.Now()
 		resp, err := client.Do(httpReq)
 		if err != nil {
