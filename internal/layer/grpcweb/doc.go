@@ -54,6 +54,15 @@
 // placeholder for a trailer the upstream never sent, so no trailer frame is
 // synthesized for it.
 //
+// A Receive End sent with no response Start before it is a complete
+// response on its own (USK-1220): the Pipeline's policy terminator for a
+// blocked request (grpc-status 7 PERMISSION_DENIED) or a plugin
+// RESPOND_GRPC. The Layer synthesizes the response Start — HTTP 200 and
+// the content-type of the request this Channel read, verbatim
+// (application/grpc-web when none was read) — and writes a body holding
+// only the trailer frame, base64-wrapped for -text. A Send-direction End
+// without a Start still fails: there is no request to flush.
+//
 // A Receive HTTPMessage with an empty body still yields Start + End
 // (USK-1219): the End carries the grpc-status / grpc-message of a
 // trailers-only response read from the HTTP headers, or the

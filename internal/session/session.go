@@ -496,7 +496,8 @@ type upstreamHolder struct {
 	tornDown atomic.Bool
 
 	// endingRPC latches once clientToUpstream starts delivering a
-	// proxy-synthesized native-gRPC End terminator (USK-1202). It is set
+	// proxy-synthesized native-gRPC or gRPC-Web End terminator (USK-1202,
+	// USK-1220). It is set
 	// BEFORE the client.Send of the terminator: from that moment the grpc
 	// client Channel may refuse further Sends (errSendAfterEnd), the
 	// upstream is about to be cascade-closed, and a client RST_STREAM in
@@ -2875,8 +2876,8 @@ func upgradeExitOrErr(notice *UpgradeNotice, err error) error {
 }
 
 // errRPCTerminatedByProxy is returned by dispatchClientAction (and so by
-// clientToUpstream) after a Respond carrying a native-gRPC GRPCEndMessage
-// was delivered to the client (a SafetyFilter / intercept-drop terminator,
+// clientToUpstream) after a Respond carrying a native-gRPC or gRPC-Web
+// GRPCEndMessage was delivered to the client (a SafetyFilter / intercept-drop terminator,
 // or a plugin RESPOND_GRPC). The
 // End closed the client's side of the RPC, so nothing the client sends after
 // it may reach the upstream, and the upstream stream — if one was dialed —
@@ -2939,12 +2940,23 @@ func abortChannel(ch layer.Channel) {
 	}
 }
 
-// endsRPC reports whether a Respond envelope terminates a native-gRPC RPC.
-// HTTP Respond keeps the session open (HTTP/1.x keep-alive carries the next
-// request on the same Channel). gRPC-Web is excluded until it has its own
-// terminator design (USK-1220).
+// endsRPC reports whether a Respond envelope terminates a native-gRPC or
+// gRPC-Web RPC. HTTP Respond keeps the session open (HTTP/1.x keep-alive
+// carries the next request on the same Channel).
+//
+// gRPC-Web (USK-1220): the client side already holds the whole request
+// (Start, Data*, then the Layer's synthetic Send End sentinel) and the
+// upstream grpcweb Channel only writes the request when that sentinel is
+// sent. Ending the session here keeps the remaining Data and the sentinel
+// from being forwarded, and the cascade-close discards whatever the
+// upstream Channel buffered, so no request byte reaches the upstream. The
+// session is per request on both transports (one HTTP/1.x exchange, one
+// HTTP/2 stream), so the client connection stays usable.
 func endsRPC(resp *envelope.Envelope) bool {
-	if resp == nil || resp.Protocol != envelope.ProtocolGRPC {
+	if resp == nil {
+		return false
+	}
+	if resp.Protocol != envelope.ProtocolGRPC && resp.Protocol != envelope.ProtocolGRPCWeb {
 		return false
 	}
 	_, ok := resp.Message.(*envelope.GRPCEndMessage)
@@ -3115,8 +3127,9 @@ func halfCloseWrite(ch layer.Channel) {
 // also handles the lazy dial-and-publish on first forwarded envelope.
 //
 // Returning a non-nil error terminates clientToUpstream; returning nil
-// loops to the next iteration. A delivered native-gRPC End terminator
-// returns errRPCTerminatedByProxy so the RPC ends there (USK-1202). The
+// loops to the next iteration. A delivered native-gRPC or gRPC-Web End
+// terminator returns errRPCTerminatedByProxy so the RPC ends there
+// (USK-1202, USK-1220; see endsRPC). The
 // "should I exit for upgrade?" check stays in the caller because it must
 // run AFTER this returns nil so the final envelope (the WS upgrade request)
 // reaches upstream first (Friction 2-C).

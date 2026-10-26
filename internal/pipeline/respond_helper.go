@@ -25,9 +25,10 @@
 //
 // Mid-stream WS/gRPC paths do NOT use this helper — those protocols need
 // protocol-correct terminators that HTTPMessage cannot express through the
-// per-protocol Send dispatch. Native gRPC uses buildGRPCPolicyDropResponse
-// below (grpc-status 7 PERMISSION_DENIED, USK-1202). WebSocket (Close frame)
-// and gRPC-Web (USK-1220) still return Result{Action: Drop}.
+// per-protocol Send dispatch. Native gRPC and gRPC-Web use
+// buildGRPCPolicyDropResponse below (grpc-status 7 PERMISSION_DENIED,
+// USK-1202 / USK-1220). WebSocket (Close frame) still returns
+// Result{Action: Drop}.
 
 package pipeline
 
@@ -117,7 +118,7 @@ func policyDropBody(reason string, matchedRules []string) []byte {
 
 // grpcStatusPermissionDenied is gRPC status code 7 PERMISSION_DENIED — the
 // code gRPC's HTTP-to-gRPC status mapping assigns to HTTP 403, so a policy
-// block reads the same on both protocols. grpc-go does not retry it by
+// block reads the same on HTTP, native gRPC and gRPC-Web. grpc-go does not retry it by
 // default (unlike UNAVAILABLE / REFUSED_STREAM, which would re-send the
 // blocked payload).
 const grpcStatusPermissionDenied = 7
@@ -196,17 +197,23 @@ func encodeMatchedRuleID(id string) string {
 }
 
 // grpcPolicyDropResult returns the Result a policy Step emits when it blocks
-// a Send-direction gRPC envelope. Native gRPC gets the Respond terminator
-// above; everything else (gRPC-Web — see USK-1220) keeps plain Drop until it
-// has a protocol-correct terminator of its own.
+// a Send-direction gRPC envelope: the Respond terminator above, for native
+// gRPC (USK-1202) and gRPC-Web (USK-1220) alike. The gRPC Layer renders it
+// as Trailers-Only / trailers; the grpcweb Layer renders it as an HTTP 200
+// response whose body is a single trailer frame, in the request's
+// content-type. Either way the session ends the RPC once it is delivered,
+// so nothing the client sent reaches the upstream after the block — for
+// gRPC-Web that includes the request itself, which the upstream Channel
+// buffers until the Send End sentinel. Anything else (a Receive-direction
+// envelope) keeps plain Drop.
 func grpcPolicyDropResult(env *envelope.Envelope, reason string, matchedRules []string) Result {
-	if env.Protocol == envelope.ProtocolGRPC && env.Direction == envelope.Send {
+	if env.Direction == envelope.Send &&
+		(env.Protocol == envelope.ProtocolGRPC || env.Protocol == envelope.ProtocolGRPCWeb) {
 		return Result{
 			Action:    Respond,
 			Response:  buildGRPCPolicyDropResponse(env, reason, matchedRules),
 			BlockedBy: reason,
 		}
 	}
-	// gRPC-Web: see USK-1220.
 	return Result{Action: Drop, BlockedBy: reason}
 }

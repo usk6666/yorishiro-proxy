@@ -59,8 +59,8 @@ import (
 // (envelope.GRPCStartWirePath — the derived Service / Method win over an
 // overridden parseable :path). The judgement — legs, Option B, the
 // transparent DNS binding, the scheme from the transport — is identical;
-// only the extraction differs. A native gRPC block answers grpc-status 7
-// PERMISSION_DENIED, a gRPC-Web block is a Drop (targetScopeBlock).
+// only the extraction differs. A native gRPC or gRPC-Web block answers
+// grpc-status 7 PERMISSION_DENIED (targetScopeBlock).
 //
 // Only Send-direction HTTPMessage and GRPCStartMessage envelopes are
 // checked. Receive envelopes, gRPC Data / End and every other message
@@ -77,8 +77,8 @@ func NewHTTPScopeStep(scope *connector.TargetScope) *HTTPScopeStep {
 
 // Process checks Send-direction HTTPMessage and GRPCStartMessage envelopes
 // against the TargetScope. A blocked request gets targetScopeBlock's
-// Result (a synthetic 403 for HTTP, grpc-status 7 for native gRPC, Drop
-// for gRPC-Web); everything else continues.
+// Result (a synthetic 403 for HTTP, grpc-status 7 for native gRPC and
+// gRPC-Web); everything else continues.
 func (s *HTTPScopeStep) Process(ctx context.Context, env *envelope.Envelope) Result {
 	if env.Direction != envelope.Send {
 		return Result{}
@@ -163,7 +163,7 @@ func (s *HTTPScopeStep) processRequest(ctx context.Context, env *envelope.Envelo
 	}
 	if !allowed {
 		// USK-829: a 403 terminator for HTTP; grpc-status 7 for native
-		// gRPC and Drop for gRPC-Web (USK-1376).
+		// gRPC (USK-1376) and gRPC-Web (USK-1220).
 		return targetScopeBlock(env)
 	}
 	return Result{}

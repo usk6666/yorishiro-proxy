@@ -87,6 +87,14 @@ type channel struct {
 	// re-assembling a body from LPM frames (USK-1203).
 	sendPassthrough []byte
 
+	// reqContentType is the content-type value of the last Send-direction
+	// (request) HTTPMessage this Channel read, verbatim. sendEndLocked
+	// mirrors it on a response it has to synthesize from a lone Receive
+	// End (a proxy policy terminator or a plugin RESPOND_GRPC, USK-1220),
+	// so the client gets the wire form it asked for (base64 for -text).
+	// Guarded by mu.
+	reqContentType string
+
 	closeOnce sync.Once
 
 	// maxMessageSize caps the per-LPM length on the wire and the
@@ -328,6 +336,7 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	// (when this Layer is RoleServer reading a request, msg is the request).
 	contentType := headerGet(msg.Headers, "content-type")
 	isBase64 := IsBase64Encoded(contentType)
+	c.noteRequestContentType(dir, contentType)
 
 	// USK-898: per-body wire-record callback. Fired BEFORE the in-place
 	// base64 decode + LPM parse so the wire snapshot is preserved even
@@ -994,11 +1003,17 @@ func (c *channel) sendDataLocked(env *envelope.Envelope, m *envelope.GRPCDataMes
 // by shouldEmbedTrailer. When the Start carried a passthrough body
 // (sendStartLocked), that body is forwarded verbatim — it is already in
 // wire form, so it is neither re-assembled nor base64-wrapped again.
+//
+// A Receive End with no response Start sent is a complete response on its
+// own (a proxy policy terminator or a plugin RESPOND_GRPC, USK-1220): the
+// Start is synthesized by startForLoneEndLocked and the response goes out as
+// HTTP 200 + a trailer frame. A Send End without a Start has no request to
+// flush and stays an error.
 func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *envelope.GRPCEndMessage) error {
 	c.mu.Lock()
-	if c.sendStart == nil {
+	if err := c.ensureSendStartLocked(env); err != nil {
 		c.mu.Unlock()
-		return errors.New("grpcweb: GRPCEndMessage before GRPCStartMessage on Send")
+		return err
 	}
 	start := c.sendStart
 	srcEnv := c.sendCtxEnv
@@ -1069,6 +1084,62 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	}
 
 	return c.inner.Send(ctx, out)
+}
+
+// defaultGRPCWebContentType is the content-type of a synthesized response
+// when no request content-type was observed on this Channel.
+const defaultGRPCWebContentType = "application/grpc-web"
+
+// noteRequestContentType records the content-type of a Send-direction
+// (request) HTTPMessage for startForLoneEndLocked. Other directions are
+// ignored.
+func (c *channel) noteRequestContentType(dir envelope.Direction, contentType string) {
+	if dir != envelope.Send {
+		return
+	}
+	c.mu.Lock()
+	c.reqContentType = contentType
+	c.mu.Unlock()
+}
+
+// ensureSendStartLocked makes sure an assembly Start exists for the End env
+// being sent: the Start already recorded by sendStartLocked, or — for a
+// Receive End sent on its own — the one startForLoneEndLocked synthesizes.
+// A Send-direction End without a Start is an error. Caller holds c.mu.
+func (c *channel) ensureSendStartLocked(env *envelope.Envelope) error {
+	if c.sendStart != nil {
+		return nil
+	}
+	if env.Direction != envelope.Receive {
+		return errors.New("grpcweb: GRPCEndMessage before GRPCStartMessage on Send")
+	}
+	c.startForLoneEndLocked(env)
+	return nil
+}
+
+// startForLoneEndLocked installs the response Start for a Receive End sent
+// with no response Start before it (USK-1220). Such an End is a complete
+// response by itself — the pipeline's policy terminator
+// (buildGRPCPolicyDropResponse) or a plugin RESPOND_GRPC — so the Start
+// carries only the content-type: the request's, verbatim, so a -text
+// client gets a base64 body and a +json client its own media type
+// (falling back to application/grpc-web), the way the native gRPC Layer
+// mirrors the request content-type on its Trailers-Only response. Its zero
+// HTTPStatus renders as 200 OK (buildHTTPMessage), so the status travels
+// in the trailer frame sendEndLocked appends, the shape every gRPC-Web
+// response with a body has; no Connection header is added, so an HTTP/1.x
+// keep-alive connection survives. The End Envelope stands in as the
+// context envelope (StreamID, Context). Caller holds c.mu.
+func (c *channel) startForLoneEndLocked(env *envelope.Envelope) {
+	ct := c.reqContentType
+	if ct == "" {
+		ct = defaultGRPCWebContentType
+	}
+	c.sendStart = &envelope.GRPCStartMessage{ContentType: ct}
+	c.sendCtxEnv = env
+	c.sendStreamID = env.StreamID
+	c.sendDataBuf.Reset()
+	c.sendPassthrough = nil
 }
 
 // emptyResponseBody returns []byte{} for a nil response body (USK-1219

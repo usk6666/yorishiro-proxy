@@ -15,8 +15,8 @@ import (
 // messages against input safety rules. If a violation is detected, the
 // envelope is not forwarded and, where the protocol has a terminator the
 // client understands, the client is answered with one: HTTP gets a synthetic
-// 403, native gRPC gets grpc-status 7 PERMISSION_DENIED (USK-1202).
-// WebSocket and gRPC-Web are dropped without a terminator for now.
+// 403, native gRPC and gRPC-Web get grpc-status 7 PERMISSION_DENIED
+// (USK-1202 / USK-1220). WebSocket is dropped without a terminator for now.
 // Receive-direction messages always pass through (Input Filter is
 // Send-only).
 //
@@ -245,8 +245,9 @@ func (s *SafetyStep) processGRPC(ctx context.Context, env *envelope.Envelope, ms
 		// USK-1202: native gRPC answers the client with grpc-status 7
 		// PERMISSION_DENIED (Trailers-Only, or trailers once response
 		// HEADERS were relayed) and the session then ends the RPC, so the
-		// client does not hang until its own deadline. gRPC-Web keeps
-		// Drop (USK-1220).
+		// client does not hang until its own deadline. gRPC-Web gets the
+		// same End, rendered as HTTP 200 + a trailer frame, and nothing
+		// of the request reaches the upstream (USK-1220).
 		return grpcPolicyDropResult(env, BlockedBySafetyFilter, []string{violation.RuleID})
 	}
 
