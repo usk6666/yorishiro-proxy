@@ -672,7 +672,11 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	s.appendAnnotations(ctx, env)
 
 	// On Receive, project the upstream leg's reality onto Stream.ConnInfo.
-	if env.Direction == envelope.Receive {
+	// A Synthetic envelope never came from the upstream leg: a plugin
+	// RESPOND response (USK-1393) carries the client-facing Send Context,
+	// whose TLS snapshot is the client leg's, so projecting it would write
+	// a TLS session (and socket) the upstream never had.
+	if env.Direction == envelope.Receive && !env.Context.Synthetic {
 		s.projectUpstreamConnInfo(ctx, env)
 	}
 

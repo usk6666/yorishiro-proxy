@@ -403,7 +403,9 @@ type EnvelopeContext struct {
 	// in the intercept queue so the upstream's idle timer does not expire;
 	// and the plugin dispatcher's RESPOND response (USK-1393). RecordStep
 	// projects the flag onto the recorded Flow as Metadata["synthetic"] =
-	// "true".
+	// "true", and does not project a Synthetic Receive envelope's Context
+	// (TLS snapshot, ServerAddr) onto the Stream's upstream connection
+	// columns — it never came from an upstream session.
 	//
 	// Pipeline Steps that mutate wire observation MUST NOT re-trigger on a
 	// Synthetic Envelope:
