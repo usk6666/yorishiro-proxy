@@ -27,17 +27,18 @@ Use it to self-verify a plugin setup: after sending traffic, a non-zero `fail_op
     - `kind` (string): see the table below
     - `action` (string): the refused action (`"DROP"` / `"RESPOND"`) for `action_not_allowed` / `respond_*`; omitted otherwise
     - `protocol`, `event`, `phase` (string): the hook that produced it
-    - `reason` (string): the engine's error text, passed through the SafetyFilter Output Filter and truncated to 256 bytes. For `hook_error` it is the plugin's own error message.
+    - `reason` (string): the engine's error text, passed through the SafetyFilter Output Filter and truncated to 256 bytes (an error text over 1 KiB also loses its last 128 bytes after masking, so a value cut in half is not shown). For `hook_error` it is the plugin's own error message.
     - `at` (string): RFC 3339 timestamp
 
 ### Fail-open kinds
 
 | `kind` | Cause |
 |--------|-------|
-| `action_not_allowed` | The hook returned DROP / RESPOND for an event that does not accept it (e.g. DROP from `grpc.on_data`, RESPOND from `ws.on_message`, DROP from `ws.on_close`). |
+| `action_not_allowed` | The hook returned DROP / RESPOND for an event that does not accept it (e.g. DROP from `grpc.on_data`, RESPOND from `ws.on_message`, DROP from `ws.on_close`, DROP from `http.on_response`, RESPOND from `connection.on_connect`). |
 | `respond_shape_mismatch` | `action.RESPOND` from a `grpc` / `grpc-web` hook, or `action.RESPOND_GRPC` from an `http` / `ws.on_upgrade` hook. Use the builtin matching the hook's protocol. |
 | `respond_on_informational` | RESPOND on a 1xx response other than 101 (`http.on_response`). RESPOND on the final response instead. |
 | `hook_error` | The hook raised a Starlark runtime error (`fail()`, an exception, the step budget). In-place `msg` edits made before the error are kept. |
+| `hook_timeout` | The hook was still running when its deadline expired (lifecycle hooks such as `connection.on_connect`, `socks5.on_connect` and `tls.on_handshake` get 5 s), so it was cancelled and the connection / message went through. A hook cancelled because the connection was being torn down is not counted. |
 | `invalid_return` | The hook returned a value that is not an action: a bare `"RESPOND"` string, another unrecognized string, or a value of another type. In-place `msg` edits are kept. |
 | `invalid_mutation` | The hook's `msg` edits could not be turned back into a message (e.g. an out-of-range field value); all edits of that call were discarded. |
 | `chunk_too_large` | A `raw.on_chunk` hook produced more than 1 MiB. |
@@ -46,6 +47,8 @@ Use it to self-verify a plugin setup: after sending traffic, a non-zero `fail_op
 | `dispatch_error` | Any other dispatch error that made the engine skip the hook. |
 
 Each hook call counts at most once (the first cause). Counters are per loaded plugin and last for the process lifetime; they are not reset.
+
+Read `fail_open_by_kind`, not just the total: `body_too_large` and `unsupported_message` rise on ordinary traffic (e.g. any body over 1 MiB) even for an observe-only plugin. The kinds that mean a blocking decision was lost are `action_not_allowed`, `respond_shape_mismatch`, `respond_on_informational`, `hook_error`, `hook_timeout` and `invalid_return`.
 
 ## Examples
 

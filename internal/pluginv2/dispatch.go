@@ -109,10 +109,10 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope
 			slog.String("phase", string(hook.Phase)),
 			slog.String("error", callErr.Error()),
 		)
-		// A cancelled ctx means the session is being torn down, not
-		// that the plugin failed open: nothing is forwarded.
-		if ctx == nil || ctx.Err() == nil {
-			noteFailOpen(FailOpenHookError, ActionContinue, callErr.Error())
+		// A cancelled ctx is teardown (not counted); an expired deadline
+		// still forwards the message, so it counts as hook_timeout.
+		if kind, counted := hookCallErrorKind(ctx); counted {
+			noteFailOpen(kind, ActionContinue, callErr.Error())
 		}
 		ret = starlark.None
 	}

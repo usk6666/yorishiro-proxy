@@ -1,6 +1,7 @@
 package pluginv2
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -31,6 +32,12 @@ const (
 	// (fail(), an exception, the step budget). In-place msg edits made
 	// before the error are still committed (RFC-001 §9.3 D2).
 	FailOpenHookError FailOpenKind = "hook_error"
+
+	// FailOpenHookTimeout — the hook was still running when its ctx
+	// deadline expired (e.g. the 5 s lifecycle hook budget, or a parent
+	// deadline), so it was cancelled and its outcome treated as CONTINUE.
+	// A cancelled (not expired) ctx is teardown and is not counted.
+	FailOpenHookTimeout FailOpenKind = "hook_timeout"
 
 	// FailOpenInvalidReturn — the hook returned a value that is not an
 	// action: a bare "RESPOND" string, an unrecognized string, or a value
@@ -71,11 +78,16 @@ type FailOpenRecord struct {
 	Protocol string
 	Event    string
 	Phase    string
-	// Reason is the engine's error text, truncated to failOpenReasonCap
-	// bytes. For FailOpenHookError it is the plugin's own error message
-	// and may carry data the plugin read from traffic: callers exposing
-	// it outside the process must apply their output masking first.
+	// Reason is the engine's error text, truncated to FailOpenReasonCap
+	// bytes (see Truncated). For FailOpenHookError it is the plugin's own
+	// error message and may carry data the plugin read from traffic:
+	// callers exposing it outside the process must apply their output
+	// masking first.
 	Reason string
+	// Truncated reports that Reason was cut at FailOpenReasonCap. The cut
+	// can split a sensitive value, leaving a fragment at the end of Reason
+	// that output masking no longer recognizes.
+	Truncated bool
 	// At is when the outcome happened.
 	At time.Time
 }
@@ -115,12 +127,13 @@ func (s *pluginStats) record(hook Hook, kind FailOpenKind, action Action, reason
 		return
 	}
 	rec := &FailOpenRecord{
-		Kind:     kind,
-		Protocol: hook.Protocol,
-		Event:    hook.Event,
-		Phase:    string(hook.Phase),
-		Reason:   truncateUTF8(reason, FailOpenReasonCap),
-		At:       time.Now(),
+		Kind:      kind,
+		Protocol:  hook.Protocol,
+		Event:     hook.Event,
+		Phase:     string(hook.Phase),
+		Reason:    truncateUTF8(reason, FailOpenReasonCap),
+		Truncated: len(reason) > FailOpenReasonCap,
+		At:        time.Now(),
 	}
 	if action != ActionContinue {
 		rec.Action = action.String()
@@ -184,6 +197,24 @@ func failOpenKindOf(err error) FailOpenKind {
 	default:
 		return FailOpenDispatchError
 	}
+}
+
+// hookCallErrorKind classifies a Starlark call error under ctx. It reports
+// counted=false when ctx was cancelled: that is session / listener
+// teardown, and nothing is forwarded on the hook's behalf. An expired
+// deadline is counted as FailOpenHookTimeout — the caller still treats the
+// cancelled hook as CONTINUE (a lifecycle hook that could have dropped the
+// connection lets it through). Anything else is FailOpenHookError.
+func hookCallErrorKind(ctx context.Context) (kind FailOpenKind, counted bool) {
+	if ctx != nil {
+		switch err := ctx.Err(); {
+		case errors.Is(err, context.Canceled):
+			return "", false
+		case errors.Is(err, context.DeadlineExceeded):
+			return FailOpenHookTimeout, true
+		}
+	}
+	return FailOpenHookError, true
 }
 
 // truncateUTF8 cuts s to at most n bytes without splitting a rune.

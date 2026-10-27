@@ -79,6 +79,20 @@ type hookRegistration struct {
 // cut is masked whole before it is truncated.
 const failOpenReasonOutputCap = 256
 
+// failOpenReasonTruncatedMargin is dropped from the end of the masked
+// reason when pluginv2 had already cut the stored reason at
+// pluginv2.FailOpenReasonCap. That cut can split a sensitive value; the
+// leftover fragment no longer matches its Output Filter pattern, and it
+// always sits at the very end of the masked text (masking only rewrites
+// earlier, whole matches). Without this margin, earlier matches that
+// shrink the text (an e-mail of hundreds of bytes becomes "[MASKED:email]")
+// can pull that fragment inside failOpenReasonOutputCap.
+//
+// Residual: a fragment longer than this margin can survive. Bounded
+// patterns (credit card, phone, My Number) are far shorter; only unbounded
+// ones (e.g. the e-mail local part, custom regexes) can exceed it.
+const failOpenReasonTruncatedMargin = 128
+
 // registerPluginIntrospect registers the plugin_introspect MCP tool.
 func (s *Server) registerPluginIntrospect() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
@@ -130,7 +144,7 @@ func (s *Server) handlePluginIntrospect(_ context.Context, _ *gomcp.CallToolRequ
 				Protocol: last.Protocol,
 				Event:    last.Event,
 				Phase:    last.Phase,
-				Reason:   s.failOpenReasonForOutput(last.Reason),
+				Reason:   s.failOpenReasonForOutput(last.Reason, last.Truncated),
 				At:       last.At.UTC().Format(time.RFC3339),
 			}
 		}
@@ -143,15 +157,30 @@ func (s *Server) handlePluginIntrospect(_ context.Context, _ *gomcp.CallToolRequ
 // hook_error reason is the plugin's own error text, which can carry values
 // the plugin read from traffic, so every reason goes through the Output
 // Filter (RFC-001 §3.7) before it leaves the MCP boundary, then is cut to
-// failOpenReasonOutputCap bytes on a rune boundary.
-func (s *Server) failOpenReasonForOutput(reason string) string {
+// failOpenReasonOutputCap bytes on a rune boundary. When pluginv2 had
+// already truncated the stored reason, failOpenReasonTruncatedMargin bytes
+// are first dropped from the end of the masked text so a value split by
+// that earlier cut does not leak as an unmasked fragment.
+func (s *Server) failOpenReasonForOutput(reason string, truncated bool) string {
 	masked := string(s.filterOutputBody([]byte(reason)))
-	if len(masked) <= failOpenReasonOutputCap {
-		return masked
+	if truncated {
+		masked = cutUTF8(masked, len(masked)-failOpenReasonTruncatedMargin)
 	}
-	cut := failOpenReasonOutputCap
-	for cut > 0 && !utf8.RuneStart(masked[cut]) {
+	return cutUTF8(masked, failOpenReasonOutputCap)
+}
+
+// cutUTF8 cuts s to at most n bytes (n < 0 yields "") without splitting a
+// rune.
+func cutUTF8(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return masked[:cut]
+	return s[:cut]
 }

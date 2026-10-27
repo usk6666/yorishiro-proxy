@@ -33,7 +33,7 @@ import (
 //   - Plugin Starlark runtime errors are already converted into Continue
 //     by Engine.Dispatch's per-hook handler, so the chain keeps moving.
 //   - Every outcome treated as Continue this way (disallowed action,
-//     runtime error, invalid return value) is counted on the plugin's
+//     runtime error, ctx deadline expiry, invalid return value) is counted on the plugin's
 //     fail-open stats, surfaced by Engine.Introspect.
 //   - msg is passed verbatim as the plugin's first positional argument.
 //     Callers typically build it via one of the BuildLifecycle*Dict
@@ -111,9 +111,12 @@ func (e *Engine) dispatchLifecycleHook(ctx context.Context, hook Hook, env *enve
 			slog.String("hook", hook.Protocol+"."+hook.Event),
 			slog.String("error", callErr.Error()),
 		)
-		// A cancelled ctx is teardown, not a plugin failing open.
-		if ctx == nil || ctx.Err() == nil {
-			hook.stats.record(hook, FailOpenHookError, ActionContinue, callErr.Error())
+		// A cancelled ctx is teardown (not counted). An expired deadline
+		// (the callers' per-hook WithTimeout, or a parent deadline) is
+		// counted as hook_timeout: the hook's outcome is treated as
+		// CONTINUE, so a DROP-capable event lets the connection through.
+		if kind, counted := hookCallErrorKind(ctx); counted {
+			hook.stats.record(hook, kind, ActionContinue, callErr.Error())
 		}
 		return ActionContinue, nil
 	}
