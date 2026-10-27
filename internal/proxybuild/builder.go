@@ -2552,8 +2552,9 @@ func dropStreamListenerName(ctx context.Context, configured string) string {
 // The exception is upstream of this recorder: a plugin DROP
 // (blocked_by="plugin") is recorded with Flow rows by RecordStep inside
 // Pipeline.RunDetailed before this callback runs (USK-1393), so its Stream
-// already exists and the UpdateStream fallback below stamps the
-// attribution (and re-tags an h2-overlay "http" row to grpc / grpc-web).
+// normally already exists: the recorder then skips the INSERT and stamps
+// the attribution with UpdateStream directly (and re-tags an h2-overlay
+// "http" row to grpc / grpc-web).
 //
 // The recorder always overwrites an existing Stream identified by env.StreamID
 // — Pipeline-Drop emits the audit Stream BEFORE the live path would have
@@ -2624,28 +2625,40 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		// not abort the audit record.
 		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		// Try SaveStream first. The common path (first Send dropped by
-		// HostScope/HTTPScope/Safety) has no prior Stream row, so this
-		// succeeds. For mid-stream Drops on streaming protocols (gRPC /
-		// WS data frame blocked by SafetyStep) RecordStep already created
-		// a Stream on the first Send; the INSERT then fails with a
-		// constraint violation and we fall back to UpdateStream so the
-		// audit fields (State, BlockedBy) overwrite the active state.
-		if err := store.SaveStream(recordCtx, st); err == nil {
-			return
-		}
-		// Fallback: update the existing Stream with the audit attribution.
-		// We never know upfront which path we're on, so always attempt
-		// SaveStream first to keep the no-prior-row path single-statement.
-		// On a streaming protocol mid-Drop (gRPC / WS data frame blocked
-		// by SafetyStep) the first Send has already created an active
-		// Stream; this UpdateStream rewrites it as a blocked audit record.
-		if uerr := store.UpdateStream(recordCtx, streamID, flow.StreamUpdate{
+		update := flow.StreamUpdate{
 			State:      "error",
 			BlockedBy:  blockedBy,
 			AppendTags: st.Tags,
 			Protocol:   dropRetagProtocol(env.Protocol),
-		}); uerr != nil {
+		}
+		// A plugin DROP was recorded by RecordStep inside RunDetailed
+		// before this callback (USK-1393), so its Stream row normally
+		// exists already: stamp it directly. Attempting the INSERT first
+		// would fail on the primary key and the store would log a
+		// "flow write failed" WARN for every plugin DROP. When the row is
+		// missing (no RecordStep wrote one) the SaveStream path below
+		// still creates it — Stream rows bypass capture_scope.
+		skipSave := blockedBy == pipeline.BlockedByPlugin && streamRowExists(recordCtx, store, streamID)
+		// Otherwise try SaveStream first. The common path (first Send
+		// dropped by HostScope/HTTPScope/Safety) has no prior Stream row,
+		// so this succeeds. For mid-stream Drops on streaming protocols
+		// (gRPC / WS data frame blocked by SafetyStep) RecordStep already
+		// created a Stream on the first Send; the INSERT then fails with a
+		// constraint violation and we fall back to UpdateStream so the
+		// audit fields (State, BlockedBy) overwrite the active state.
+		if !skipSave {
+			if err := store.SaveStream(recordCtx, st); err == nil {
+				return
+			}
+		}
+		// Fallback: update the existing Stream with the audit attribution.
+		// For policy drops we never know upfront which path we're on, so
+		// SaveStream is attempted first to keep the no-prior-row path
+		// single-statement. On a streaming protocol mid-Drop (gRPC / WS
+		// data frame blocked by SafetyStep) the first Send has already
+		// created an active Stream; this UpdateStream rewrites it as a
+		// blocked audit record.
+		if uerr := store.UpdateStream(recordCtx, streamID, update); uerr != nil {
 			if logger != nil {
 				logger.Error("proxybuild: pipeline-drop stream save failed",
 					"listener", streamListenerName,
@@ -2657,6 +2670,20 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 			}
 		}
 	}
+}
+
+// streamRowExists reports whether store holds a Stream whose ID is exactly
+// id. It returns false when store cannot be read (no flow.StreamReader) or
+// the lookup fails, so the caller falls back to its SaveStream-first path.
+// The ID is compared because SQLiteStore.GetStream also resolves 8-char
+// prefixes.
+func streamRowExists(ctx context.Context, store flow.Writer, id string) bool {
+	r, ok := store.(flow.StreamReader)
+	if !ok {
+		return false
+	}
+	st, err := r.GetStream(ctx, id)
+	return err == nil && st != nil && st.ID == id
 }
 
 // dropRetagProtocol returns the Stream.Protocol the drop recorder's
