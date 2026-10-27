@@ -2625,40 +2625,7 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		// not abort the audit record.
 		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		update := flow.StreamUpdate{
-			State:      "error",
-			BlockedBy:  blockedBy,
-			AppendTags: st.Tags,
-			Protocol:   dropRetagProtocol(env.Protocol),
-		}
-		// A plugin DROP was recorded by RecordStep inside RunDetailed
-		// before this callback (USK-1393), so its Stream row normally
-		// exists already: stamp it directly. Attempting the INSERT first
-		// would fail on the primary key and the store would log a
-		// "flow write failed" WARN for every plugin DROP. When the row is
-		// missing (no RecordStep wrote one) the SaveStream path below
-		// still creates it — Stream rows bypass capture_scope.
-		skipSave := blockedBy == pipeline.BlockedByPlugin && streamRowExists(recordCtx, store, streamID)
-		// Otherwise try SaveStream first. The common path (first Send
-		// dropped by HostScope/HTTPScope/Safety) has no prior Stream row,
-		// so this succeeds. For mid-stream Drops on streaming protocols
-		// (gRPC / WS data frame blocked by SafetyStep) RecordStep already
-		// created a Stream on the first Send; the INSERT then fails with a
-		// constraint violation and we fall back to UpdateStream so the
-		// audit fields (State, BlockedBy) overwrite the active state.
-		if !skipSave {
-			if err := store.SaveStream(recordCtx, st); err == nil {
-				return
-			}
-		}
-		// Fallback: update the existing Stream with the audit attribution.
-		// For policy drops we never know upfront which path we're on, so
-		// SaveStream is attempted first to keep the no-prior-row path
-		// single-statement. On a streaming protocol mid-Drop (gRPC / WS
-		// data frame blocked by SafetyStep) the first Send has already
-		// created an active Stream; this UpdateStream rewrites it as a
-		// blocked audit record.
-		if uerr := store.UpdateStream(recordCtx, streamID, update); uerr != nil {
+		if uerr := writeDropStream(recordCtx, store, st, dropRetagProtocol(env.Protocol)); uerr != nil {
 			if logger != nil {
 				logger.Error("proxybuild: pipeline-drop stream save failed",
 					"listener", streamListenerName,
@@ -2670,6 +2637,43 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 			}
 		}
 	}
+}
+
+// writeDropStream persists the drop recorder's audit Stream st (State,
+// BlockedBy and Tags already set) and returns the error of the final
+// write. retagProtocol is the Protocol written when an existing row is
+// updated (dropRetagProtocol).
+func writeDropStream(ctx context.Context, store flow.Writer, st *flow.Stream, retagProtocol string) error {
+	// A plugin DROP was recorded by RecordStep inside RunDetailed before
+	// the recorder runs (USK-1393), so its Stream row normally exists
+	// already: stamp it directly. Attempting the INSERT first would fail
+	// on the primary key and the store would log a "flow write failed"
+	// WARN for every plugin DROP. When the row is missing (no RecordStep
+	// wrote one) the SaveStream path below still creates it — Stream rows
+	// bypass capture_scope.
+	skipSave := st.BlockedBy == pipeline.BlockedByPlugin && streamRowExists(ctx, store, st.ID)
+	// Otherwise try SaveStream first. The common path (first Send dropped
+	// by HostScope/HTTPScope/Safety) has no prior Stream row, so this
+	// succeeds. For mid-stream Drops on streaming protocols (gRPC / WS
+	// data frame blocked by SafetyStep) RecordStep already created a
+	// Stream on the first Send; the INSERT then fails with a constraint
+	// violation and we fall back to UpdateStream so the audit fields
+	// (State, BlockedBy) overwrite the active state.
+	if !skipSave {
+		if err := store.SaveStream(ctx, st); err == nil {
+			return nil
+		}
+	}
+	// Fallback: update the existing Stream with the audit attribution.
+	// For policy drops we never know upfront which path we're on, so
+	// SaveStream is attempted first to keep the no-prior-row path
+	// single-statement.
+	return store.UpdateStream(ctx, st.ID, flow.StreamUpdate{
+		State:      st.State,
+		BlockedBy:  st.BlockedBy,
+		AppendTags: st.Tags,
+		Protocol:   retagProtocol,
+	})
 }
 
 // streamRowExists reports whether store holds a Stream whose ID is exactly
