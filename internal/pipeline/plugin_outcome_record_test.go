@@ -2,8 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"log/slog"
+	"net"
 	"path/filepath"
 	"testing"
 
@@ -239,6 +241,46 @@ func TestRecordStep_ProjectsSyntheticMetadata(t *testing.T) {
 	NewRecordStep(plain, nil).Process(context.Background(), httpReqEnv())
 	if _, ok := plain.flows[0].Metadata["synthetic"]; ok {
 		t.Errorf("wire envelope carries Metadata[synthetic] = %q, want the key absent", plain.flows[0].Metadata["synthetic"])
+	}
+}
+
+// T4 (USK-1393 review S-2): a plugin RESPOND's response copies the
+// client-facing Send Context, TLS snapshot included, but no upstream TLS
+// session exists. Recording it must not write the client leg's TLS
+// version / cipher / ALPN / peer cert into the Stream's upstream TLS
+// columns, nor a ServerAddr the Stream never reached.
+func TestPluginOutcome_SyntheticResponseSkipsUpstreamConnInfo(t *testing.T) {
+	ctx := context.Background()
+	store := newTempStore(t)
+	eng := pluginv2.NewEngine(nil)
+	eng.Registry().Register(outcomeHook(pluginv2.ProtoHTTP, pluginv2.EventOnRequest, pluginv2.PhasePrePipeline, http418Respond()))
+	env := httpReqEnv()
+	env.Context.TLS = &envelope.TLSSnapshot{
+		SNI:         "client.example",
+		ALPN:        "h2",
+		Version:     tls.VersionTLS13,
+		CipherSuite: tls.TLS_AES_128_GCM_SHA256,
+	}
+	env.Context.ServerAddr = &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 443}
+	o := New(NewPluginStepPre(eng, nil, nil), NewRecordStep(store, nil)).RunDetailed(ctx, env)
+	if o.Action != Respond || o.Response == nil {
+		t.Fatalf("Action = %v Response = %v, want Respond with a response", o.Action, o.Response)
+	}
+	if o.Response.Context.TLS == nil {
+		t.Error("Response.Context.TLS = nil, want the Send Context kept intact on the envelope")
+	}
+	if got := len(mustFlows(t, store, env.StreamID)); got != 2 {
+		t.Fatalf("flows = %d, want the request and the synthetic response recorded", got)
+	}
+	st := mustStream(t, store, env.StreamID)
+	if ci := st.ConnInfo; ci != nil {
+		if ci.TLSVersion != "" || ci.TLSCipher != "" || ci.TLSALPN != "" || ci.TLSServerCertSubject != "" {
+			t.Errorf("Stream upstream TLS = version %q cipher %q alpn %q cert %q, want all empty (no upstream TLS session)",
+				ci.TLSVersion, ci.TLSCipher, ci.TLSALPN, ci.TLSServerCertSubject)
+		}
+		if ci.ServerAddr != "" {
+			t.Errorf("Stream ServerAddr = %q, want empty (no upstream socket)", ci.ServerAddr)
+		}
 	}
 }
 
