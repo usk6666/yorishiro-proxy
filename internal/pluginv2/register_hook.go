@@ -103,6 +103,7 @@ func registerHook(thread *starlark.Thread, fn *starlark.Builtin, args starlark.T
 		Phase:      resolvedPhase,
 		Fn:         callable,
 		PluginName: pluginName,
+		stats:      lp.stats,
 	})
 	// Mirror the registration onto the loadedPlugin so plugin_introspect
 	// (USK-676) can surface the loaded hook surface without consulting

@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
@@ -188,4 +190,74 @@ register_hook("http", "on_request", h)
 	if v["log_level"] != "debug" {
 		t.Errorf("log_level = %v, want \"debug\"", v["log_level"])
 	}
+}
+
+// TestPluginIntrospect_FailOpen verifies the tool's JSON carries
+// fail_open_count (present and 0 before any refusal) and last_fail_open
+// after a plugin's RESPOND was refused and treated as CONTINUE.
+func TestPluginIntrospect_FailOpen(t *testing.T) {
+	path := tempPluginScript(t, "shape", `
+def h(msg, ctx):
+    return action.RESPOND_GRPC(status=16, message="denied")
+register_hook("http", "on_request", h)
+`)
+	eng := pluginv2.NewEngine(nil)
+	if err := eng.LoadPlugins(context.Background(), []pluginv2.PluginConfig{
+		{Path: path, OnError: string(pluginv2.OnErrorAbort)},
+	}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	cs := setupIntrospectSession(t, eng)
+
+	raw := callPluginIntrospectRaw(t, cs)
+	if !strings.Contains(raw, `"fail_open_count":0`) {
+		t.Errorf("plugin_introspect before any refusal = %s, want fail_open_count:0 present", raw)
+	}
+	if strings.Contains(raw, "last_fail_open") {
+		t.Errorf("plugin_introspect before any refusal = %s, want no last_fail_open", raw)
+	}
+
+	hooks := eng.Registry().Lookup("http", "on_request", pluginv2.PhasePrePipeline)
+	if len(hooks) != 1 {
+		t.Fatalf("hooks = %d, want 1", len(hooks))
+	}
+	env := &envelope.Envelope{
+		StreamID: "s", FlowID: "f", Direction: envelope.Send, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{Method: "GET", Path: "/", Authority: "example.com"},
+	}
+	if _, err := eng.Dispatch(context.Background(), hooks[0], env); err == nil {
+		t.Fatal("Dispatch err = nil, want the RESPOND_GRPC refused")
+	}
+
+	got := callPluginIntrospect(t, cs)
+	if len(got.Plugins) != 1 {
+		t.Fatalf("Plugins len = %d, want 1", len(got.Plugins))
+	}
+	p := got.Plugins[0]
+	if p.FailOpenCount != 1 {
+		t.Errorf("fail_open_count = %d, want 1", p.FailOpenCount)
+	}
+	if p.LastFailOpen == nil || p.LastFailOpen.Kind != "respond_shape_mismatch" ||
+		p.LastFailOpen.Protocol != "http" || p.LastFailOpen.Event != "on_request" ||
+		p.LastFailOpen.Phase != "pre_pipeline" || p.LastFailOpen.Action != "RESPOND" {
+		t.Errorf("last_fail_open = %+v, want respond_shape_mismatch RESPOND (http, on_request, pre_pipeline)", p.LastFailOpen)
+	}
+}
+
+// callPluginIntrospectRaw returns the plugin_introspect JSON text verbatim
+// so presence of zero-valued fields can be asserted.
+func callPluginIntrospectRaw(t *testing.T, cs *gomcp.ClientSession) string {
+	t.Helper()
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{Name: "plugin_introspect"})
+	if err != nil {
+		t.Fatalf("CallTool plugin_introspect: %v", err)
+	}
+	if res.IsError || len(res.Content) == 0 {
+		t.Fatalf("plugin_introspect: isError=%v content=%v", res.IsError, res.Content)
+	}
+	tc, ok := res.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("Content[0] type = %T, want *TextContent", res.Content[0])
+	}
+	return tc.Text
 }

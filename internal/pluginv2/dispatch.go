@@ -73,44 +73,31 @@ var ErrDisallowedAction = errors.New("pluginv2: hook returned disallowed action 
 // hook" signals. Per-hook Starlark *runtime* errors are converted into
 // Warn-logged ActionContinue outcomes here so a misbehaving hook never breaks
 // the chain or the wire.
+//
+// Every one of these fail-open outcomes — each returned error, a runtime
+// error, a non-action return value, a refused msg read-back — is counted
+// once on the owning plugin's fail-open stats (FailOpenKind), which
+// Engine.Introspect surfaces so an agent can tell that a hook it expected
+// to block let the message through.
 func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope) (*HookOutcome, error) {
 	d, err := convertMessageToDict(env)
 	if err != nil {
+		hook.stats.record(hook, failOpenKindOf(err), ActionContinue, err.Error())
 		return nil, err
 	}
-	ctxVal := e.NewCtx(env)
 
-	thread := &starlark.Thread{
-		Name: fmt.Sprintf("pluginv2.dispatch:%s/%s/%s", hook.PluginName, hook.Protocol, hook.Event),
-		Print: func(_ *starlark.Thread, msg string) {
-			e.logger.Info("pluginv2: plugin print",
-				slog.String("plugin", hook.PluginName),
-				slog.String("hook", hook.Protocol+"."+hook.Event),
-				slog.String("message", msg),
-			)
-		},
+	// noteFailOpen counts at most one fail-open outcome per call — the
+	// first cause (a hook error that is followed by a refused read-back
+	// counts once, as hook_error).
+	noted := false
+	noteFailOpen := func(kind FailOpenKind, action Action, reason string) {
+		if noted {
+			return
+		}
+		noted = true
+		hook.stats.record(hook, kind, action, reason)
 	}
-	if steps := e.lookupMaxSteps(hook.PluginName); steps > 0 {
-		thread.SetMaxExecutionSteps(steps)
-	}
-
-	// Bridge ctx cancellation into thread.Cancel so external signals (SIGINT,
-	// deadline) abort hook execution promptly. The done channel stops the
-	// watcher when starlark.Call returns. Mirrors Engine.loadPlugin pattern.
-	done := make(chan struct{})
-	defer close(done)
-	if ctx != nil && ctx.Done() != nil {
-		go func() {
-			select {
-			case <-ctx.Done():
-				thread.Cancel(ctx.Err().Error())
-			case <-done:
-			}
-		}()
-	}
-
-	args := starlark.Tuple{d, ctxVal}
-	ret, callErr := starlark.Call(thread, hook.Fn, args, nil)
+	ret, callErr := e.callHook(ctx, hook, "pluginv2.dispatch", starlark.Tuple{d, e.NewCtx(env)})
 	if callErr != nil {
 		// In-place mutations applied before the error are still committed
 		// per RFC §9.3 D2 ("msg is mutable in-place"). We log the error and
@@ -122,20 +109,31 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope
 			slog.String("phase", string(hook.Phase)),
 			slog.String("error", callErr.Error()),
 		)
+		// A cancelled ctx is teardown (not counted); an expired deadline
+		// still forwards the message, so it counts as hook_timeout.
+		if kind, counted := hookCallErrorKind(ctx); counted {
+			noteFailOpen(kind, ActionContinue, callErr.Error())
+		}
 		ret = starlark.None
 	}
 
-	action, respond := interpretReturnValue(ret, hook, e.logger)
+	action, respond, invalid := interpretReturnValue(ret, hook, e.logger)
+	if invalid != "" {
+		noteFailOpen(FailOpenInvalidReturn, ActionContinue, invalid)
+	}
 
 	if action == ActionRespond {
 		if err := respondAllowed(hook, respond, env); err != nil {
+			noteFailOpen(failOpenKindOf(err), ActionRespond, err.Error())
 			return nil, err
 		}
 		return &HookOutcome{Action: ActionRespond, Respond: respond}, nil
 	}
 	if action == ActionDrop {
 		if !surfaceAllows(hook, action) {
-			return nil, fmt.Errorf("%w: %s on (%s, %s)", ErrDisallowedAction, action, hook.Protocol, hook.Event)
+			err := fmt.Errorf("%w: %s on (%s, %s)", ErrDisallowedAction, action, hook.Protocol, hook.Event)
+			noteFailOpen(FailOpenActionNotAllowed, ActionDrop, err.Error())
+			return nil, err
 		}
 		return &HookOutcome{Action: ActionDrop}, nil
 	}
@@ -148,6 +146,7 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope
 			slog.String("hook", hook.Protocol+"."+hook.Event),
 			slog.String("error", readErr.Error()),
 		)
+		noteFailOpen(FailOpenInvalidMutation, ActionContinue, readErr.Error())
 		return &HookOutcome{Action: ActionContinue, Mutation: MutationUnchanged, NewMessage: env.Message, NewRaw: env.Raw}, nil
 	}
 	if err := enforceTCPChunkCap(hook, kind, raw, msg); err != nil {
@@ -155,6 +154,7 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope
 		// this, logs Warn, and continues with the previous (un-mutated)
 		// envelope so the original chunk reaches the wire untouched.
 		// Mirrors the ErrDisallowedAction fail-soft contract.
+		noteFailOpen(FailOpenChunkTooLarge, ActionContinue, err.Error())
 		return nil, err
 	}
 	return &HookOutcome{
@@ -163,6 +163,40 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope
 		NewMessage: msg,
 		NewRaw:     raw,
 	}, nil
+}
+
+// callHook runs hook.Fn(args...) on a fresh Starlark thread named
+// "<threadPrefix>:<plugin>/<protocol>/<event>", with the plugin's step
+// budget and ctx cancellation bridged into thread.Cancel (the done channel
+// stops the watcher when the call returns; mirrors Engine.loadPlugin).
+// Shared by Dispatch and dispatchLifecycleHook.
+func (e *Engine) callHook(ctx context.Context, hook Hook, threadPrefix string, args starlark.Tuple) (starlark.Value, error) {
+	thread := &starlark.Thread{
+		Name: fmt.Sprintf("%s:%s/%s/%s", threadPrefix, hook.PluginName, hook.Protocol, hook.Event),
+		Print: func(_ *starlark.Thread, msg string) {
+			e.logger.Info("pluginv2: plugin print",
+				slog.String("plugin", hook.PluginName),
+				slog.String("hook", hook.Protocol+"."+hook.Event),
+				slog.String("message", msg),
+			)
+		},
+	}
+	if steps := e.lookupMaxSteps(hook.PluginName); steps > 0 {
+		thread.SetMaxExecutionSteps(steps)
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	if ctx != nil && ctx.Done() != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				thread.Cancel(ctx.Err().Error())
+			case <-done:
+			}
+		}()
+	}
+	return starlark.Call(thread, hook.Fn, args, nil)
 }
 
 // enforceTCPChunkCap returns ErrChunkTooLarge when a (raw, on_chunk) hook
@@ -209,32 +243,36 @@ func enforceTCPChunkCap(hook Hook, kind MutationKind, raw []byte, msg envelope.M
 // Per RFC §9.3 D2: in-place mutations on `msg` are always committed regardless
 // of return value, so a "wrong" return value degrades to CONTINUE rather than
 // dropping the mutations.
-func interpretReturnValue(ret starlark.Value, hook Hook, logger *slog.Logger) (Action, *RespondAction) {
+//
+// invalid is non-empty when the value was not an action and was degraded to
+// CONTINUE. It is a fixed-format description that never echoes the returned
+// value (which may carry data the plugin read from traffic).
+func interpretReturnValue(ret starlark.Value, hook Hook, logger *slog.Logger) (action Action, respond *RespondAction, invalid string) {
 	if ret == nil || ret == starlark.None {
-		return ActionContinue, nil
+		return ActionContinue, nil, ""
 	}
 	switch v := ret.(type) {
 	case *RespondAction:
-		return ActionRespond, v
+		return ActionRespond, v, ""
 	case starlark.String:
 		switch string(v) {
 		case "CONTINUE":
-			return ActionContinue, nil
+			return ActionContinue, nil, ""
 		case "DROP":
-			return ActionDrop, nil
+			return ActionDrop, nil, ""
 		case "RESPOND":
 			logger.Warn("pluginv2: plugin returned bare \"RESPOND\" string; call action.RESPOND(...) to build a response",
 				slog.String("plugin", hook.PluginName),
 				slog.String("hook", hook.Protocol+"."+hook.Event),
 			)
-			return ActionContinue, nil
+			return ActionContinue, nil, `plugin returned bare "RESPOND" string; call action.RESPOND(...) to build a response`
 		default:
 			logger.Warn("pluginv2: plugin returned unrecognized string",
 				slog.String("plugin", hook.PluginName),
 				slog.String("hook", hook.Protocol+"."+hook.Event),
 				slog.String("value", string(v)),
 			)
-			return ActionContinue, nil
+			return ActionContinue, nil, fmt.Sprintf("plugin returned an unrecognized string (%d bytes); return action.CONTINUE, action.DROP or an action.RESPOND(...) result", len(v))
 		}
 	default:
 		logger.Warn("pluginv2: plugin returned unsupported value type",
@@ -242,7 +280,7 @@ func interpretReturnValue(ret starlark.Value, hook Hook, logger *slog.Logger) (A
 			slog.String("hook", hook.Protocol+"."+hook.Event),
 			slog.String("type", ret.Type()),
 		)
-		return ActionContinue, nil
+		return ActionContinue, nil, fmt.Sprintf("plugin returned unsupported value type %q; return action.CONTINUE, action.DROP or an action.RESPOND(...) result", ret.Type())
 	}
 }
 
@@ -290,13 +328,13 @@ func respondShapeAllowed(hook Hook, respond *RespondAction) error {
 	switch hook.Protocol {
 	case ProtoGRPC, ProtoGRPCWeb:
 		if respond == nil || respond.GRPCResponse == nil {
-			return fmt.Errorf("%w: HTTP-shaped action.RESPOND cannot be rendered on (%s, %s); use action.RESPOND_GRPC",
-				ErrDisallowedAction, hook.Protocol, hook.Event)
+			return &failOpenKindError{kind: FailOpenRespondShapeMismatch, err: fmt.Errorf("%w: HTTP-shaped action.RESPOND cannot be rendered on (%s, %s); use action.RESPOND_GRPC",
+				ErrDisallowedAction, hook.Protocol, hook.Event)}
 		}
 	default:
 		if respond == nil || respond.HTTPResponse == nil {
-			return fmt.Errorf("%w: gRPC-shaped action.RESPOND_GRPC cannot be rendered on (%s, %s); use action.RESPOND",
-				ErrDisallowedAction, hook.Protocol, hook.Event)
+			return &failOpenKindError{kind: FailOpenRespondShapeMismatch, err: fmt.Errorf("%w: gRPC-shaped action.RESPOND_GRPC cannot be rendered on (%s, %s); use action.RESPOND",
+				ErrDisallowedAction, hook.Protocol, hook.Event)}
 		}
 	}
 	return nil
@@ -319,8 +357,8 @@ func respondTargetAllowed(hook Hook, env *envelope.Envelope) error {
 		return nil
 	}
 	if msg.Status >= 100 && msg.Status < 200 && msg.Status != 101 {
-		return fmt.Errorf("%w: RESPOND on informational response %d on (%s, %s); RESPOND on the final response instead",
-			ErrDisallowedAction, msg.Status, hook.Protocol, hook.Event)
+		return &failOpenKindError{kind: FailOpenRespondOnInformational, err: fmt.Errorf("%w: RESPOND on informational response %d on (%s, %s); RESPOND on the final response instead",
+			ErrDisallowedAction, msg.Status, hook.Protocol, hook.Event)}
 	}
 	return nil
 }
