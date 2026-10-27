@@ -63,6 +63,10 @@ type loadedPlugin struct {
 	globals       starlark.StringDict
 	registrations []registeredHook
 	pendingHooks  []Hook
+
+	// stats counts this plugin's fail-open hook outcomes. Shared with
+	// every Hook the plugin registered; see pluginStats.
+	stats *pluginStats
 }
 
 // registeredHook is the per-plugin record of one register_hook call. The
@@ -214,7 +218,7 @@ func (e *Engine) loadPlugin(ctx context.Context, cfg PluginConfig) error {
 	// threadLocalCurrentPlugin pointer. We commit pendingHooks to the
 	// registry, finalize globals, and append to e.plugins only after
 	// ExecFileOptions returns successfully (USK-685).
-	lp := &loadedPlugin{config: cfg}
+	lp := &loadedPlugin{config: cfg, stats: &pluginStats{}}
 	thread.SetLocal(threadLocalCurrentPlugin, lp)
 
 	// Apply step budget at load time as well as at runtime — a malicious or

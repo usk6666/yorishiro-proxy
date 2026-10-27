@@ -14,6 +14,11 @@ type Hook struct {
 	Phase      Phase
 	Fn         starlark.Callable
 	PluginName string
+
+	// stats is the owning plugin instance's fail-open counters, set by
+	// register_hook. nil for hooks registered directly (tests); recording
+	// is then a no-op.
+	stats *pluginStats
 }
 
 // Registry stores plugin hooks indexed by (Protocol, Event, Phase) and

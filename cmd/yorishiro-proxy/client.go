@@ -508,7 +508,9 @@ Parameters: none.
 
 Returns one entry per loaded pluginv2 plugin: name, path, enabled flag, the list of
 (protocol, event, phase) hook registrations the plugin made via register_hook, and
-the redacted PluginConfig.Vars map (RedactKeys substitute "<redacted>"; large values truncated).
+the redacted PluginConfig.Vars map (RedactKeys substitute "<redacted>"; large values truncated),
+and fail_open_count / last_fail_open: hook outcomes the engine refused or could not evaluate
+and treated as CONTINUE (e.g. a RESPOND that does not match the hook's protocol).
 
 Examples:
   yorishiro-proxy client plugin_introspect
