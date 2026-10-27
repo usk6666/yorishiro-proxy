@@ -36,14 +36,21 @@ import (
 const pluginOutcomeName = "smoke_header_injector"
 
 // startPluginOutcomeHarness boots the production server with script
-// loaded as a plugin and starts a proxy listener.
+// loaded as a plugin and starts a proxy listener. The server log goes to
+// a file at warn level and is checked by assertNoServerErrorLog when the
+// test ends: recording a plugin outcome must not log a failed store write.
 func startPluginOutcomeHarness(t *testing.T, script, upstreamProto string) (*mcptest.Harness, string) {
 	t.Helper()
 	path := writePluginScript(t, "plugin_outcome.star", script)
+	logPath := filepath.Join(t.TempDir(), "server.log")
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{
 		ConfigJSON:    pluginsConfigJSON(t, path),
 		UpstreamProto: upstreamProto,
+		ExtraArgs:     []string{"-log-file", logPath},
+		LogLevel:      "warn",
 	})
+	// Registered after StartHarness, so it runs before the harness stops.
+	t.Cleanup(func() { assertNoServerErrorLog(t, logPath) })
 	startRes := h.MustOK(t, "proxy_start", map[string]any{"listen_addr": "127.0.0.1:0"})
 	proxyAddr, _ := startRes.Decoded["listen_addr"].(string)
 	if proxyAddr == "" {
@@ -484,6 +491,7 @@ func TestE2E_ResendHTTP_PluginRespondRecordedOnce(t *testing.T) {
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{
 		ConfigJSON: pluginsConfigJSON(t, path),
 		ExtraArgs:  []string{"-log-file", logPath},
+		LogLevel:   "warn", // assertNoServerErrorLog checks WARN lines too
 	})
 	upstreamAddr, _ := startObservedUpstream(t)
 	res := h.MustOK(t, "resend_http", map[string]any{

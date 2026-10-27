@@ -53,6 +53,9 @@ func startGRPCStartDropHarness(t *testing.T, upstreamProto, phase string) (*mcpt
 		ConfigJSON:    pluginsConfigJSON(t, script),
 		UpstreamProto: upstreamProto,
 		ExtraArgs:     []string{"-log-file", logPath},
+		// warn, not the harness default error: assertNoServerErrorLog
+		// also checks the store's WARN-level "flow write failed".
+		LogLevel: "warn",
 	})
 	startRes := h.MustOK(t, "proxy_start", map[string]any{"listen_addr": "127.0.0.1:0"})
 	proxyAddr, _ := startRes.Decoded["listen_addr"].(string)
@@ -82,7 +85,10 @@ func assertNoErrorStreams(t *testing.T, h *mcptest.Harness) {
 
 // assertNoServerErrorLog fails when the server logged at ERROR level — in
 // particular RecordStep's "flow save failed" for a Data envelope of a
-// Stream that was never created.
+// Stream that was never created — or when the flow store logged a failed
+// write ("flow write failed", WARN). A plugin DROP's Stream already exists
+// when the drop recorder stamps it, so a failed write there would read as
+// data loss without being one (USK-1393).
 func assertNoServerErrorLog(t *testing.T, logPath string) {
 	t.Helper()
 	b, err := os.ReadFile(logPath)
@@ -90,7 +96,8 @@ func assertNoServerErrorLog(t *testing.T, logPath string) {
 		t.Fatalf("read server log: %v", err)
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		if strings.Contains(line, "level=ERROR") || strings.Contains(line, "flow save failed") {
+		if strings.Contains(line, "level=ERROR") || strings.Contains(line, "flow save failed") ||
+			strings.Contains(line, "flow write failed") {
 			t.Errorf("server logged an error: %s", line)
 		}
 	}
@@ -168,6 +175,7 @@ func TestE2E_PluginDropGRPCWebStart_H1_ClosesConnection(t *testing.T) {
 			h := mcptest.StartHarness(t, mcptest.HarnessOptions{
 				ConfigJSON: pluginsConfigJSON(t, script),
 				ExtraArgs:  []string{"-log-file", logPath},
+				LogLevel:   "warn", // see startGRPCStartDropHarness
 			})
 			startRes := h.MustOK(t, "proxy_start", map[string]any{"listen_addr": "127.0.0.1:0"})
 			proxyAddr, _ := startRes.Decoded["listen_addr"].(string)
