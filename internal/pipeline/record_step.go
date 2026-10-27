@@ -672,7 +672,11 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	s.appendAnnotations(ctx, env)
 
 	// On Receive, project the upstream leg's reality onto Stream.ConnInfo.
-	if env.Direction == envelope.Receive {
+	// A Synthetic envelope never came from the upstream leg: a plugin
+	// RESPOND response (USK-1393) carries the client-facing Send Context,
+	// whose TLS snapshot is the client leg's, so projecting it would write
+	// a TLS session (and socket) the upstream never had.
+	if env.Direction == envelope.Receive && !env.Context.Synthetic {
 		s.projectUpstreamConnInfo(ctx, env)
 	}
 
@@ -1363,7 +1367,7 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 		Direction: env.Direction.String(),
 		Timestamp: time.Now(),
 		RawBytes:  s.projectRawBytes(ctx, env),
-		Metadata:  map[string]string{"protocol": string(env.Protocol)},
+		Metadata:  baseFlowMetadata(env),
 		// USK-889: project EnvelopeContext.WireLevel onto the persisted
 		// Flow so the schemaV14 wire_level column distinguishes the
 		// frame-level overlay envelopes (h2-frame) from the canonical
@@ -1431,6 +1435,19 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 	}
 
 	return fl
+}
+
+// baseFlowMetadata returns the protocol-independent Flow.Metadata every
+// recorded envelope starts with: "protocol", plus "synthetic"="true" for
+// a proxy-synthesized envelope (EnvelopeContext.Synthetic — today a plugin
+// RESPOND response, USK-1393; the WS hold keepalive Ping is not recorded)
+// so it is never mistaken for wire-observed data.
+func baseFlowMetadata(env *envelope.Envelope) map[string]string {
+	md := map[string]string{"protocol": string(env.Protocol)}
+	if env.Context.Synthetic {
+		md["synthetic"] = "true"
+	}
+	return md
 }
 
 // projectTLSHandshake projects a TLSHandshakeMessage (USK-790 passthrough

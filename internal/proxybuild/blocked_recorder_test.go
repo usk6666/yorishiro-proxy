@@ -331,3 +331,114 @@ func TestBuildPipelineDropRecorder_BypassesCaptureScope(t *testing.T) {
 		t.Errorf("Stream.BlockedBy = %q, want %q", got, pipeline.BlockedByTargetScope)
 	}
 }
+
+// readableFlowStore is a recordingFlowStore that also implements
+// flow.StreamReader over the set of Stream IDs that already exist, and
+// counts every SaveStream attempt (failed ones included) — a failed
+// INSERT is what the production store logs as "flow write failed".
+type readableFlowStore struct {
+	recordingFlowStore
+	existing     map[string]bool
+	saveAttempts int
+}
+
+func (r *readableFlowStore) SaveStream(ctx context.Context, st *flow.Stream) error {
+	r.mu.Lock()
+	r.saveAttempts++
+	exists := r.existing[st.ID]
+	r.mu.Unlock()
+	if exists {
+		return errors.New("insert stream: UNIQUE constraint failed: streams.id")
+	}
+	return r.recordingFlowStore.SaveStream(ctx, st)
+}
+
+func (r *readableFlowStore) GetStream(_ context.Context, id string) (*flow.Stream, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.existing[id] {
+		return &flow.Stream{ID: id}, nil
+	}
+	return nil, errors.New("stream not found")
+}
+
+func (r *readableFlowStore) ListStreams(context.Context, flow.StreamListOptions) ([]*flow.Stream, error) {
+	return nil, nil
+}
+
+func (r *readableFlowStore) CountStreams(context.Context, flow.StreamListOptions) (int, error) {
+	return 0, nil
+}
+
+// TestBuildPipelineDropRecorder_PluginDrop_ExistingStream_NoInsert pins
+// USK-1393 review F-1: a plugin DROP is recorded by RecordStep before the
+// recorder runs, so its Stream row already exists. The recorder must stamp
+// it with UpdateStream directly — an INSERT attempt fails on the primary
+// key and the store logs a spurious "flow write failed" WARN per DROP.
+// The update carries the same fields as the policy-drop fallback.
+func TestBuildPipelineDropRecorder_PluginDrop_ExistingStream_NoInsert(t *testing.T) {
+	store := &readableFlowStore{existing: map[string]bool{"stream-plugin": true}}
+	rec := buildPipelineDropRecorder(store, "live", silentLogger(), newBlockedStreamSet())
+	ctx := pipeline.WithBlockAnnotations(context.Background(), map[string]string{"plugin": "p1"})
+	rec(ctx, &envelope.Envelope{
+		StreamID:  "stream-plugin",
+		Protocol:  envelope.ProtocolGRPCWeb,
+		Direction: envelope.Send,
+		Message:   &envelope.GRPCStartMessage{Service: "pkg.Echo", Method: "Say"},
+	}, pipeline.BlockedByPlugin)
+
+	if store.saveAttempts != 0 {
+		t.Errorf("SaveStream attempts = %d, want 0 (the Stream already exists)", store.saveAttempts)
+	}
+	if len(store.updates) != 1 {
+		t.Fatalf("UpdateStream count = %d, want 1", len(store.updates))
+	}
+	u := store.updates[0]
+	if u.id != "stream-plugin" || u.update.State != "error" || u.update.BlockedBy != pipeline.BlockedByPlugin {
+		t.Errorf("UpdateStream = %q %+v, want stream-plugin state=error blocked_by=plugin", u.id, u.update)
+	}
+	if u.update.Protocol != "grpc-web" {
+		t.Errorf("UpdateStream Protocol = %q, want grpc-web (h2-overlay re-tag)", u.update.Protocol)
+	}
+	if u.update.AppendTags["plugin"] != "p1" {
+		t.Errorf("UpdateStream AppendTags = %v, want the plugin tag", u.update.AppendTags)
+	}
+}
+
+// TestBuildPipelineDropRecorder_PluginDrop_MissingStream_Saves pins that a
+// plugin DROP whose Stream row does not exist (no RecordStep wrote one)
+// still produces an audit Stream: Stream rows bypass capture_scope.
+func TestBuildPipelineDropRecorder_PluginDrop_MissingStream_Saves(t *testing.T) {
+	store := &readableFlowStore{existing: map[string]bool{}}
+	rec := buildPipelineDropRecorder(store, "live", silentLogger(), newBlockedStreamSet())
+	rec(context.Background(), &envelope.Envelope{
+		StreamID:  "stream-new",
+		Protocol:  envelope.ProtocolHTTP,
+		Direction: envelope.Send,
+		Message:   &envelope.HTTPMessage{Method: "GET", Scheme: "https"},
+	}, pipeline.BlockedByPlugin)
+
+	if len(store.saved) != 1 {
+		t.Fatalf("SaveStream count = %d, want 1", len(store.saved))
+	}
+	if st := store.saved[0]; st.ID != "stream-new" || st.State != "error" || st.BlockedBy != pipeline.BlockedByPlugin || st.Scheme != "https" {
+		t.Errorf("saved Stream = %+v, want stream-new state=error blocked_by=plugin scheme=https", st)
+	}
+}
+
+// TestBuildPipelineDropRecorder_PolicyDrop_StillSavesFirst pins that the
+// policy-drop path is unchanged: SaveStream is tried first even when the
+// store can be read.
+func TestBuildPipelineDropRecorder_PolicyDrop_StillSavesFirst(t *testing.T) {
+	store := &readableFlowStore{existing: map[string]bool{}}
+	rec := buildPipelineDropRecorder(store, "live", silentLogger(), newBlockedStreamSet())
+	rec(context.Background(), &envelope.Envelope{
+		StreamID:  "stream-policy",
+		Protocol:  envelope.ProtocolHTTP,
+		Direction: envelope.Send,
+		Message:   &envelope.HTTPMessage{Method: "GET"},
+	}, pipeline.BlockedByTargetScope)
+	if store.saveAttempts != 1 || len(store.saved) != 1 || len(store.updates) != 0 {
+		t.Errorf("save attempts=%d saved=%d updates=%d, want 1/1/0", store.saveAttempts, len(store.saved), len(store.updates))
+	}
+}

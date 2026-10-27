@@ -423,18 +423,12 @@ func (s *Server) runResendRaw(ctx context.Context, plan *resendRawPlan, p *pipel
 	postSend, action, custom, blockedBy := p.RunWithBlockedBy(ctx, sendEnv)
 	switch action {
 	case pipeline.Drop:
-		if blockedBy == pipeline.BlockedByBudget {
-			recordBudgetBlockedStream(ctx, s.flowStore.store, postSend, sendEnv.StreamID, flow.OriginResend)
-			return nil, 0, false, errBudgetExhausted
-		}
-		return nil, 0, false, errors.New("send envelope dropped by pipeline")
+		return nil, 0, false, s.resendSendDropError(ctx, postSend, sendEnv.StreamID, blockedBy, flow.OriginResend)
 	case pipeline.Respond:
 		if custom == nil {
 			return nil, 0, false, errors.New("pipeline returned Respond with nil response envelope")
 		}
-		custom.StreamID = postSend.StreamID
-		custom.Sequence = 1
-		_, _, _ = p.Run(ctx, custom)
+		// The pipeline already recorded the synthetic reply (USK-1393).
 		respMsg, ok := custom.Message.(*envelope.RawMessage)
 		if !ok {
 			return nil, 0, false, fmt.Errorf("pipeline Respond envelope has %T, expected *RawMessage", custom.Message)

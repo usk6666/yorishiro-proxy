@@ -367,6 +367,8 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
               <div className="sd-no-response">
                 {flow.blocked_by === "intercept_cancelled"
                   ? "This request was held by an intercept rule and the connection or proxy went away before it was released or dropped."
+                  : flow.blocked_by === "plugin"
+                  ? "This request was dropped by a plugin (see the plugin tag). No response was generated."
                   : flow.state === "error"
                   ? "This flow ended with an error. No response was received from the upstream server."
                   : flow.state === "active"

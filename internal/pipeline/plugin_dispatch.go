@@ -4,7 +4,10 @@
 // envelope, looks up matching hooks for the requested phase, runs each hook
 // in registration order via Engine.Dispatch, applies per-hook mutations
 // (Unchanged / RawOnly / MessageOnly / Both — RFC §9.3 D4), and short-
-// circuits the chain on the first DROP / RESPOND.
+// circuits the chain on the first DROP / RESPOND. A DROP / RESPOND Result
+// carries the plugin identity tags and asks RunDetailed to record the
+// stopped envelope and the plugin's response (Result.Record, USK-1393); a
+// DROP is attributed blocked_by="plugin".
 //
 // The plugin protocol vocabulary is intentionally distinct from
 // envelope.Protocol (USK-665 surface.go). The dispatcher is the bridge: it
@@ -21,6 +24,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
@@ -215,13 +220,23 @@ func (d *pluginDispatcher) dispatch(ctx context.Context, env *envelope.Envelope,
 		}
 		switch outcome.Action {
 		case pluginv2.ActionDrop:
-			return Result{Action: Drop}
+			return Result{
+				Action:      Drop,
+				BlockedBy:   BlockedByPlugin,
+				Record:      true,
+				Annotations: pluginOutcomeTags(hook, phase),
+			}
 		case pluginv2.ActionRespond:
 			if replacement := d.receiveReplacement(ctx, current, outcome.Respond); replacement != nil {
 				releaseDroppedBody(env, replacement)
 				return Result{Envelope: replacement}
 			}
-			return Result{Action: Respond, Response: d.buildRespondEnvelope(current, outcome.Respond)}
+			return Result{
+				Action:      Respond,
+				Response:    d.buildRespondEnvelope(current, outcome.Respond),
+				Record:      true,
+				Annotations: pluginOutcomeTags(hook, phase),
+			}
 		}
 		// ActionContinue: apply mutation and pass the resulting envelope to
 		// the next hook (and ultimately downstream Steps).
@@ -232,6 +247,26 @@ func (d *pluginDispatcher) dispatch(ctx context.Context, env *envelope.Envelope,
 	}
 	releaseDroppedBody(env, current)
 	return Result{Envelope: current}
+}
+
+// Stream tags naming the plugin hook that ended a Pipeline Run with DROP /
+// RESPOND (USK-1393). The plugin name is a tag, not part of blocked_by:
+// blocked_by stays a closed enum the query tool can filter on exactly.
+const (
+	tagPlugin      = "plugin"
+	tagPluginHook  = "plugin_hook"
+	tagPluginPhase = "plugin_phase"
+)
+
+// pluginOutcomeTags returns the Result.Annotations identifying the hook
+// whose DROP / RESPOND ended the chain: its plugin name, its
+// "<protocol>.<event>" (RFC-001 section 9.3 hook identity) and its phase.
+func pluginOutcomeTags(hook pluginv2.Hook, phase pluginv2.Phase) map[string]string {
+	return map[string]string{
+		tagPlugin:      hook.PluginName,
+		tagPluginHook:  hook.Protocol + "." + hook.Event,
+		tagPluginPhase: string(phase),
+	}
 }
 
 // releaseDroppedBody applies the session's substituted-envelope rule
@@ -476,15 +511,20 @@ func httpRespondMessage(p *pluginv2.HTTPRespondPayload) *envelope.HTTPMessage {
 // protocol family, so the payload reaching this function is one the
 // responding Layer can render: action.RESPOND_GRPC on grpc / grpc-web
 // hooks, action.RESPOND on http / ws hooks.
+//
+// The response is a new message, not the request answered in place: it
+// gets its own FlowID and Context.Synthetic=true, so RecordStep stores it
+// as its own Receive row marked metadata synthetic="true" (USK-1393).
 func (d *pluginDispatcher) buildRespondEnvelope(env *envelope.Envelope, payload *pluginv2.RespondAction) *envelope.Envelope {
 	resp := &envelope.Envelope{
 		StreamID:  env.StreamID,
-		FlowID:    env.FlowID,
+		FlowID:    uuid.NewString(),
 		Sequence:  env.Sequence + 1,
 		Direction: envelope.Receive,
 		Protocol:  env.Protocol,
 		Context:   env.Context,
 	}
+	resp.Context.Synthetic = true
 	switch {
 	case payload == nil:
 		return resp

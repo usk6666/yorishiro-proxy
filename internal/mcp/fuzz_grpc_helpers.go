@@ -1106,20 +1106,14 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	endEnv, recvData, _, responded, err := s.runResendGRPCDispatch(rtCtx, variantPlan, p, flow.OriginFuzz)
-	// USK-1371: a plugin Drop / Respond on the Start envelope exits the
-	// pipeline before RecordStep opens the Stream and carries no
-	// blocked_by attribution, so nothing is recorded. Blank the ID rather
-	// than return one that names no Stream.
-	if responded || errors.Is(err, errSendDroppedByPipeline) {
-		row.StreamID = ""
-	}
+	endEnv, recvData, _, err := s.runResendGRPCDispatch(rtCtx, variantPlan, p, flow.OriginFuzz)
+	// USK-1393: a plugin Drop / Respond on the Start envelope is recorded
+	// by the pipeline, so row.StreamID names a Stream on every path.
 	// USK-1347 (parity with fuzz_http / fuzz_ws): fuzz_grpc bypasses
 	// session.RunSession, so the per-variant Stream created by RecordStep
 	// must be finalised here (State + Duration + user tag, USK-1362) or
 	// it stays State="active" forever. Use the parent ctx (not rtCtx) so
 	// the terminal UPDATE lands even when the per-variant timeout expired.
-	// row.StreamID: finalize no-ops on the blanked ID.
 	finalizeResendStream(ctx, s.flowStore.store, row.StreamID, tag, err)
 	if err != nil {
 		return row, 0, nil, err

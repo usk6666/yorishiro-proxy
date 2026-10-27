@@ -61,14 +61,57 @@ import (
 // non-empty fields (USK-818).
 var errBudgetExhausted = errors.New("request blocked: budget exhausted")
 
-// errSendDroppedByPipeline is returned by the resend_http / fuzz_http
-// exchanges and the shared gRPC dispatch (runResendGRPCDispatch) when the
-// Send-side pipeline drops the envelope WITHOUT a blocked_by attribution
-// (a plugin Drop). Nothing is recorded for such a drop — RecordStep never
-// ran and the live path records no audit row for an unlabelled Drop
-// either — so callers match it with errors.Is to blank the stream_id they
-// would otherwise return (USK-1371, USK-1375).
+// errSendDroppedByPipeline is returned by the resend / fuzz exchanges
+// (resend_http, fuzz_http, the shared gRPC dispatch runResendGRPCDispatch,
+// resend_raw, fuzz_raw) when the Send-side pipeline drops the envelope for
+// any reason other than the budget — in practice a plugin Drop. The
+// pipeline recorded the dropped send itself (USK-1393), and
+// resendSendDropError stamped blocked_by="plugin" on its Stream.
 var errSendDroppedByPipeline = errors.New("send envelope dropped by pipeline")
+
+// resendSendDropError handles a Send-side pipeline Drop in a resend / fuzz
+// dispatch and returns the error the dispatch reports:
+//
+//   - blocked_by="budget": BudgetStep stopped the send before RecordStep;
+//     a metadata-only audit Stream is written (recordBudgetBlockedStream)
+//     and errBudgetExhausted returned.
+//   - blocked_by="plugin": a plugin DROP. RunDetailed already recorded
+//     the send on streamID (USK-1393), so only the attribution is written
+//     onto that Stream — mirroring the live path's OnPipelineDrop
+//     fallback. finalizeResendStream later sets state="error".
+//   - anything else: errSendDroppedByPipeline, nothing written.
+func (s *Server) resendSendDropError(ctx context.Context, env *envelope.Envelope, streamID, blockedBy string, origin flow.Origin) error {
+	switch blockedBy {
+	case pipeline.BlockedByBudget:
+		recordBudgetBlockedStream(ctx, s.flowStore.store, env, streamID, origin)
+		return errBudgetExhausted
+	case pipeline.BlockedByPlugin:
+		markPluginDroppedStream(ctx, s.flowStore.store, streamID)
+	}
+	return errSendDroppedByPipeline
+}
+
+// markPluginDroppedStream stamps state="error", blocked_by="plugin" on
+// the Stream RecordStep created for a plugin-dropped resend / fuzz send.
+// The write is detached from the handler ctx and bounded, like
+// recordBlockedStream; a failure is logged at Warn (best-effort
+// observability — the dispatch still reports the drop).
+func markPluginDroppedStream(ctx context.Context, store flow.StreamWriter, streamID string) {
+	if store == nil || streamID == "" {
+		return
+	}
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := store.UpdateStream(recordCtx, streamID, flow.StreamUpdate{
+		State:     "error",
+		BlockedBy: pipeline.BlockedByPlugin,
+	}); err != nil {
+		slog.WarnContext(ctx, "resend: plugin-drop attribution failed",
+			"stream_id", streamID,
+			"error", err,
+		)
+	}
+}
 
 // budgetCheckResendUpgrade is the WS / SSE / raw equivalent of the
 // pipeline-driven BudgetStep check. The resend_ws handler synthesises a
