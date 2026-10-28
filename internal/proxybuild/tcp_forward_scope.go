@@ -9,6 +9,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 )
 
 // TCP forward TargetScope gate (USK-1161).
@@ -25,6 +26,11 @@ import (
 //     new connection is checked before client TLS termination and before
 //     the upstream dial. No byte, SYN, ClientHello or h2 preface reaches a
 //     denied target.
+//
+// A refused connection — by the accept-time check or by the registry's
+// admission re-check below — is answered (rejectTCPForwardConn) and then
+// recorded as one State="error", BlockedBy="target_scope" Stream
+// (recordTCPForwardScopeRefusal, USK-1403).
 //
 // An admitted connection is registered in the live-connection registry
 // (USK-1160) with the same predicate, so a policy change that no longer
@@ -149,19 +155,19 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		"via", tcpForwardScopeVia,
 	)
 
-	if allowed, reason := tcpForwardScopeCheck(scope, entry.target, upstreamTLS, tcpForwardProtocol(entry.fc)); !allowed {
-		logger.Info("tcp forward target blocked by scope", "reason", reason)
-		rejectTCPForwardConn(entry, conn, tcpForwardDenyResponse, logger)
-		return ctx, func() {}, false
-	}
-
 	// Mint the conn ID here and carry it on ctx so the live-connection
 	// registry's close / revoke logs, the handlers' logs, recorded flows
-	// and a rate-limit refusal's Stream share one conn_id (the handlers
-	// and the refusal recorder reuse it via connector.ConnIDOrGenerate,
-	// and the stack builders adopt it).
+	// and a scope or rate-limit refusal's Stream share one conn_id (the
+	// handlers and the refusal recorder reuse it via
+	// connector.ConnIDOrGenerate, and the stack builders adopt it).
 	connID := connector.GenerateConnID()
 	ctx = connector.ContextWithConnID(ctx, connID)
+
+	if allowed, reason := tcpForwardScopeCheck(scope, entry.target, upstreamTLS, tcpForwardProtocol(entry.fc)); !allowed {
+		logger.Info("tcp forward target blocked by scope", "conn_id", connID, "reason", reason)
+		recordTCPForwardScopeRefusal(ctx, stack, entry, conn, reason, logger)
+		return ctx, func() {}, false
+	}
 
 	if tcpForwardRateLimited(ctx, stack, entry, conn, logger) {
 		return ctx, func() {}, false
@@ -183,7 +189,7 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 	if err != nil {
 		logger.Info("tcp forward target blocked by scope (policy changed during admission)", "error", err)
 		release()
-		rejectTCPForwardConn(entry, conn, tcpForwardDenyResponse, logger)
+		recordTCPForwardScopeRefusal(ctx, stack, entry, conn, connector.AdmissionRaceReason(err), logger)
 		return ctx, func() {}, false
 	}
 	// USK-1278 review S-1: the caller defers this for the whole forward
@@ -194,6 +200,40 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		release()
 		buildCfg.ReleaseConnectionState(connID)
 	}, true
+}
+
+// recordTCPForwardScopeRefusal answers a scope-refused forward connection
+// (rejectTCPForwardConn with the canned 403) and then records it as one
+// State="error", BlockedBy="target_scope" Stream (USK-1403) — the same
+// shape as a rate-limit refusal of the forward (tcpForwardRateLimited),
+// without the rate_limit_* tags. reason is the scope check's reason, or
+// connector.AdmissionRaceReason's for a Register re-check refusal.
+func recordTCPForwardScopeRefusal(ctx context.Context, stack *Stack, entry *tcpForwardEntry, conn net.Conn, reason string, logger *slog.Logger) {
+	clientAddr := conn.RemoteAddr().String()
+	rejectTCPForwardConn(entry, conn, tcpForwardDenyResponse, logger)
+
+	host, _, err := tcpForwardTargetHostPort(entry.target)
+	if err != nil {
+		host = entry.target
+	}
+	if reason == "" {
+		reason = "blocked by target scope"
+	}
+	stack.blockedRecorder.record(ctx, blockedConn{
+		Protocol:      tcpForwardRefusalProtocol(entry.fc),
+		Scheme:        tcpForwardClientScheme(entry.fc),
+		ClientAddr:    clientAddr,
+		ScopeHost:     host,
+		BlockedBy:     pipeline.BlockedByTargetScope,
+		FailureReason: pipeline.BlockedByTargetScope,
+		Tags: map[string]string{
+			"via":              tcpForwardScopeVia,
+			"target":           entry.target,
+			"forward_port":     entry.port,
+			"forward_protocol": tcpForwardDeclaredProtocol(entry.fc),
+			"reason":           reason,
+		},
+	})
 }
 
 // rejectTCPForwardConn answers a refused forward connection and closes

@@ -12,10 +12,10 @@ func TestRateLimitRefusalResponse_MatchesGates(t *testing.T) {
 	rl := NewRateLimiter()
 	rl.SetPolicyLimits(RateLimitConfig{MaxRequestsPerSecond: 0.001})
 	cfg := CONNECTHandlerConfig{RateLimiter: rl}
-	if got, _ := connectPolicyReject(cfg, "burst.test:443", false, discardLogger()); got != nil {
+	if got, _, _ := connectPolicyReject(cfg, "burst.test:443", false, discardLogger()); got != nil {
 		t.Fatalf("first CONNECT denied: %q", got)
 	}
-	connectBytes, _ := connectPolicyReject(cfg, "burst.test:443", false, discardLogger())
+	connectBytes, _, _ := connectPolicyReject(cfg, "burst.test:443", false, discardLogger())
 	if connectBytes == nil {
 		t.Fatal("second CONNECT admitted under a burst-1 limit")
 	}
