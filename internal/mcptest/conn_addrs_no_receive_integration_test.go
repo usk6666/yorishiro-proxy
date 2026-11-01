@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	gohttp "net/http"
@@ -84,6 +85,18 @@ func queryConnAddrsEntries(t *testing.T, h *mcptest.Harness, filter map[string]a
 // server_addr.
 func settledWithAddr(e connAddrsEntry, d connAddrsDetail) bool {
 	return e.State != "active" && d.ConnInfo.ServerAddr != ""
+}
+
+// queryFlowRaw returns the query("flow") result as a generic map, for
+// fields (failure_reason, tags) the typed connAddrsDetail does not carry.
+func queryFlowRaw(t *testing.T, h *mcptest.Harness, id string) map[string]any {
+	t.Helper()
+	res := h.MustOK(t, "query", map[string]any{"resource": "flow", "id": id})
+	var m map[string]any
+	if err := json.Unmarshal([]byte(res.Text), &m); err != nil {
+		t.Fatalf("decode query(flow %s): %v (text=%q)", id, err, res.Text)
+	}
+	return m
 }
 
 func assertNoReceiveStream(t *testing.T, e connAddrsEntry, d connAddrsDetail, wantState, wantServer, wantProxy string) {
@@ -342,15 +355,30 @@ func TestE2E_ConnAddrs_NoReceive_H2RedialFails_KeepsEmpty(t *testing.T) {
 	cancel()
 	time.Sleep(200 * time.Millisecond)
 
-	// The client may retry a refused stream several times; every attempt
-	// is a Stream that never had an upstream socket. Bound the wait.
-	client.Timeout = 3 * time.Second
-	if resp, err := client.Get(up.URL + "/nr-h2-redial-two"); err == nil {
+	// USK-1404: a failed redial is a proxy-local failure, so the client
+	// stream is reset with CANCEL (not the retryable REFUSED_STREAM) and
+	// the request fails promptly — well before Go's h2 transport's first
+	// 1 s retry backoff and far before the client timeout.
+	client.Timeout = 10 * time.Second
+	start := time.Now()
+	resp, err := client.Get(up.URL + "/nr-h2-redial-two")
+	elapsed := time.Since(start)
+	if err == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		if resp.StatusCode == gohttp.StatusOK {
-			t.Fatalf("GET 2 succeeded, want a failed redial")
-		}
+		t.Fatalf("GET 2 returned status %d, want the client stream reset after the failed redial", resp.StatusCode)
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Errorf("GET 2 err = %v after %v, want a stream reset, not a client timeout", err, elapsed)
+	}
+	// Secondary oracle. 800 ms sits below the 1 s first retry backoff of
+	// Go's h2 transport, so a single REFUSED_STREAM retry already crosses
+	// it, while the real path has ample headroom even under -race: the
+	// redial dials a closed loopback port, which fails at once. The
+	// exactly-one-stream check below is the primary no-retry-loop oracle.
+	if elapsed >= 800*time.Millisecond {
+		t.Errorf("GET 2 took %v (err=%v), want < 800ms (no REFUSED_STREAM retry loop)", elapsed, err)
 	}
 
 	var seen int
@@ -376,12 +404,25 @@ func TestE2E_ConnAddrs_NoReceive_H2RedialFails_KeepsEmpty(t *testing.T) {
 		t.Fatal("no stream recorded for the request whose redial failed")
 	}
 	time.Sleep(200 * time.Millisecond)
+	seen = 0
 	for _, e := range queryConnAddrsEntries(t, h, nil) {
 		if !strings.Contains(e.URL, "/nr-h2-redial-two") {
 			continue
 		}
+		seen++
 		d := queryConnAddrsDetail(t, h, e.ID)
 		assertNoReceiveStream(t, e, d, "error", "", "")
+		raw := queryFlowRaw(t, h, e.ID)
+		if fr, _ := raw["failure_reason"].(string); fr != "" {
+			t.Errorf("stream %s failure_reason = %q, want \"\" (proxy-local redial failure, not an upstream refusal)", e.ID, fr)
+		}
+		tags, _ := raw["tags"].(map[string]any)
+		if te, _ := tags["error"].(string); !strings.Contains(te, "redial") {
+			t.Errorf("stream %s tags.error = %q, want the redial failure", e.ID, te)
+		}
+	}
+	if seen != 1 {
+		t.Errorf("recorded %d streams for /nr-h2-redial-two, want exactly 1 (no client retry loop)", seen)
 	}
 
 	e1, d1 := waitNoReceiveStream(t, h, nil, urlPathMatch("/nr-h2-redial-one"), settledWithAddr)

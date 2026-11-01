@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,26 @@ import (
 // USK-991 extends the same guard recursively: a previously redialed
 // Layer that itself goes stale must trigger a 2nd (and Nth) fresh dial,
 // not be returned as-is.
+
+// selectUpstreamForDial is a test-only shorthand for
+// selectUpstreamForDialWithTrigger with dialTriggerReactive that drops
+// the dial error, for tests that only assert which Layer is selected.
+// Production code (openUpstreamStreamWithRetryFn) calls
+// selectUpstreamForDialWithTrigger directly because it needs the dial
+// error (USK-1404).
+func selectUpstreamForDial(
+	dctx context.Context,
+	target string,
+	upstreamH2 *http2.Layer,
+	chain *redialChain,
+	dialFresh redialFunc,
+	logger *slog.Logger,
+) *http2.Layer {
+	l, _ := selectUpstreamForDialWithTrigger(
+		dctx, target, upstreamH2, chain, dialFresh, dialTriggerReactive, logger,
+	)
+	return l
+}
 
 // dialPeerH2Layer constructs a real *http2.Layer in ClientRole at one end
 // of a net.Pipe. The peer end is returned so the test can close it (to
