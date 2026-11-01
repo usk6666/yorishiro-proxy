@@ -194,6 +194,11 @@ func registerFlags(fs *flag.FlagSet, cfg *config.Config) *serverFlags {
 			"    paths outside it are rejected. Must be a dedicated directory used only for exports: MCP callers\n"+
 			"    can overwrite any file in it (default ~/.yorishiro-proxy/exports) (env: YP_EXPORT_DIR)")
 
+	fs.Func("mcp-tools", "MCP tool allowlist", func(v string) error {
+		cfg.MCPTools = config.ParseMCPTools(v)
+		return nil
+	})
+
 	// -open-browser enables auto-opening the WebUI; default is disabled.
 	fs.BoolVar(&f.openBrowser, "open-browser", false, "open WebUI in browser when HTTP MCP starts (env: YP_OPEN_BROWSER)")
 

@@ -263,6 +263,9 @@ type Config struct {
 	// CLI flag: -export-dir, env: YP_EXPORT_DIR.
 	ExportDir string `json:"-"`
 
+	// MCPTools is the MCP tool allowlist.
+	MCPTools []string `json:"-"`
+
 	// SafetyFilterEnabled controls whether the SafetyFilter engine is active.
 	// This can be set via CLI flag (-safety-filter) or environment variable
 	// (YP_SAFETY_FILTER_ENABLED). When explicitly set, it overrides the config
