@@ -91,13 +91,16 @@ type ExportStream struct {
 	// round-trip unchanged. Empty on import is preserved as empty (no
 	// URL-scheme backfill) — wire-recorded value can legitimately be
 	// empty (e.g., raw TCP).
-	Scheme     string            `json:"scheme,omitempty"`
-	State      string            `json:"state"`
-	Timestamp  string            `json:"timestamp"`
-	DurationMs int64             `json:"duration_ms"`
-	Tags       map[string]string `json:"tags,omitempty"`
-	ConnInfo   *ExportConnInfo   `json:"conn_info,omitempty"`
-	BlockedBy  string            `json:"blocked_by,omitempty"`
+	Scheme string `json:"scheme,omitempty"`
+	State  string `json:"state"`
+	// FailureReason classifies an errored stream (Stream.FailureReason).
+	// Omitted when empty so older exports round-trip unchanged.
+	FailureReason string            `json:"failure_reason,omitempty"`
+	Timestamp     string            `json:"timestamp"`
+	DurationMs    int64             `json:"duration_ms"`
+	Tags          map[string]string `json:"tags,omitempty"`
+	ConnInfo      *ExportConnInfo   `json:"conn_info,omitempty"`
+	BlockedBy     string            `json:"blocked_by,omitempty"`
 	// Origin classifies how the source Stream came into existence
 	// ('proxy' | 'resend' | 'fuzz'). Omitted from the JSONL line when
 	// empty so older exports continue to round-trip unchanged; on import
@@ -220,20 +223,21 @@ func ExportStreams(ctx context.Context, store Store, w io.Writer, opts ExportOpt
 // streamToExport converts a Stream to its export representation.
 func streamToExport(s *Stream) *ExportStream {
 	es := &ExportStream{
-		ID:           s.ID,
-		ConnID:       s.ConnID,
-		Protocol:     s.Protocol,
-		Scheme:       s.Scheme,
-		State:        s.State,
-		Timestamp:    s.Timestamp.UTC().Format(time.RFC3339Nano),
-		DurationMs:   s.Duration.Milliseconds(),
-		Tags:         s.Tags,
-		BlockedBy:    s.BlockedBy,
-		Origin:       string(s.Origin),
-		ListenerName: s.ListenerName,
-		SendMs:       s.SendMs,
-		WaitMs:       s.WaitMs,
-		ReceiveMs:    s.ReceiveMs,
+		ID:            s.ID,
+		ConnID:        s.ConnID,
+		Protocol:      s.Protocol,
+		Scheme:        s.Scheme,
+		State:         s.State,
+		FailureReason: s.FailureReason,
+		Timestamp:     s.Timestamp.UTC().Format(time.RFC3339Nano),
+		DurationMs:    s.Duration.Milliseconds(),
+		Tags:          s.Tags,
+		BlockedBy:     s.BlockedBy,
+		Origin:        string(s.Origin),
+		ListenerName:  s.ListenerName,
+		SendMs:        s.SendMs,
+		WaitMs:        s.WaitMs,
+		ReceiveMs:     s.ReceiveMs,
 	}
 	if s.ConnInfo != nil {
 		es.ConnInfo = &ExportConnInfo{
