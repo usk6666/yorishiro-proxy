@@ -953,6 +953,10 @@ type ProxyConfig struct {
 	// auto_release; WS=8s, SSE=8s, gRPC=60s per-protocol). USK-855
 	// (USK-851 follow-up B).
 	InterceptQueue *InterceptQueueConfig `json:"intercept_queue,omitempty"`
+
+	// FlowSink streams every committed Stream / Flow record to rotating
+	// JSONL files for an off-host consumer (USK-1119). See flow_sink.go.
+	FlowSink *FlowSinkConfig `json:"flow_sink,omitempty"`
 }
 
 // SafetyFilterConfig holds the SafetyFilter engine configuration.
@@ -1078,6 +1082,9 @@ func (c *ProxyConfig) Validate() error {
 		return err
 	}
 	if err := validateHostTLS(c.HostTLS); err != nil {
+		return err
+	}
+	if err := c.FlowSink.Validate(); err != nil {
 		return err
 	}
 	return nil

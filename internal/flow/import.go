@@ -23,6 +23,11 @@ const (
 	ConflictSkip ConflictPolicy = "skip"
 	// ConflictReplace deletes the existing stream and re-imports.
 	ConflictReplace ConflictPolicy = "replace"
+	// ConflictMerge upserts the stream from each line's snapshot (the
+	// latest line wins) and inserts the line's flows whose IDs are not
+	// stored yet. Re-importing the same lines is a no-op, which makes it
+	// the policy for ingesting flow sink files.
+	ConflictMerge ConflictPolicy = "merge"
 )
 
 // ImportOptions configures stream import behavior.
@@ -52,6 +57,9 @@ type ImportResult struct {
 	Imported int `json:"imported"`
 	// Skipped is the number of streams skipped due to ID conflicts.
 	Skipped int `json:"skipped"`
+	// Merged is the number of lines merged into an already stored stream
+	// (ConflictMerge only).
+	Merged int `json:"merged,omitempty"`
 	// Errors is the number of streams that failed to import.
 	Errors int `json:"errors"`
 	// ErrorDetails contains per-line error descriptions. Only populated when

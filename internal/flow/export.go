@@ -72,10 +72,28 @@ type ExportOptions struct {
 }
 
 // ExportRecord represents a single JSONL line in the export format.
+//
+// The flow sink writes the same record with the superset fields below
+// set; export_flows leaves them empty, so its lines are unchanged.
 type ExportRecord struct {
-	Stream  *ExportStream `json:"stream"`
+	Stream  *ExportStream `json:"stream,omitempty"`
 	Flows   []*ExportFlow `json:"flows"`
 	Version string        `json:"version"`
+
+	// Event is the flow sink event kind (SinkEvent): "stream_created",
+	// "stream_updated", "flow_saved" or "gap". Empty on export_flows lines.
+	Event string `json:"event,omitempty"`
+	// Seq is the flow sink's per-run event sequence number, starting at 1.
+	// Every committed write the sink observes takes the next number, so a
+	// number missing between two lines is accounted for by a "gap" line.
+	Seq uint64 `json:"seq,omitempty"`
+	// RunID identifies the sink instance (one per process) that wrote the
+	// line; Seq is only meaningful within one RunID.
+	RunID string `json:"run_id,omitempty"`
+	// EmittedAt is when the sink wrote the line (RFC 3339, UTC).
+	EmittedAt string `json:"emitted_at,omitempty"`
+	// Gap is set on "gap" lines only.
+	Gap *SinkGap `json:"gap,omitempty"`
 }
 
 // ExportStream is the JSON-serializable representation of a Stream.
@@ -154,6 +172,16 @@ type ExportFlow struct {
 	// exports.
 	WireLevel string            `json:"wire_level,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+
+	// The fields below are set only by the flow sink, on an event too
+	// large for its queue: the body / raw bytes are left out and their
+	// size and SHA-256 are recorded instead.
+	BodyOmitted     bool   `json:"body_omitted,omitempty"`
+	BodySize        *int64 `json:"body_size,omitempty"`
+	BodySHA256      string `json:"body_sha256,omitempty"`
+	RawBytesOmitted bool   `json:"raw_bytes_omitted,omitempty"`
+	RawBytesSize    *int64 `json:"raw_bytes_size,omitempty"`
+	RawBytesSHA256  string `json:"raw_bytes_sha256,omitempty"`
 }
 
 // ExportStreams exports streams matching the filter to a JSONL writer.
