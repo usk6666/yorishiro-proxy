@@ -2325,8 +2325,8 @@ func TestRecordStep_FlowRawBytes_SpillPath_FullCapture(t *testing.T) {
 // config.MaxBodySize) kicks in when the total wire bytes exceed it. The
 // network passthrough path is independent (the Channel write streams from
 // RawBuffer without applying this cap), so the test only validates the BLOB
-// truncation. No Anomaly is emitted by RecordStep because the wire bytes
-// were complete on the wire.
+// truncation. The truncation mark (USK-1408) is pinned by
+// TestRecordStep_RecordCap_RawTruncationMarked.
 func TestRecordStep_FlowRawBytes_SpillPath_BlobTruncated(t *testing.T) {
 	w := &mockWriter{}
 	const cap = 32

@@ -1356,17 +1356,22 @@ func (s *RecordStep) applyWireEncode(ctx context.Context, current *envelope.Enve
 // is materialized via env.WireBytes(ctx) and capped at the BLOB-projection
 // size. The cap intentionally differs from the network passthrough — the
 // relayed wire bytes are always complete (the Channel send path streams
-// from the buffer); only the BLOB-projected snapshot is truncated. A
-// truncation here is logged but not surfaced as an Anomaly because the
-// underlying wire fidelity is preserved on the wire.
+// from the buffer); only the BLOB-projected snapshot is truncated.
+//
+// USK-1408: the same record cap (max_record_body_size) also bounds an
+// HTTPMessage's in-memory Raw. Whenever RawBytes is cut it keeps the
+// leading bytes and the flow carries metadata
+// http_anomaly_raw_body_truncated, so a truncated recording is never
+// mistaken for the complete wire image.
 func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope) *flow.Flow {
+	rawBytes, rawCut := s.projectRawBytes(ctx, env)
 	fl := &flow.Flow{
 		ID:        env.FlowID,
 		StreamID:  env.StreamID,
 		Sequence:  env.Sequence,
 		Direction: env.Direction.String(),
 		Timestamp: time.Now(),
-		RawBytes:  s.projectRawBytes(ctx, env),
+		RawBytes:  rawBytes,
 		Metadata:  baseFlowMetadata(env),
 		// USK-889: project EnvelopeContext.WireLevel onto the persisted
 		// Flow so the schemaV14 wire_level column distinguishes the
@@ -1380,44 +1385,7 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 
 	switch m := env.Message.(type) {
 	case *envelope.HTTPMessage:
-		fl.Method = m.Method
-		fl.StatusCode = m.Status
-		// USK-788: project the HTTPMessage's wire-version (set by the
-		// producing Layer — http1.channel for HTTP/1.x, httpaggregator
-		// for HTTP/2) onto the persisted Flow so MCP query consumers and
-		// downstream filters (USK-792) can branch on the canonical value
-		// without re-parsing raw bytes or guessing from ALPN.
-		fl.HTTPVersion = m.HTTPVersion
-		s.projectHTTPBody(ctx, env, m, fl)
-
-		if m.Path != "" || m.Authority != "" {
-			// USK-1139: m.Path is the wire-form path on every protocol;
-			// URLFromWirePath keeps those bytes verbatim in Flow.URL
-			// (a plain &url.URL{Path: ...} would re-escape them).
-			fl.URL = envelope.URLFromWirePath(m.Scheme, m.Authority, m.Path, m.RawQuery)
-		}
-
-		if hdrs := keyValuesToMap(m.Headers); hdrs != nil {
-			fl.Headers = hdrs
-		}
-		if trlrs := keyValuesToMap(m.Trailers); trlrs != nil {
-			fl.Trailers = trlrs
-		}
-		// USK-849: project HTTPMessage.Anomalies into per-type Metadata
-		// keys so MCP `query flow` analysts can see typed protocol
-		// anomalies (HTTP/1.x parser anomalies, HTTP/2 receive-side
-		// non-conformance, HTTP/2 send-side strips from USK-840).
-		// Mirrors the gRPC/SSE projection (USK-659 / USK-656). The
-		// helper returns "" for an unknown AnomalyType so callers know
-		// to fall back to a stable namespaced default — never silently
-		// drop, since future producers must still be observable.
-		for _, a := range m.Anomalies {
-			key := httpAnomalyMetadataKey(a.Type)
-			if key == "" {
-				continue
-			}
-			fl.Metadata[key] = a.Detail
-		}
+		s.projectHTTPMessage(ctx, env, m, fl, rawCut)
 	case *envelope.RawMessage:
 		fl.Body = m.Bytes
 	case *envelope.WSMessage:
@@ -1486,47 +1454,123 @@ func projectTLSHandshake(m *envelope.TLSHandshakeMessage, fl *flow.Flow) {
 	}
 }
 
+// projectHTTPMessage projects an HTTPMessage onto fl. rawCut reports
+// whether projectRawBytes cut fl.RawBytes at the record cap.
+func (s *RecordStep) projectHTTPMessage(ctx context.Context, env *envelope.Envelope, m *envelope.HTTPMessage, fl *flow.Flow, rawCut bool) {
+	fl.Method = m.Method
+	fl.StatusCode = m.Status
+	// USK-788: project the HTTPMessage's wire-version (set by the
+	// producing Layer — http1.channel for HTTP/1.x, httpaggregator
+	// for HTTP/2) onto the persisted Flow so MCP query consumers and
+	// downstream filters (USK-792) can branch on the canonical value
+	// without re-parsing raw bytes or guessing from ALPN.
+	fl.HTTPVersion = m.HTTPVersion
+	s.projectHTTPBody(ctx, env, m, fl)
+
+	if m.Path != "" || m.Authority != "" {
+		// USK-1139: m.Path is the wire-form path on every protocol;
+		// URLFromWirePath keeps those bytes verbatim in Flow.URL
+		// (a plain &url.URL{Path: ...} would re-escape them).
+		fl.URL = envelope.URLFromWirePath(m.Scheme, m.Authority, m.Path, m.RawQuery)
+	}
+
+	if hdrs := keyValuesToMap(m.Headers); hdrs != nil {
+		fl.Headers = hdrs
+	}
+	if trlrs := keyValuesToMap(m.Trailers); trlrs != nil {
+		fl.Trailers = trlrs
+	}
+	// USK-849: project HTTPMessage.Anomalies into per-type Metadata
+	// keys so MCP `query flow` analysts can see typed protocol
+	// anomalies (HTTP/1.x parser anomalies, HTTP/2 receive-side
+	// non-conformance, HTTP/2 send-side strips from USK-840).
+	// Mirrors the gRPC/SSE projection (USK-659 / USK-656). The
+	// helper returns "" for an unknown AnomalyType so callers know
+	// to fall back to a stable namespaced default — never silently
+	// drop, since future producers must still be observable.
+	for _, a := range m.Anomalies {
+		key := httpAnomalyMetadataKey(a.Type)
+		if key == "" {
+			continue
+		}
+		fl.Metadata[key] = a.Detail
+	}
+	// USK-1408: mark a record-cap cut of the raw bytes (after the parser
+	// anomalies, so a parser-side capture cut under the same key is kept).
+	if rawCut {
+		markRecordRawTruncated(fl, s.recordCap())
+	}
+}
+
 // projectRawBytes returns the wire bytes for the Flow.RawBytes BLOB
-// projection. When env.RawBuffer is nil this is just env.Raw (zero-copy).
+// projection. When env.RawBuffer is nil this is env.Raw (zero-copy; a cut
+// is a prefix slice).
 // When env.RawBuffer is non-nil (USK-772 disk-spill path) the helper calls
 // env.WireBytes(ctx) which stitches header (Raw) + body (RawBuffer.Bytes).
-// The materialized result is capped at the configured BLOB cap; truncation
-// is logged at Warn so the operator can correlate a truncated BLOB with
-// the captured-bytes count, but does NOT surface as a flow Anomaly because
-// the wire passthrough was complete (the Channel write path streams from
-// the same RawBuffer without applying this cap).
-func (s *RecordStep) projectRawBytes(ctx context.Context, env *envelope.Envelope) []byte {
+// The materialized result is capped at the record cap (recordCap). For an
+// HTTPMessage the in-memory env.Raw is capped too (USK-1408), so
+// max_record_body_size bounds the recorded raw bytes on both paths; other
+// protocols' in-memory Raw is left as-is (their bodies are not bounded by
+// this knob either). The cut keeps the leading bytes and reports
+// truncated=true so envelopeToFlow can mark the flow; the wire passthrough
+// is unaffected (the Channel write path never reads this projection).
+func (s *RecordStep) projectRawBytes(ctx context.Context, env *envelope.Envelope) (raw []byte, truncated bool) {
 	if env == nil {
-		return nil
+		return nil, false
 	}
-	if env.RawBuffer == nil {
-		return env.Raw
+	wire := env.Raw
+	if env.RawBuffer != nil {
+		var err error
+		wire, err = env.WireBytes(ctx)
+		if err != nil {
+			s.logger.Warn("record step: read wire bytes from RawBuffer failed",
+				"stream_id", env.StreamID,
+				"flow_id", env.FlowID,
+				"protocol", string(env.Protocol),
+				"error", err,
+			)
+			return nil, false
+		}
+	} else if _, isHTTP := env.Message.(*envelope.HTTPMessage); !isHTTP {
+		return wire, false
 	}
-	wire, err := env.WireBytes(ctx)
-	if err != nil {
-		s.logger.Warn("record step: read wire bytes from RawBuffer failed",
-			"stream_id", env.StreamID,
-			"flow_id", env.FlowID,
-			"protocol", string(env.Protocol),
-			"error", err,
-		)
-		return nil
+	cap := s.recordCap()
+	if int64(len(wire)) <= cap {
+		return wire, false
 	}
-	cap := s.maxBodySize
-	if cap <= 0 {
-		cap = config.MaxBodySize
+	s.logger.Debug("record step: wire bytes BLOB truncated for flow projection",
+		"stream_id", env.StreamID,
+		"flow_id", env.FlowID,
+		"protocol", string(env.Protocol),
+		"captured_bytes", len(wire),
+		"cap", cap,
+	)
+	return wire[:cap], true
+}
+
+// recordCap returns the effective record cap: maxBodySize, or
+// config.MaxBodySize when unset.
+func (s *RecordStep) recordCap() int64 {
+	if s.maxBodySize > 0 {
+		return s.maxBodySize
 	}
-	if int64(len(wire)) > cap {
-		s.logger.Warn("record step: wire bytes BLOB truncated for flow projection",
-			"stream_id", env.StreamID,
-			"flow_id", env.FlowID,
-			"protocol", string(env.Protocol),
-			"captured_bytes", len(wire),
-			"cap", cap,
-		)
-		return wire[:cap]
+	return config.MaxBodySize
+}
+
+// rawTruncatedMetadataKey is the flow Metadata key under which an HTTP
+// raw-bytes truncation is recorded — the parser's capture cap
+// (AnomalyRawBodyTruncated) and the RecordStep's record cap share it.
+var rawTruncatedMetadataKey = httpAnomalyKeys[envelope.AnomalyRawBodyTruncated]
+
+// markRecordRawTruncated records that RecordStep cut fl.RawBytes at cap
+// (USK-1408). A parser-side capture truncation already recorded under the
+// same key is kept, with the record-cap note appended.
+func markRecordRawTruncated(fl *flow.Flow, cap int64) {
+	detail := "recorded raw bytes capped at " + strconv.FormatInt(cap, 10) + " bytes (max_record_body_size)"
+	if prev := fl.Metadata[rawTruncatedMetadataKey]; prev != "" {
+		detail = prev + "; " + detail
 	}
-	return wire
+	fl.Metadata[rawTruncatedMetadataKey] = detail
 }
 
 // keyValuesToMap projects an ordered KeyValue slice into the flow.Flow
@@ -1863,9 +1907,16 @@ func httpAnomalyMetadataKey(t envelope.AnomalyType) string {
 }
 
 // projectHTTPBody populates fl.Body (and BodyTruncated) from m.Body or
-// m.BodyBuffer, applying the maxBodySize cap.
+// m.BodyBuffer, applying the record cap to both (USK-1408: an in-memory
+// Body over max_record_body_size is cut too). The cut keeps the leading
+// bytes; the live message is never modified.
 func (s *RecordStep) projectHTTPBody(ctx context.Context, env *envelope.Envelope, m *envelope.HTTPMessage, fl *flow.Flow) {
 	if m.Body != nil {
+		if cap := s.recordCap(); int64(len(m.Body)) > cap {
+			fl.Body = m.Body[:cap:cap]
+			fl.BodyTruncated = true
+			return
+		}
 		fl.Body = m.Body
 		return
 	}
@@ -1882,8 +1933,8 @@ func (s *RecordStep) projectHTTPBody(ctx context.Context, env *envelope.Envelope
 		)
 		return
 	}
-	if s.maxBodySize > 0 && int64(len(b)) > s.maxBodySize {
-		fl.Body = b[:s.maxBodySize]
+	if cap := s.recordCap(); int64(len(b)) > cap {
+		fl.Body = b[:cap]
 		fl.BodyTruncated = true
 		return
 	}

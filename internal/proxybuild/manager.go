@@ -1209,6 +1209,20 @@ func (m *Manager) MaxBodySize() int64 {
 	return bc.MaxBodySize
 }
 
+// RecordMaxBodySize returns the record-only body cap (max_record_body_size,
+// USK-1408) from the bound BuildConfig. On the Live wiring path it is
+// resolver-normalised via config.ResolveMaxRecordBodySize; zero means no
+// BuildConfig was bound or a non-Live BuildConfig skipped the resolver.
+func (m *Manager) RecordMaxBodySize() int64 {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+	if bc == nil {
+		return 0
+	}
+	return bc.RecordMaxBodySize
+}
+
 // BodySpillThreshold returns the body memory→disk spill threshold from the
 // bound BuildConfig (USK-807).
 //

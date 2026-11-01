@@ -57,20 +57,20 @@ func TestSnakeCase_GoldenTable(t *testing.T) {
 }
 
 func TestConvertMessageToDict_NilEnvelope(t *testing.T) {
-	if _, err := convertMessageToDict(nil); err == nil {
+	if _, err := convertMessageToDict(nil, defaultMaxPluginBodySize); err == nil {
 		t.Fatal("expected error for nil envelope")
 	}
 }
 
 func TestConvertMessageToDict_NilMessage(t *testing.T) {
-	if _, err := convertMessageToDict(&envelope.Envelope{}); err == nil {
+	if _, err := convertMessageToDict(&envelope.Envelope{}, defaultMaxPluginBodySize); err == nil {
 		t.Fatal("expected error for nil message")
 	}
 }
 
 func TestConvertMessageToDict_UnsupportedType(t *testing.T) {
 	env := &envelope.Envelope{Message: unknownMessage{}}
-	_, err := convertMessageToDict(env)
+	_, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if !errors.Is(err, ErrUnsupportedMessageType) {
 		t.Fatalf("err = %v, want ErrUnsupportedMessageType", err)
 	}
@@ -101,7 +101,7 @@ func TestRoundTrip_HTTPMessage_NoChange(t *testing.T) {
 		},
 	}
 	env := &envelope.Envelope{Message: m, Raw: []byte("WIRE")}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestRoundTrip_WSMessage(t *testing.T) {
 		Compressed:  false,
 	}
 	env := &envelope.Envelope{Message: m, Raw: []byte("WS")}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestRoundTrip_GRPCStartMessage(t *testing.T) {
 		AcceptEncoding: []string{"gzip", "identity"},
 	}
 	env := &envelope.Envelope{Message: m}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestGRPCStart_PseudoHeadersAreNotPluginMutableKeys(t *testing.T) {
 		HTTPStatusReason: "Service Unavailable",
 	}
 	env := &envelope.Envelope{Message: m}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestRoundTrip_GRPCDataMessage(t *testing.T) {
 		EndStream:  true,
 	}
 	env := &envelope.Envelope{Message: m}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestRoundTrip_GRPCEndMessage(t *testing.T) {
 		Trailers:      []envelope.KeyValue{{Name: "trailer-key", Value: "trailer-val"}},
 	}
 	env := &envelope.Envelope{Message: m}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestRoundTrip_GRPCEndMessage(t *testing.T) {
 func TestRoundTrip_RawMessage(t *testing.T) {
 	m := &envelope.RawMessage{Bytes: []byte("raw-bytes")}
 	env := &envelope.Envelope{Message: m, Raw: []byte("raw-bytes")}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestRoundTrip_SSEMessage(t *testing.T) {
 		Retry: 5 * time.Second,
 	}
 	env := &envelope.Envelope{Message: m}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -398,9 +398,9 @@ func TestRoundTrip_SSEMessage(t *testing.T) {
 }
 
 func TestHTTPBody_OversizedReturnsErr(t *testing.T) {
-	m := &envelope.HTTPMessage{Body: make([]byte, maxPluginBodySize+1)}
+	m := &envelope.HTTPMessage{Body: make([]byte, defaultMaxPluginBodySize+1)}
 	env := &envelope.Envelope{Message: m}
-	_, err := convertMessageToDict(env)
+	_, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if !errors.Is(err, ErrBodyTooLarge) {
 		t.Fatalf("err = %v, want ErrBodyTooLarge", err)
 	}
@@ -409,7 +409,7 @@ func TestHTTPBody_OversizedReturnsErr(t *testing.T) {
 func TestHTTPMessage_DictExposesAllExpectedKeys(t *testing.T) {
 	m := &envelope.HTTPMessage{}
 	env := &envelope.Envelope{Message: m}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -427,7 +427,7 @@ func TestHTTPMessage_DictExposesAllExpectedKeys(t *testing.T) {
 func TestGRPCDataMessage_DictExposesDenormalizedReadOnly(t *testing.T) {
 	m := &envelope.GRPCDataMessage{}
 	env := &envelope.Envelope{Message: m}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -522,7 +522,7 @@ def hook(msg):
 // runaway plugin cannot allocate unbounded memory.
 func TestRawWriteOversized_Rejected(t *testing.T) {
 	env := &envelope.Envelope{Message: &envelope.HTTPMessage{}}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -557,7 +557,7 @@ def hook(msg):
 // documented Starlark Freeze cycle-defense pattern.
 func TestMessageDict_FreezeIdempotent(t *testing.T) {
 	env := &envelope.Envelope{Message: &envelope.HTTPMessage{Method: "GET"}}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}

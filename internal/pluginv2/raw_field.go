@@ -65,7 +65,7 @@ const rawKey = "raw"
 // that synthesize unbounded byte strings; operator-authored plugins are
 // trusted (CLAUDE.md threat model) but a 16 MiB ceiling limits the
 // blast radius of a runaway script. The cap is intentionally larger
-// than maxPluginBodySize (1 MiB) because a plugin may legitimately
+// than the default plugin body cap (1 MiB) because a plugin may legitimately
 // inject a fully reframed wire payload that includes the body plus
 // headers plus framing.
 const maxPluginRawSize = 16 << 20

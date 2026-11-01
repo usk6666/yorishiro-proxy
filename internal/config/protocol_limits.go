@@ -217,14 +217,20 @@ const DefaultPluginMaxBodySize int64 = 1 << 20
 // ResolveMaxRecordBodySize returns c.MaxRecordBodySize when positive, else
 // MaxBodySize (254 MiB). Nil c is treated as "use default" (USK-1408).
 func ResolveMaxRecordBodySize(c *ProxyConfig) int64 {
-	return 0
+	if c != nil && c.MaxRecordBodySize > 0 {
+		return c.MaxRecordBodySize
+	}
+	return MaxBodySize
 }
 
 // ResolvePluginMaxBodySize returns c.PluginMaxBodySize when positive, else
 // DefaultPluginMaxBodySize (1 MiB). Nil c is treated as "use default"
 // (USK-1408).
 func ResolvePluginMaxBodySize(c *ProxyConfig) int64 {
-	return 0
+	if c != nil && c.PluginMaxBodySize > 0 {
+		return c.PluginMaxBodySize
+	}
+	return DefaultPluginMaxBodySize
 }
 
 // maxImportLineHeadroom reserves additional bytes beyond the base64-expanded
@@ -302,6 +308,23 @@ func ValidateProtocolLimits(c *ProxyConfig) error {
 	}
 	if c.MaxBodySize > MaxBodySizeUpperBound {
 		return fmt.Errorf("max_body_size must be <= %d (SQLite BLOB limit), got %d", MaxBodySizeUpperBound, c.MaxBodySize)
+	}
+	// USK-1408: the record-only and plugin body caps share max_body_size's
+	// shape (0 = default, negative and > 1 GiB rejected).
+	if err := validateBodyLimit("max_record_body_size", c.MaxRecordBodySize); err != nil {
+		return err
+	}
+	return validateBodyLimit("plugin_max_body_size", c.PluginMaxBodySize)
+}
+
+// validateBodyLimit rejects a negative body-size knob and one above
+// MaxBodySizeUpperBound.
+func validateBodyLimit(name string, v int64) error {
+	if v < 0 {
+		return fmt.Errorf("%s must be >= 0, got %d", name, v)
+	}
+	if v > MaxBodySizeUpperBound {
+		return fmt.Errorf("%s must be <= %d, got %d", name, MaxBodySizeUpperBound, v)
 	}
 	return nil
 }

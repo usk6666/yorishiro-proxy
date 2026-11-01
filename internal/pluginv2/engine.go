@@ -58,11 +58,18 @@ type Engine struct {
 // returns ErrBodyTooLarge and the caller skips the hook. n <= 0 restores
 // the 1 MiB default. Applies to every loaded plugin.
 func (e *Engine) SetMaxBodySize(n int64) {
+	if n < 0 {
+		n = 0
+	}
+	e.maxBodySize.Store(n)
 }
 
 // MaxBodySize returns the effective plugin body cap (USK-1408).
 func (e *Engine) MaxBodySize() int64 {
-	return maxPluginBodySize
+	if n := e.maxBodySize.Load(); n > 0 {
+		return n
+	}
+	return defaultMaxPluginBodySize
 }
 
 // loadedPlugin tracks a successfully loaded script so future reload work

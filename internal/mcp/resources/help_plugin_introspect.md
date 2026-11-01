@@ -42,13 +42,13 @@ Use it to self-verify a plugin setup: after sending traffic, a non-zero `fail_op
 | `invalid_return` | The hook returned a value that is not an action: a bare `"RESPOND"` string, another unrecognized string, or a value of another type. In-place `msg` edits are kept. |
 | `invalid_mutation` | The hook's `msg` edits could not be turned back into a message (e.g. an out-of-range field value); all edits of that call were discarded. |
 | `chunk_too_large` | A `raw.on_chunk` hook produced more than 1 MiB. |
-| `body_too_large` | The message body exceeded the 1 MiB plugin view cap, so the hook was **not run** for that message. |
+| `body_too_large` | The message body exceeded the plugin view cap (`plugin_max_body_size`, default 1 MiB), so the hook was **not run** for that message. |
 | `unsupported_message` | The message type has no plugin view, so the hook was not run. |
 | `dispatch_error` | Any other dispatch error that made the engine skip the hook. |
 
 Each hook call counts at most once (the first cause). Counters are per loaded plugin and last for the process lifetime; they are not reset.
 
-Read `fail_open_by_kind`, not just the total: `body_too_large` and `unsupported_message` rise on ordinary traffic (e.g. any body over 1 MiB) even for an observe-only plugin. The kinds that mean a blocking decision was lost are `action_not_allowed`, `respond_shape_mismatch`, `respond_on_informational`, `hook_error`, `hook_timeout` and `invalid_return`.
+Read `fail_open_by_kind`, not just the total: `body_too_large` and `unsupported_message` rise on ordinary traffic (e.g. any body over `plugin_max_body_size`) even for an observe-only plugin. The kinds that mean a blocking decision was lost are `action_not_allowed`, `respond_shape_mismatch`, `respond_on_informational`, `hook_error`, `hook_timeout` and `invalid_return`.
 
 ## Examples
 

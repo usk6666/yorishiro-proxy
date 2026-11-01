@@ -80,7 +80,7 @@ var ErrDisallowedAction = errors.New("pluginv2: hook returned disallowed action 
 // Engine.Introspect surfaces so an agent can tell that a hook it expected
 // to block let the message through.
 func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope) (*HookOutcome, error) {
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, e.MaxBodySize())
 	if err != nil {
 		hook.stats.record(hook, failOpenKindOf(err), ActionContinue, err.Error())
 		return nil, err
