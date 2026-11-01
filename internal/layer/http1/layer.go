@@ -134,6 +134,11 @@ type options struct {
 	maxRawCapture      int64
 	streamingDetect    StreamingResponsePredicate
 
+	// forwardOriginForm enables the plain-HTTP forward-proxy egress form
+	// on requests this (client-facing) Layer parses. See
+	// WithForwardProxyOriginForm.
+	forwardOriginForm bool
+
 	// stateReleaser is the optional pluginv2 hook invoked when a Channel
 	// reaches its terminal state. Drives ReleaseTransaction(ConnID, FlowID)
 	// for every envelope the Channel emitted via Next. nil = no-op.
