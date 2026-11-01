@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"strconv"
@@ -92,9 +94,13 @@ type RecordStep struct {
 	store    flow.Writer
 	logger   *slog.Logger
 	encoders *WireEncoderRegistry
-	// maxBodySize caps flow.Flow.Body when materializing a BodyBuffer. A
-	// larger materialized body is truncated and Flow.BodyTruncated is set
-	// to true. Zero means use config.MaxBodySize.
+	// maxBodySize is the record cap (max_record_body_size). It bounds the
+	// recorded copy only: an HTTP flow.Flow.Body (in-memory Body or a
+	// materialized BodyBuffer; Flow.BodyTruncated is set on a cut) and the
+	// HTTP flow.Flow.RawBytes (in-memory Raw, spilled Raw + RawBuffer, and
+	// the modified variant's re-encoded bytes; a cut is marked with
+	// http_anomaly_raw_body_truncated). Zero means config.MaxBodySize,
+	// so a cap always applies. See recordCap.
 	maxBodySize int64
 	// protocolRetagged tracks streamIDs whose Stream.Protocol has already
 	// been updated past the initial createStream value. Used by the
@@ -301,10 +307,14 @@ func WithRecordScope(scope *flow.RecordScope) Option {
 	}
 }
 
-// WithMaxBodySize caps the number of bytes materialized into flow.Flow.Body
-// when an HTTPMessage carries a BodyBuffer. If the materialized body exceeds
-// n bytes it is truncated to n and flow.Flow.BodyTruncated is set to true.
-// n <= 0 is ignored (falls back to config.MaxBodySize).
+// WithMaxBodySize sets the record cap (max_record_body_size): the number of
+// bytes of an HTTP message recorded into flow.Flow.Body (from an in-memory
+// Body or a BodyBuffer; flow.Flow.BodyTruncated is set on a cut) and into
+// flow.Flow.RawBytes (in-memory Raw, spilled RawBuffer, and the modified
+// variant's re-encoded bytes; a cut is marked with
+// http_anomaly_raw_body_truncated). Only the recorded copy is cut; the
+// wire is never affected. n <= 0 is ignored, leaving the default
+// config.MaxBodySize in force — a cap always applies.
 func WithMaxBodySize(n int64) Option {
 	return func(s *RecordStep) {
 		if n > 0 {
@@ -1312,13 +1322,13 @@ func (s *RecordStep) applyWireEncode(ctx context.Context, current *envelope.Enve
 	switch {
 	case err == nil:
 		if bytesOut != nil {
-			modFlow.RawBytes = bytesOut
+			s.setEncodedRawBytes(current, modFlow, bytesOut)
 		} else {
 			modFlow.Metadata["wire_bytes"] = "unavailable"
 		}
 	case errors.Is(err, ErrPartialWireBytes):
 		if bytesOut != nil {
-			modFlow.RawBytes = bytesOut
+			s.setEncodedRawBytes(current, modFlow, bytesOut)
 			modFlow.Metadata["wire_bytes"] = "partial"
 		} else {
 			// Partial sentinel with no bytes violates the WireEncoder
@@ -1337,14 +1347,45 @@ func (s *RecordStep) applyWireEncode(ctx context.Context, current *envelope.Enve
 	}
 }
 
+// setEncodedRawBytes stores the WireEncoder output b as the modified
+// variant's RawBytes. For an HTTPMessage the stored copy is bounded by the
+// record cap (USK-1408) exactly like envelopeToFlow's projection, and the
+// http_anomaly_raw_body_truncated mark is recomputed for the stored bytes:
+// the parser-side detail carried by the message is kept, and the record-cap
+// note is present only when b itself was cut. b is the record copy only —
+// the bytes sent on the wire are produced independently and never cut.
+func (s *RecordStep) setEncodedRawBytes(current *envelope.Envelope, fl *flow.Flow, b []byte) {
+	m, isHTTP := current.Message.(*envelope.HTTPMessage)
+	if !isHTTP {
+		fl.RawBytes = b
+		return
+	}
+	limit := s.recordCap()
+	cut := int64(len(b)) > limit
+	if cut {
+		b = b[:limit:limit]
+	}
+	fl.RawBytes = b
+	delete(fl.Metadata, rawTruncatedMetadataKey)
+	for _, a := range m.Anomalies {
+		if a.Type == envelope.AnomalyRawBodyTruncated {
+			fl.Metadata[rawTruncatedMetadataKey] = a.Detail
+		}
+	}
+	if cut {
+		markRecordRawTruncated(fl, limit)
+	}
+}
+
 // envelopeToFlow converts an Envelope to a flow.Flow.
 // Protocol-specific fields (Method, URL, StatusCode, Headers) are populated
 // from the Message when it is an HTTPMessage. For RawMessage, Body is set
 // to the raw bytes.
 //
-// When HTTPMessage.Body is nil but BodyBuffer is non-nil, the buffer is
-// materialized via Bytes(ctx) into Flow.Body. If the materialized body
-// exceeds s.maxBodySize it is truncated and Flow.BodyTruncated is set.
+// Flow.Body is projected from HTTPMessage.Body, or, when Body is nil, from
+// BodyBuffer materialized via Bytes(ctx). Either way a body over the
+// record cap (recordCap: s.maxBodySize, defaulting to config.MaxBodySize)
+// is cut to its leading bytes and Flow.BodyTruncated is set.
 // Materialization errors are logged at Warn (operator-visible data loss)
 // and Flow.Body is left nil.
 //
@@ -1353,8 +1394,8 @@ func (s *RecordStep) applyWireEncode(ctx context.Context, current *envelope.Enve
 // independent Retain counts from CloneMessage().
 //
 // USK-772: when env.RawBuffer is non-nil (disk-spilled wire body), RawBytes
-// is materialized via env.WireBytes(ctx) and capped at the BLOB-projection
-// size. The cap intentionally differs from the network passthrough — the
+// is read from env.Raw plus at most the record cap's worth of RawBuffer
+// bytes, and capped at the record cap. The cap intentionally differs from the network passthrough — the
 // relayed wire bytes are always complete (the Channel send path streams
 // from the buffer); only the BLOB-projected snapshot is truncated.
 //
@@ -1505,9 +1546,10 @@ func (s *RecordStep) projectHTTPMessage(ctx context.Context, env *envelope.Envel
 // projectRawBytes returns the wire bytes for the Flow.RawBytes BLOB
 // projection. When env.RawBuffer is nil this is env.Raw (zero-copy; a cut
 // is a prefix slice).
-// When env.RawBuffer is non-nil (USK-772 disk-spill path) the helper calls
-// env.WireBytes(ctx) which stitches header (Raw) + body (RawBuffer.Bytes).
-// The materialized result is capped at the record cap (recordCap). For an
+// When env.RawBuffer is non-nil (USK-772 disk-spill path) the helper
+// stitches header (Raw) + body (RawBuffer) via readCappedWireBytes, which
+// reads at most the record cap's worth of RawBuffer bytes so a small
+// max_record_body_size also bounds RecordStep's temporary memory. For an
 // HTTPMessage the in-memory env.Raw is capped too (USK-1408), so
 // max_record_body_size bounds the recorded raw bytes on both paths; other
 // protocols' in-memory Raw is left as-is (their bodies are not bounded by
@@ -1518,10 +1560,9 @@ func (s *RecordStep) projectRawBytes(ctx context.Context, env *envelope.Envelope
 	if env == nil {
 		return nil, false
 	}
-	wire := env.Raw
+	limit := s.recordCap()
 	if env.RawBuffer != nil {
-		var err error
-		wire, err = env.WireBytes(ctx)
+		wire, cut, err := readCappedWireBytes(ctx, env, limit)
 		if err != nil {
 			s.logger.Warn("record step: read wire bytes from RawBuffer failed",
 				"stream_id", env.StreamID,
@@ -1531,21 +1572,81 @@ func (s *RecordStep) projectRawBytes(ctx context.Context, env *envelope.Envelope
 			)
 			return nil, false
 		}
-	} else if _, isHTTP := env.Message.(*envelope.HTTPMessage); !isHTTP {
-		return wire, false
+		if cut {
+			s.logRawTruncated(env, limit)
+		}
+		return wire, cut
 	}
-	cap := s.recordCap()
-	if int64(len(wire)) <= cap {
-		return wire, false
+	if _, isHTTP := env.Message.(*envelope.HTTPMessage); !isHTTP {
+		return env.Raw, false
 	}
+	if int64(len(env.Raw)) <= limit {
+		return env.Raw, false
+	}
+	s.logRawTruncated(env, limit)
+	return env.Raw[:limit], true
+}
+
+// logRawTruncated logs a record-cap cut of the raw-bytes projection.
+func (s *RecordStep) logRawTruncated(env *envelope.Envelope, limit int64) {
 	s.logger.Debug("record step: wire bytes BLOB truncated for flow projection",
 		"stream_id", env.StreamID,
 		"flow_id", env.FlowID,
 		"protocol", string(env.Protocol),
-		"captured_bytes", len(wire),
-		"cap", cap,
+		"cap", limit,
 	)
-	return wire[:cap], true
+}
+
+// readCappedWireBytes returns the leading limit bytes of env.Raw followed
+// by env.RawBuffer — byte-identical to the prefix of env.WireBytes — and
+// whether the full wire image is longer than limit. Unlike WireBytes it
+// never reads more than limit+1 RawBuffer bytes, so the spilled body is
+// not materialized in full just to be cut. The RawBuffer reader is closed
+// before returning; the buffer itself is never Released (ownership stays
+// with the Session OnComplete backstop).
+func readCappedWireBytes(ctx context.Context, env *envelope.Envelope, limit int64) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	header := env.Raw
+	if int64(len(header)) >= limit {
+		cut := int64(len(header)) > limit || env.RawBuffer.Len() > 0
+		return header[:limit:limit], cut, nil
+	}
+	remain := limit - int64(len(header))
+	r, err := env.RawBuffer.Reader()
+	if err != nil {
+		return nil, false, fmt.Errorf("open RawBuffer: %w", err)
+	}
+	defer r.Close()
+	// Read one byte past the remaining budget to learn whether the body
+	// continues beyond the cap without reading the rest of it.
+	body, err := io.ReadAll(io.LimitReader(ctxReader{ctx: ctx, r: r}, remain+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("read RawBuffer: %w", err)
+	}
+	cut := int64(len(body)) > remain
+	if cut {
+		body = body[:remain]
+	}
+	if len(header) == 0 {
+		return body, cut, nil
+	}
+	return append(append([]byte(nil), header...), body...), cut, nil
+}
+
+// ctxReader aborts a Read once ctx is done, so a large bounded read of a
+// spilled RawBuffer still honors cancellation between chunks.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // recordCap returns the effective record cap: maxBodySize, or
