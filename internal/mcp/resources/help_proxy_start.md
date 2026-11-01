@@ -163,6 +163,14 @@ Transparent mode only: how long the listener waits for the client's first bytes 
 - Default: `1000`
 - Range: 100-600000
 
+### forward_as_received (boolean, optional)
+Plain-HTTP forward proxy only (a client configured with `http_proxy` / `curl -x`, sending `GET http://host/path`).
+- `false` (default): the upstream receives the request as a client talking to the origin directly would send it — origin-form request-target (`GET /path?query`, the wire bytes after `http://host`, not re-encoded; `/` for an empty path, `*` for `OPTIONS http://host`) and no `Proxy-Connection` / `Proxy-Authorization` headers (any casing; also when an intercept / transform / plugin edit kept or added one). Everything else is sent as received: `Host` exactly as the client wrote it, the other headers in their order and casing, the body. Applies through an `upstream_proxy` too.
+- `true`: the request is relayed exactly as received (absolute-form, `Proxy-*` headers included).
+- Omitted: inherits the config-file `forward_as_received` (top level of the `-config` file); an explicit `false` overrides a config-file `true`.
+
+The recording is the received bytes either way: `raw_request`, the original variant and the recorded headers keep the absolute-form target and the `Proxy-*` headers, and the conversion alone records no modified variant. When an edit does create one, its raw bytes are what was sent upstream. Plugins, intercept, transform and the safety filter all see the request as received. Not affected: plaintext HTTP inside a CONNECT / SOCKS5 tunnel, transparent mode, `tcp_forwards`, TLS MITM (there the request form is the client's own choice), a plugin `msg["raw"]` write, and `resend_http` / `fuzz_http`. Other hop-by-hop headers (`Keep-Alive`, `Connection` tokens) are not removed.
+
 ### auto_transform (array of transform rules, optional)
 Auto-transform rules for automatic request/response modification at startup. Same format as the `configure` tool's auto_transform rules.
 - If omitted, no auto-transform rules are active

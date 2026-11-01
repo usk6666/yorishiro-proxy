@@ -641,8 +641,10 @@ func NewLiveManager(
 	factoryOpts := func(ctx context.Context, name, addr string, lo proxybuild.ListenerOptions) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
 			// USK-1316: per-listener transparent mode + test seams.
-			TransparentMode:         lo.TransparentMode,
-			TransparentPeekTimeout:  lo.TransparentPeekTimeout,
+			TransparentMode:        lo.TransparentMode,
+			TransparentPeekTimeout: lo.TransparentPeekTimeout,
+			// USK-1117: per-listener forward_as_received.
+			ForwardAsReceived:       lo.ForwardAsReceived,
 			OriginalDstResolver:     liveOpts.OriginalDstResolver,
 			NameResolver:            liveOpts.NameResolver,
 			Logger:                  logger,

@@ -9,6 +9,23 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 )
 
+// PlainHTTPStackOption configures BuildPlainHTTPStack.
+type PlainHTTPStackOption func(*plainHTTPStackOptions)
+
+type plainHTTPStackOptions struct {
+	forwardOriginForm bool
+}
+
+// WithForwardProxyOriginForm makes the stack's client-side http1 Layer the
+// ingress of the explicit plain-HTTP forward proxy (USK-1117): requests
+// are sent upstream in origin-form without Proxy-Connection /
+// Proxy-Authorization, while the recording stays as received. Only the
+// forward handler passes it; plaintext inside a CONNECT / SOCKS5 tunnel
+// (dispatchInnerHTTP1) is relayed in the form the client chose.
+func WithForwardProxyOriginForm() PlainHTTPStackOption {
+	return func(o *plainHTTPStackOptions) { o.forwardOriginForm = true }
+}
+
 // BuildPlainHTTPStack constructs a ConnectionStack for a plain HTTP/1.x
 // forward-proxy connection. Unlike BuildConnectionStack it performs NO TLS
 // handshake on either side: clientConn and upstreamConn are plain TCP
@@ -36,12 +53,18 @@ func BuildPlainHTTPStack(
 	upstreamConn net.Conn,
 	target string,
 	cfg *BuildConfig,
+	opts ...PlainHTTPStackOption,
 ) (*ConnectionStack, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("connector: BuildPlainHTTPStack: nil config")
 	}
 	if clientConn == nil || upstreamConn == nil {
 		return nil, fmt.Errorf("connector: BuildPlainHTTPStack: nil conn")
+	}
+
+	var o plainHTTPStackOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
 
 	connID := ConnIDOrGenerate(ctx)
@@ -59,7 +82,7 @@ func BuildPlainHTTPStack(
 
 	stack := NewConnectionStack(connID)
 
-	clientLayer := http1.New(clientConn, connID+"/client", envelope.Send,
+	clientOpts := []http1.Option{
 		http1.WithScheme("http"),
 		http1.WithEnvelopeContext(clientEnvCtx),
 		http1.WithBodySpillDir(cfg.BodySpillDir),
@@ -71,7 +94,11 @@ func BuildPlainHTTPStack(
 		http1.WithRequestHeaderTimeout(cfg.ClientRequestHeadDeadline),
 		// USK-1185: keep-alive wait for the next request (client_idle_timeout_ms).
 		http1.WithKeepAliveIdleTimeout(cfg.ClientIdleDeadline),
-	)
+	}
+	if o.forwardOriginForm {
+		clientOpts = append(clientOpts, http1.WithForwardProxyOriginForm())
+	}
+	clientLayer := http1.New(clientConn, connID+"/client", envelope.Send, clientOpts...)
 	stack.PushClient(clientLayer)
 
 	upstreamLayer := http1.New(upstreamConn, connID+"/upstream", envelope.Receive,

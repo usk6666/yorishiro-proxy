@@ -537,6 +537,8 @@ type ListenerOptions struct {
 	TransparentMode string
 	// TransparentPeekTimeout is Deps.TransparentPeekTimeout.
 	TransparentPeekTimeout time.Duration
+	// ForwardAsReceived is Deps.ForwardAsReceived (USK-1117).
+	ForwardAsReceived bool
 }
 
 // StartNamedWithOptions is StartNamed with per-listener options.
@@ -551,7 +553,8 @@ func (m *Manager) buildStack(ctx context.Context, name, addr string, opts Listen
 		return m.factoryOpts(ctx, name, addr, opts)
 	}
 	if opts != (ListenerOptions{}) {
-		return nil, fmt.Errorf("listener options (transparent_mode %q) need ManagerConfig.StackFactoryWithOptions", opts.TransparentMode)
+		return nil, fmt.Errorf("listener options (transparent_mode %q, forward_as_received %t) need ManagerConfig.StackFactoryWithOptions",
+			opts.TransparentMode, opts.ForwardAsReceived)
 	}
 	return m.factory(ctx, name, addr)
 }

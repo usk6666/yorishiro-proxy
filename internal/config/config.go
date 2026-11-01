@@ -872,6 +872,15 @@ type ProxyConfig struct {
 	// as server-first (passthrough). Zero = DefaultTransparentPeekTimeoutMs.
 	TransparentPeekTimeoutMs int `json:"transparent_peek_timeout_ms,omitempty"`
 
+	// ForwardAsReceived is the proxy_start forward_as_received default
+	// (USK-1117). false (omitted) makes the plain-HTTP forward proxy send
+	// the upstream an origin-form request without Proxy-Connection /
+	// Proxy-Authorization; true relays the request exactly as received
+	// (absolute-form, Proxy-* included). The recording is the received
+	// bytes either way. Applies per listener; a no-op on transparent
+	// listeners and on plaintext inside CONNECT / SOCKS5 tunnels.
+	ForwardAsReceived bool `json:"forward_as_received,omitempty"`
+
 	// RequestTimeoutMs is the boot value of request_timeout_ms (USK-1186):
 	// the client-side request-head receive deadline. Nil keeps the default
 	// (60s); 0 disables it; otherwise MinClientTimeoutMs..MaxClientTimeoutMs.
