@@ -75,9 +75,13 @@ func TestRun_FlowSinkConfigStartsSink(t *testing.T) {
 func TestRun_RefusesUnusableFlowSinkDir(t *testing.T) {
 	base := t.TempDir()
 	exportDir := mkdir(t, filepath.Join(base, "exports"))
-	notADir := writeFile(t, filepath.Join(base, "file"), "x")
+	// flows.jsonl is a directory, so the sink cannot open its file. (A
+	// dir below a regular file would be refused earlier, by the export
+	// directory isolation check, and never reach the sink.)
+	sinkDir := mkdir(t, filepath.Join(base, "sink"))
+	mkdir(t, filepath.Join(sinkDir, "flows.jsonl"))
 	cfg := writeJSON(t, filepath.Join(base, "config.json"), map[string]any{
-		"flow_sink": map[string]any{"dir": filepath.Join(notADir, "sink")},
+		"flow_sink": map[string]any{"dir": sinkDir},
 	})
 	err := runBoot(t, []string{"-export-dir", exportDir, "-config", cfg, "-db", filepath.Join(base, "f.db"), "-ca-ephemeral"})
 	if err == nil || strings.Contains(err.Error(), bootPassedSentinel) {
