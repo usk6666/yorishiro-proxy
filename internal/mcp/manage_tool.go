@@ -61,7 +61,7 @@ type manageParams struct {
 
 	// import_flows parameters
 	InputPath  string `json:"input_path,omitempty" jsonschema:"file path to read import data, confined to the server's export directory (query resource=status reports it as export_dir). A relative path (e.g. flows.jsonl) resolves against the export directory; an absolute path must lie inside it; anything else is rejected."`
-	OnConflict string `json:"on_conflict,omitempty" jsonschema:"conflict policy: skip or replace (default: skip)"`
+	OnConflict string `json:"on_conflict,omitempty" jsonschema:"conflict policy for an existing stream ID: skip (default), replace (delete and re-import), or merge (update the stream from the line and add flows whose IDs are new; idempotent, for flow sink files)"`
 }
 
 // exportFilter holds filter parameters for the export_flows action.
@@ -689,6 +689,7 @@ func (s *Server) exportFlowsToHARFile(ctx context.Context, target exportPath, op
 type executeImportFlowsResult struct {
 	Imported     int                `json:"imported"`
 	Skipped      int                `json:"skipped"`
+	Merged       int                `json:"merged,omitempty"`
 	Errors       int                `json:"errors"`
 	Source       string             `json:"source"`
 	ErrorDetails []flow.ImportError `json:"error_details,omitempty"`
@@ -716,8 +717,10 @@ func (s *Server) handleManageImportFlows(ctx context.Context, params manageParam
 			conflict = flow.ConflictSkip
 		case "replace":
 			conflict = flow.ConflictReplace
+		case "merge":
+			conflict = flow.ConflictMerge
 		default:
-			return nil, fmt.Errorf("invalid on_conflict value %q: must be \"skip\" or \"replace\"", params.OnConflict)
+			return nil, fmt.Errorf("invalid on_conflict value %q: must be \"skip\", \"replace\" or \"merge\"", params.OnConflict)
 		}
 	}
 
@@ -741,6 +744,7 @@ func (s *Server) handleManageImportFlows(ctx context.Context, params manageParam
 	return &executeImportFlowsResult{
 		Imported:     result.Imported,
 		Skipped:      result.Skipped,
+		Merged:       result.Merged,
 		Errors:       result.Errors,
 		Source:       target.abs,
 		ErrorDetails: result.ErrorDetails,

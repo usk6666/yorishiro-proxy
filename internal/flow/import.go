@@ -96,6 +96,9 @@ func ImportStreams(ctx context.Context, store Store, r io.Reader, opts ImportOpt
 	if opts.OnConflict == "" {
 		opts.OnConflict = ConflictSkip
 	}
+	// Imported rows are copies of records that exist elsewhere; the flow
+	// sink does not re-emit them.
+	ctx = withSinkSuppressed(ctx)
 
 	result := &ImportResult{}
 	scanner := newImportScanner(r, opts.MaxScannerBuffer)
@@ -112,6 +115,11 @@ func ImportStreams(ctx context.Context, store Store, r io.Reader, opts ImportOpt
 			continue
 		}
 
+		if isSinkGapLine(line) {
+			// Flow sink gap lines carry no stream: nothing to import.
+			continue
+		}
+
 		record, streamID, err := parseAndValidateRecord(line, opts)
 		if err != nil {
 			result.addError(lineNum, streamID, err.Error())
@@ -121,6 +129,20 @@ func ImportStreams(ctx context.Context, store Store, r io.Reader, opts ImportOpt
 		st, err := exportToStream(record.Stream)
 		if err != nil {
 			result.addError(lineNum, streamID, fmt.Sprintf("convert stream: %v", err))
+			continue
+		}
+
+		if opts.OnConflict == ConflictMerge {
+			merged, err := mergeStreamWithFlows(ctx, store, st, record.Flows)
+			if err != nil {
+				result.addError(lineNum, streamID, err.Error())
+				continue
+			}
+			if merged {
+				result.Merged++
+			} else {
+				result.Imported++
+			}
 			continue
 		}
 
@@ -141,6 +163,83 @@ func ImportStreams(ctx context.Context, store Store, r io.Reader, opts ImportOpt
 	}
 
 	return result, nil
+}
+
+// isSinkGapLine reports whether line is a flow sink "gap" record.
+func isSinkGapLine(line []byte) bool {
+	var probe struct {
+		Event string `json:"event"`
+	}
+	return json.Unmarshal(line, &probe) == nil && probe.Event == string(SinkEventGap)
+}
+
+// mergeStreamWithFlows applies one line under ConflictMerge: the stream
+// is inserted, or - when it already exists - updated from the line's
+// snapshot (the latest line wins for every field UpdateStream can set);
+// then each flow whose ID is not stored yet is inserted. merged reports
+// whether the stream already existed. Applying the same line twice is a
+// no-op.
+func mergeStreamWithFlows(ctx context.Context, store Store, st *Stream, flows []*ExportFlow) (merged bool, err error) {
+	converted := make([]*Flow, 0, len(flows))
+	for _, ef := range flows {
+		if ef.StreamID != st.ID {
+			return false, fmt.Errorf("flow %q belongs to stream %q, not the line's stream %q", ef.ID, ef.StreamID, st.ID)
+		}
+		f, err := exportToFlow(ef)
+		if err != nil {
+			return false, fmt.Errorf("convert flow %q: %w", ef.ID, err)
+		}
+		converted = append(converted, f)
+	}
+
+	if existing, gerr := store.GetStream(ctx, st.ID); gerr == nil && existing != nil {
+		merged = true
+		if err := store.UpdateStream(ctx, st.ID, streamSnapshotUpdate(st)); err != nil {
+			return true, fmt.Errorf("update stream from snapshot: %v", err)
+		}
+	} else if err := store.SaveStream(ctx, st); err != nil {
+		return false, fmt.Errorf("save stream: %v", err)
+	}
+
+	for _, f := range converted {
+		if _, err := store.GetFlow(ctx, f.ID); err == nil {
+			continue
+		}
+		if err := store.SaveFlow(ctx, f); err != nil {
+			return merged, fmt.Errorf("save flow %q: %w", f.ID, err)
+		}
+	}
+	return merged, nil
+}
+
+// streamSnapshotUpdate is the StreamUpdate that brings a stored stream to
+// snapshot st. Identity fields set at creation (conn_id, timestamp,
+// origin, listener_name, client_addr) are not updatable and keep their
+// stored values; Tags replaces the stored tags.
+func streamSnapshotUpdate(st *Stream) StreamUpdate {
+	u := StreamUpdate{
+		Protocol:      st.Protocol,
+		Scheme:        st.Scheme,
+		State:         st.State,
+		FailureReason: st.FailureReason,
+		BlockedBy:     st.BlockedBy,
+		Duration:      st.Duration,
+		Tags:          st.Tags,
+		SendMs:        st.SendMs,
+		WaitMs:        st.WaitMs,
+		ReceiveMs:     st.ReceiveMs,
+	}
+	if ci := st.ConnInfo; ci != nil {
+		u.ServerAddr = ci.ServerAddr
+		u.UpstreamProxy = ci.UpstreamProxy
+		u.TLSVersion = ci.TLSVersion
+		u.TLSCipher = ci.TLSCipher
+		u.TLSALPN = ci.TLSALPN
+		u.TLSServerCertSubject = ci.TLSServerCertSubject
+		u.TLSClientJA3 = ci.TLSClientJA3
+		u.TLSClientJA4 = ci.TLSClientJA4
+	}
+	return u
 }
 
 // newImportScanner creates a buffered scanner for JSONL import with the given max buffer size.
@@ -332,6 +431,12 @@ func exportToFlow(ef *ExportFlow) (*Flow, error) {
 		// USK-1139: the exported url carries the wire path verbatim;
 		// ParseWireURL accepts every shape the exporter writes.
 		f.URL = envelope.ParseWireURL(ef.URL)
+	}
+
+	if ef.BodyOmitted {
+		// A flow sink line that left an oversize body out: the imported
+		// row has no body, which BodyTruncated records.
+		f.BodyTruncated = true
 	}
 
 	if ef.Body != "" {

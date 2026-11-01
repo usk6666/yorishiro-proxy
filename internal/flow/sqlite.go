@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,7 +32,13 @@ type SQLiteStore struct {
 	// closeMu guards onClose; see OnClose.
 	closeMu sync.Mutex
 	onClose []func()
+
+	// observer is the CommitObserver (the flow sink) notified after each
+	// committed stream / flow write; see SetCommitObserver.
+	observer atomic.Pointer[commitObserverBox]
 }
+
+type commitObserverBox struct{ o CommitObserver }
 
 type writeOp struct {
 	ctx    context.Context
@@ -130,8 +137,15 @@ func (s *SQLiteStore) SaveStream(ctx context.Context, st *Stream) error {
 	if st.ID == "" {
 		st.ID = uuid.New().String()
 	}
+	notify := s.notifier(ctx)
 	return s.enqueueWrite(ctx, func(ctx context.Context) error {
-		return s.saveStreamSync(ctx, st)
+		if err := s.saveStreamSync(ctx, st); err != nil {
+			return err
+		}
+		if o := notify(); o != nil {
+			o.StreamCommitted(st.ID, true)
+		}
+		return nil
 	})
 }
 
@@ -220,6 +234,7 @@ func (s *SQLiteStore) UpdateStream(ctx context.Context, id string, update Stream
 	if update.Tags != nil && len(update.AppendTags) > 0 {
 		return fmt.Errorf("update stream %s: Tags and AppendTags are mutually exclusive", id)
 	}
+	notify := s.notifier(ctx)
 	return s.enqueueWrite(ctx, func(ctx context.Context) error {
 		// Resolve AppendTags into a concrete Tags assignment by reading
 		// the current row and merging. Performed inside the write
@@ -245,8 +260,15 @@ func (s *SQLiteStore) UpdateStream(ctx context.Context, id string, update Stream
 
 		args = append(args, id)
 		query := fmt.Sprintf("UPDATE streams SET %s WHERE id = ?", strings.Join(sets, ", "))
-		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+		res, err := s.db.ExecContext(ctx, query, args...)
+		if err != nil {
 			return fmt.Errorf("update stream %s: %w", id, err)
+		}
+		// An update of a missing row commits nothing to report.
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			if o := notify(); o != nil {
+				o.StreamCommitted(id, false)
+			}
 		}
 		return nil
 	})
@@ -859,8 +881,15 @@ func (s *SQLiteStore) SaveFlow(ctx context.Context, f *Flow) error {
 	if f.ID == "" {
 		f.ID = uuid.New().String()
 	}
+	notify := s.notifier(ctx)
 	return s.enqueueWrite(ctx, func(ctx context.Context) error {
-		return s.saveFlowSync(ctx, f)
+		if err := s.saveFlowSync(ctx, f); err != nil {
+			return err
+		}
+		if o := notify(); o != nil {
+			o.FlowCommitted(f)
+		}
+		return nil
 	})
 }
 
@@ -1291,8 +1320,49 @@ func (s *SQLiteStore) OnClose(fn func()) {
 	s.onClose = append(s.onClose, fn)
 }
 
-// Close runs the OnClose hooks, shuts down the writer goroutine and closes
-// the database.
+// SetCommitObserver installs o to be notified after every committed
+// SaveStream / UpdateStream / SaveFlow, except writes made with a context
+// marked by withSinkSuppressed (ImportStreams). Call it once at boot,
+// before writes start; there is no hot swap. Close closes o after the
+// queued writes have drained and before the database closes, so o can
+// still read the store while it flushes.
+func (s *SQLiteStore) SetCommitObserver(o CommitObserver) {
+	if o == nil {
+		s.observer.Store(nil)
+		return
+	}
+	s.observer.Store(&commitObserverBox{o: o})
+}
+
+// notifier captures, at enqueue time, whether ctx suppresses observer
+// notification: the queued closure may run with the drain context
+// instead of ctx during Close.
+func (s *SQLiteStore) notifier(ctx context.Context) func() CommitObserver {
+	if sinkSuppressed(ctx) {
+		return func() CommitObserver { return nil }
+	}
+	return s.commitObserver
+}
+
+func (s *SQLiteStore) commitObserver() CommitObserver {
+	if b := s.observer.Load(); b != nil {
+		return b.o
+	}
+	return nil
+}
+
+// FlowSinkStats reports the counters of the flow sink installed with
+// SetCommitObserver; ok is false when no sink is installed.
+func (s *SQLiteStore) FlowSinkStats() (stats SinkStats, ok bool) {
+	if sk, isSink := s.commitObserver().(*Sink); isSink && sk != nil {
+		return sk.Stats(), true
+	}
+	return SinkStats{}, false
+}
+
+// Close runs the OnClose hooks, shuts down the writer goroutine (draining
+// queued writes), closes the commit observer — which flushes the flow
+// sink while the database is still open — and closes the database.
 func (s *SQLiteStore) Close() error {
 	s.closeMu.Lock()
 	hooks := s.onClose
@@ -1304,6 +1374,11 @@ func (s *SQLiteStore) Close() error {
 
 	close(s.done)
 	s.wg.Wait()
+	if o := s.commitObserver(); o != nil {
+		if err := o.Close(); err != nil {
+			s.logger.Warn("flow sink close", "error", err)
+		}
+	}
 	return s.db.Close()
 }
 

@@ -911,3 +911,39 @@ func TestSQLiteStore_FlowSinkStats(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestSink_CloseBoundedWhileWriterStuck: Close returns within its timeout
+// when the writer never returns — including when a trailing gap line is
+// pending and the queue is full — instead of hanging shutdown.
+func TestSink_CloseBoundedWhileWriterStuck(t *testing.T) {
+	w := newBlockingLineWriter()
+	t.Cleanup(func() { close(w.release) })
+	store := newSinkTestStore(t)
+	if err := store.SaveStream(context.Background(), sinkTestStream("s")); err != nil {
+		t.Fatal(err)
+	}
+	sink := newSink(SinkConfig{Dir: "test", QueueMaxEvents: 1}, store, w, testutil.DiscardLogger())
+	sink.closeTimeout = 200 * time.Millisecond
+	sink.StreamCommitted("s", true)
+	select {
+	case <-w.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("sink worker never reached the writer")
+	}
+	for i := 0; i < 4; i++ { // one fills the queue, the rest drop
+		sink.StreamCommitted("s", true)
+	}
+	if sink.Stats().DroppedEvents == 0 {
+		t.Fatalf("no drops; the trailing-gap path is not exercised")
+	}
+	done := make(chan error, 1)
+	go func() { done <- sink.Close() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Errorf("Close = nil, want a timeout error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Close did not return while the writer was stuck")
+	}
+}

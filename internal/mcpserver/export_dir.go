@@ -113,6 +113,17 @@ func protectedBootPaths(cfg *config.Config, configFile, targetPolicyFile string,
 		add("server.json", p)
 	}
 
+	return appendProxyConfigBootPaths(out, proxyCfg)
+}
+
+// appendProxyConfigBootPaths appends the operator-owned paths named by
+// the -config file to out.
+func appendProxyConfigBootPaths(out []protectedPath, proxyCfg *config.ProxyConfig) []protectedPath {
+	add := func(what, p string) {
+		if p != "" {
+			out = append(out, protectedPath{what: what, path: p})
+		}
+	}
 	if proxyCfg != nil {
 		for i, pl := range proxyCfg.Plugins {
 			add(fmt.Sprintf("plugin script (plugins[%d])", i), pl.Path)
@@ -132,6 +143,11 @@ func protectedBootPaths(cfg *config.Config, configFile, targetPolicyFile string,
 			add(fmt.Sprintf("host_tls[%s] client_cert file", h), e.ClientCertPath)
 			add(fmt.Sprintf("host_tls[%s] client_key file", h), e.ClientKeyPath)
 			add(fmt.Sprintf("host_tls[%s] ca_bundle file", h), e.CABundlePath)
+		}
+		// USK-1119: the flow sink directory holds the off-host replica of
+		// the record; manage must neither plant files in it nor read it.
+		if fs := proxyCfg.FlowSink; fs != nil && fs.Dir != "" {
+			out = append(out, protectedPath{what: "flow_sink.dir", path: fs.Dir, isDir: true})
 		}
 	}
 	return out

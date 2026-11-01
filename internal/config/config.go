@@ -1084,10 +1084,7 @@ func (c *ProxyConfig) Validate() error {
 	if err := validateHostTLS(c.HostTLS); err != nil {
 		return err
 	}
-	if err := c.FlowSink.Validate(); err != nil {
-		return err
-	}
-	return nil
+	return c.FlowSink.Validate()
 }
 
 // UnmarshalJSON implements json.Unmarshaler for ProxyConfig.

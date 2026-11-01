@@ -104,6 +104,54 @@ func InitInfra(ctx context.Context, cfg *config.Config) (*InfraResult, error) {
 	return &InfraResult{Logger: logger, Store: store, Cleanup: cleanup}, nil
 }
 
+// InitFlowSink attaches the flow sink configured by proxyCfg.FlowSink to
+// store (USK-1119). It must run right after the store opens and before
+// anything writes. A sink that cannot open its file refuses boot: running
+// without the configured replica would silently lose the evidence it
+// exists to preserve. The store's Close flushes and closes the sink.
+func InitFlowSink(store *flow.SQLiteStore, proxyCfg *config.ProxyConfig, logger *slog.Logger) error {
+	if store == nil || proxyCfg == nil || proxyCfg.FlowSink == nil {
+		return nil
+	}
+	if err := proxyCfg.FlowSink.Validate(); err != nil {
+		return fmt.Errorf("flow sink config: %w", err)
+	}
+	r := proxyCfg.FlowSink.Resolved()
+	dir, err := filepath.Abs(r.Dir)
+	if err != nil {
+		return fmt.Errorf("flow sink: resolve directory %q: %w", r.Dir, err)
+	}
+	sink, err := flow.NewFileSink(flow.SinkConfig{
+		Dir:            dir,
+		MaxFileBytes:   r.MaxFileBytes,
+		MaxFiles:       r.MaxFiles,
+		QueueMaxEvents: r.QueueMaxEvents,
+		QueueMaxBytes:  r.QueueMaxBytes,
+		IncludeBodies:  r.IncludeBodies,
+		WireLevel:      r.WireLevel,
+		Fsync:          r.Fsync,
+	}, store, logger)
+	if err != nil {
+		logger.Error("flow sink failed to start", "dir", dir, "error", err)
+		return fmt.Errorf("init flow sink: %w", err)
+	}
+	store.SetCommitObserver(sink)
+	wireLevel := r.WireLevel
+	if wireLevel == "" {
+		wireLevel = "all"
+	}
+	logger.Info("flow sink started",
+		"dir", dir,
+		"run_id", sink.Stats().RunID,
+		"max_file_bytes", r.MaxFileBytes,
+		"max_files", r.MaxFiles,
+		"queue_max_events", r.QueueMaxEvents,
+		"queue_max_bytes", r.QueueMaxBytes,
+		"include_bodies", r.IncludeBodies,
+		"wire_level", wireLevel)
+	return nil
+}
+
 // InitSafetyFilter creates a SafetyFilter engine from config file settings
 // and CLI/env overrides. Returns nil if SafetyFilter is not enabled or not
 // configured.
