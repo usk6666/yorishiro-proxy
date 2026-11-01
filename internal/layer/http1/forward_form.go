@@ -18,6 +18,10 @@ import (
 // else — the Host header, the other headers' order, casing and OWS, the
 // body — is relayed byte-for-byte.
 //
+// A request with no Host header (legal in HTTP/1.0) carries its authority
+// only in the absolute-form target, so that target is kept as received
+// (no Host is synthesised); Proxy-* headers are still dropped.
+//
 // This is egress only. Envelope.Raw (the recording), the L7 Message and
 // every Pipeline Step see the request as received (MITM Principle 1
 // applies to the recording). Plaintext inside a CONNECT / SOCKS5 tunnel,
@@ -28,7 +32,8 @@ import (
 // as the ingress of the explicit plain-HTTP forward proxy. Requests it
 // parses are sent upstream in origin-form (RFC 9112 §3.2.1; asterisk-form
 // for an OPTIONS with an empty path and no query, §3.2.4) without
-// Proxy-Connection / Proxy-Authorization headers. The flag rides on the
+// Proxy-Connection / Proxy-Authorization headers. A request without a
+// Host header keeps its absolute-form target. The flag rides on the
 // request envelope's Opaque, so it survives an upstream redial and the
 // modified variant EncodeWireBytes records equals the bytes sent. A raw
 // authoritative send (plugin msg["raw"]) and synthetic sends (resend /
@@ -38,13 +43,30 @@ func WithForwardProxyOriginForm() Option {
 }
 
 // setForwardOriginForm records the forward-proxy egress decision on a
-// request opaque at parse time. forwardRewrite is precomputed so the
-// opaque send path keeps its zero-copy fast path for requests that need
-// no conversion (origin-form / asterisk-form without Proxy-* headers).
-// Must run after snapshotRequestLine (it reads targetPrefix).
+// request opaque at parse time. forwardTarget is set for an absolute-form
+// target that is sent in origin-form: only when the request has a Host
+// header (any casing, matched on the name exactly as parsed), since
+// without one the target is the only carrier of the authority and is
+// kept as received. forwardRewrite is precomputed so the opaque send path
+// keeps its zero-copy fast path for requests that need no conversion
+// (no target conversion and no Proxy-* headers). Must run after
+// snapshotRequestLine (it reads targetPrefix).
 func (o *opaqueHTTP1) setForwardOriginForm(enabled bool) {
 	o.forwardOriginForm = enabled
-	o.forwardRewrite = enabled && (o.targetPrefix != "" || hasForwardProxyHeader(o.rawReq.Headers))
+	o.forwardTarget = enabled && o.targetPrefix != "" && hasHostHeader(o.rawReq.Headers)
+	o.forwardRewrite = o.forwardTarget || (enabled && hasForwardProxyHeader(o.rawReq.Headers))
+}
+
+// hasHostHeader reports whether headers carry a Host field, by the same
+// case-insensitive name match RawHeaders.Get uses. A name with whitespace
+// before the colon ("Host :") is not Host.
+func hasHostHeader(headers parser.RawHeaders) bool {
+	for _, h := range headers {
+		if strings.EqualFold(h.Name, "Host") {
+			return true
+		}
+	}
+	return false
 }
 
 // isForwardProxyHeader reports whether a header name, exactly as parsed

@@ -227,8 +227,11 @@ type opaqueHTTP1 struct {
 	// the request is sent upstream in origin-form without Proxy-* headers.
 	// forwardRewrite reports that the wire form needs that conversion
 	// (absolute-form target or a Proxy-* header); when false the zero-copy
-	// path still applies. See setForwardOriginForm.
+	// path still applies. forwardTarget reports that the absolute-form
+	// target is sent in origin-form (false without a Host header, where
+	// the target is kept as received). See setForwardOriginForm.
 	forwardOriginForm bool
+	forwardTarget     bool
 	forwardRewrite    bool
 	origStatus        int
 	origStatusReason  string
@@ -258,11 +261,12 @@ func (o *opaqueHTTP1) snapshotStatusLine(msg *envelope.HTTPMessage) {
 // when the original target was spliceable. msg.Authority / msg.Scheme are
 // never written here: on HTTP/1.x the Host header carries the authority.
 //
-// On the plain-HTTP forward proxy (forwardOriginForm, USK-1117) an
+// On the plain-HTTP forward proxy (forwardTarget, USK-1117) an
 // unchanged absolute-form target is sent in origin-form (originFormTarget,
 // a wire substring), and a changed target is msg.Path [+ "?" +
 // msg.RawQuery] as written — never spliced behind the prefix, so an
-// absolute URI written into Path is honoured.
+// absolute URI written into Path is honoured. A Host-less request is not
+// forwardTarget: its target is handled as on any other Layer.
 //
 // Values are not validated (USK-1148 user decision): a plugin can already
 // put arbitrary bytes on the wire via msg["raw"], so CR / LF / SP in a
@@ -271,7 +275,7 @@ func (o *opaqueHTTP1) requestLine(msg *envelope.HTTPMessage) (method, target str
 	rawReq := o.rawReq
 	methodChanged := msg.Method != o.origMethod
 	targetChanged := msg.Path != o.origPath || msg.RawQuery != o.origRawQuery
-	forwardTarget := o.forwardOriginForm && o.targetPrefix != ""
+	forwardTarget := o.forwardTarget
 	if !methodChanged && !targetChanged {
 		if forwardTarget {
 			return rawReq.Method, originFormTarget(rawReq.Method, rawReq.RequestURI, o.targetPrefix), true
@@ -291,7 +295,7 @@ func (o *opaqueHTTP1) requestLine(msg *envelope.HTTPMessage) (method, target str
 		if msg.RawQuery != "" {
 			target += "?" + msg.RawQuery
 		}
-		if o.targetSpliceable && !o.forwardOriginForm {
+		if o.targetSpliceable && !o.forwardTarget {
 			target = o.targetPrefix + target
 		}
 		if target == "" {
