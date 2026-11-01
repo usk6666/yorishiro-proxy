@@ -67,8 +67,9 @@ type HTTP1ForwardHandlerConfig struct {
 	OnRequestHeadFailure OnRequestHeadFailureFunc
 
 	// OnGateRefusal is invoked after a connection the rate-limit gate
-	// refused has been answered 429 (USK-1381). Scope refusals do not fire
-	// it. Nil disables — the refusal is only logged.
+	// refused has been answered 429 (USK-1381), and after one the scope
+	// gate — or LiveConns.Register's admission re-check — refused has been
+	// answered 403 (USK-1403). Nil disables — the refusal is only logged.
 	OnGateRefusal OnGateRefusalFunc
 
 	// Logger for handler-level logging. Nil uses slog.Default().
@@ -199,6 +200,7 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 				"reason", reason)
 			writeForwardErrorResponse(pc, 403, "Forbidden",
 				"yorishiro-proxy: target blocked by scope")
+			reportScopeRefusal(ctx, cfg.OnGateRefusal, "http1-forward", target, pc.RemoteAddr(), nonEmptyScopeReason(reason))
 			return nil
 		}
 
@@ -209,14 +211,15 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 		// Host header says; HostScopeStep re-checks each of them). A policy
 		// change that no longer admits target cancels ctx, which the dial
 		// and the OnStack session watch.
-		ctx, release, ok := trackAdmitted(ctx, cfg.LiveConns, "http1-forward", target, func() (bool, string) {
+		ctx, release, err := trackAdmitted(ctx, cfg.LiveConns, "http1-forward", target, func() (bool, string) {
 			allowed, reason, _ := forwardScopeCheck(cfg.Scope, target)
 			return allowed, reason
 		}, nil, connLogger)
 		defer release()
-		if !ok {
+		if err != nil {
 			writeForwardErrorResponse(pc, 403, "Forbidden",
 				"yorishiro-proxy: target blocked by scope")
+			reportScopeRefusal(ctx, cfg.OnGateRefusal, "http1-forward", target, pc.RemoteAddr(), AdmissionRaceReason(err))
 			return nil
 		}
 

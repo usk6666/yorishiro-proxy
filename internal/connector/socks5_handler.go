@@ -67,10 +67,12 @@ type SOCKS5HandlerConfig struct {
 	InnerPeekTimeoutDisabled func() bool
 
 	// OnGateRefusal is invoked after a tunnel the negotiator's rate-limit
-	// gate refused has been answered REP=0x02 (USK-1381). It lives here,
-	// not on the process-singleton negotiator, so each listener records
-	// under its own name. Scope refusals do not fire it. Nil disables —
-	// the refusal is only logged.
+	// gate refused has been answered REP=0x02 (USK-1381), and after a
+	// scope refusal (USK-1403): the negotiator's (REP=0x02), the handler's
+	// opaque-route re-check and LiveConns.Register's admission re-check
+	// (both after REP=0x00, refused by closing). It lives here, not on the
+	// process-singleton negotiator, so each listener records under its own
+	// name. Nil disables — the refusal is only logged.
 	OnGateRefusal OnGateRefusalFunc
 
 	// Logger for handler-level logging. Nil uses slog.Default().
@@ -110,6 +112,10 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 			if errors.As(err, &rlErr) {
 				reportRateLimitRefusal(ctx, cfg.OnGateRefusal, "socks5", target, pc.RemoteAddr(), rlErr.Denial)
 			}
+			var scErr *SOCKS5ScopeError
+			if errors.As(err, &scErr) {
+				reportScopeRefusal(ctx, cfg.OnGateRefusal, "socks5", target, pc.RemoteAddr(), scErr.Reason)
+			}
 			return nil
 		}
 
@@ -129,6 +135,9 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		if route.opaque() {
 			if allowed, reason := socks5ScopeCheck(scope, target, true); !allowed {
 				connLogger.Info("socks5 target blocked by scope", "reason", reason)
+				// REP=0x00 is already on the wire: the refusal is the
+				// close, recorded like the negotiator's (USK-1403).
+				reportScopeRefusal(ctx, cfg.OnGateRefusal, "socks5", target, pc.RemoteAddr(), nonEmptyScopeReason(reason))
 				return nil
 			}
 		}
@@ -136,13 +145,14 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		// USK-1160: track the admitted tunnel with the negotiator's own
 		// scope check (blank scheme) so a policy change that no longer
 		// admits target cancels ctx for every route below.
-		ctx, release, ok := trackAdmitted(ctx, cfg.LiveConns, "socks5", target, func() (bool, string) {
+		ctx, release, err := trackAdmitted(ctx, cfg.LiveConns, "socks5", target, func() (bool, string) {
 			return socks5ScopeCheck(scope, target, route.opaque())
 		}, func() (bool, string) {
 			return socks5ScopeCheck(scope, target, true)
 		}, connLogger)
 		defer release()
-		if !ok {
+		if err != nil {
+			reportScopeRefusal(ctx, cfg.OnGateRefusal, "socks5", target, pc.RemoteAddr(), AdmissionRaceReason(err))
 			return nil
 		}
 

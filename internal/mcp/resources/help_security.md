@@ -41,8 +41,8 @@ A `target_scope` deny surfaces differently depending on how the request entered 
 
 | Path | Deny symptom |
 |---|---|
-| Transparent HTTPS via CONNECT tunnel | Proxy refuses the tunnel with `HTTP/1.1 403 Forbidden` and body `yorishiro-proxy: target blocked by scope`, then closes the connection. No tunnel is opened and the backend is never contacted. |
-| Transparent plain-HTTP forward proxy | Proxy returns `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`. |
+| Transparent HTTPS via CONNECT tunnel | Proxy refuses the tunnel with `HTTP/1.1 403 Forbidden` and body `yorishiro-proxy: target blocked by scope`, then closes the connection. No tunnel is opened and the backend is never contacted. The refusal is recorded as a Stream with `blocked_by: target_scope`. |
+| Transparent plain-HTTP forward proxy | Proxy returns `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`. The refusal is recorded as a Stream with `blocked_by: target_scope`. |
 | MCP tool-initiated request (`resend_*`, `fuzz_*`, `macro`) | MCP error response with the violation reason. |
 | Intercept release (`release`, `modify_and_forward`, timeout auto-release) | The `intercept` call itself succeeds. Scope is checked again at release time, with the rules in force then, against the request being forwarded — for `modify_and_forward`, the modified one. A deny added while the request was held (policy reload or this tool) or a rewrite of `authority` / `path` into a denied target blocks it: an HTTP request gets `403 Forbidden` with body `{"error":"blocked by target_scope","blocked_by":"target_scope"}`, a native gRPC or gRPC-Web call fails with `grpc-status: 7` (gRPC-Web: in a trailer frame of an HTTP `200`), a WebSocket message is dropped, and the block is recorded as a flow with `blocked_by: target_scope`. |
 
@@ -308,7 +308,10 @@ recorded request still shows the scheme exactly as the client declared it.
 | WebSocket message | The message is dropped; the connection stays open | Stream with `blocked_by: target_scope` |
 | gRPC-Web call (denied by the host the connection dials, or by its own request: path, `:authority` / `Host`, `host` metadata) | HTTP `200` whose body is a single gRPC-Web trailer frame with `grpc-status: 7` (PERMISSION_DENIED) and `grpc-message: blocked by target_scope`, in the request's content-type (base64 for `-text`); no request byte reaches the upstream; the call ends and the connection stays open (HTTP/1.x keep-alive, other HTTP/2 streams) | Stream with `blocked_by: target_scope`, `state: error` |
 | `tcp_forwards` target denied when `proxy_start` runs | `proxy_start` fails with an error naming the scope, port and target; nothing is bound | Nothing |
-| `tcp_forwards` target denied when a client connects | Plaintext `protocol: http` / `websocket` / `sse`: `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`, then close. Every other protocol and every `tls: true` entry: the connection is closed with no byte (a TLS client's handshake fails). The target is never contacted | Nothing (Info log) |
+| CONNECT tunnel target denied | `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`, then close. No tunnel is opened and the target is never contacted | Stream with `blocked_by: target_scope`, `state: error`, `tags.via` = `connect` (no message rows) |
+| Plain-HTTP forward proxy target denied | `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`, then close. The target is never contacted | Stream with `blocked_by: target_scope`, `state: error`, `tags.via` = `http1-forward` (no message rows) |
+| SOCKS5 tunnel target denied | `REP 0x02` (connection not allowed), then close. When the deny only takes effect after the reply was sent (a TLS-passthrough target under a path-scoped allow, or a policy change while the tunnel was being admitted) the client sees `REP 0x00` and then the connection is closed with no further byte. The target is never contacted | Stream with `blocked_by: target_scope`, `state: error`, `tags.via` = `socks5` (no message rows) |
+| `tcp_forwards` target denied when a client connects | Plaintext `protocol: http` / `websocket` / `sse`: `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`, then close. Every other protocol and every `tls: true` entry: the connection is closed with no byte (a TLS client's handshake fails). The target is never contacted | Stream with `blocked_by: target_scope`, `state: error`, `tags.via` = `tcp-forward`, `tags.forward_port`, `tags.forward_protocol` (no message rows) |
 
 A raw connection is closed rather than having single chunks dropped because a
 byte stream has no message boundary to drop at: removing some bytes and relaying
@@ -385,7 +388,7 @@ What happens to traffic over the limit depends on where it enters. In every live
 - Plaintext `http` / `websocket` / `sse` entries: the same `HTTP/1.1 429 Too Many Requests` bytes as the CONNECT / forward gates, then the connection closes.
 - Every other entry (`raw`, `auto`, `http2`, `grpc`) and every `tls: true` entry: the connection is closed with no byte written -- no 429 inside an un-terminated TLS handshake or after an h2 preface.
 
-A forward's target scope refusal is logged but not recorded as a Stream. The same holds for a target scope refusal (403 / `REP 0x02`) on the CONNECT, plain HTTP forward and SOCKS5 gates: only rate-limit refusals are recorded there.
+A target scope refusal on these gates — `tcp_forwards`, CONNECT, plain HTTP forward and SOCKS5 — is recorded too, as an error Stream with `blocked_by: "target_scope"`, `failure_reason: "target_scope"`, `tags.via`, `tags.target` (the target exactly as the gate checked it) and `tags.reason` (the scope check's reason; `policy changed during admission: <reason>` when a policy change landed while the connection was being admitted), plus `tags.forward_port` / `tags.forward_protocol` for `tcp_forwards`. Find them with `query` `filter.blocked_by: "target_scope"`. A target excluded by `capture_scope` is refused the same way but not recorded.
 
 ### `set_rate_limits`
 

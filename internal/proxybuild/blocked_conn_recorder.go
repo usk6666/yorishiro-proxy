@@ -42,9 +42,10 @@ type blockedConn struct {
 // blockedConnRecorder writes one self-contained State="error" Stream per
 // blockedConn. It is the recording seam shared by the listener-level gates
 // that refuse a connection before the Pipeline runs: the transparent
-// listener's Observer.OnBlocked, the tcp_forwards accept-time rate-limit
-// gate, and the CONNECT / plain-HTTP forward / SOCKS5 rate-limit gates
-// (connector.OnGateRefusalFunc, via gateRefusalCallback). A nil recorder
+// listener's Observer.OnBlocked, the tcp_forwards accept-time scope and
+// rate-limit gates, and the CONNECT / plain-HTTP forward / SOCKS5 scope
+// and rate-limit gates (connector.OnGateRefusalFunc, via
+// gateRefusalCallback; scope refusals since USK-1403). A nil recorder
 // (no flow store) records nothing.
 //
 // Each record is one synchronous SaveStream on the refused connection's own
@@ -114,8 +115,10 @@ func (r *blockedConnRecorder) record(ctx context.Context, b blockedConn) {
 }
 
 // gateRefusalCallback adapts r to the connector's CONNECT / plain-HTTP
-// forward / SOCKS5 gate-refusal hook (USK-1381). A nil recorder yields a
-// nil callback, so the handlers only log.
+// forward / SOCKS5 gate-refusal hook (USK-1381). The refusal's BlockedBy
+// (rate_limit or target_scope, USK-1403) becomes both the Stream's
+// BlockedBy and its FailureReason. A nil recorder yields a nil callback,
+// so the handlers only log.
 func gateRefusalCallback(r *blockedConnRecorder) connector.OnGateRefusalFunc {
 	if r == nil {
 		return nil

@@ -142,8 +142,9 @@ type CONNECTHandlerConfig struct {
 	OnRequestHeadFailure OnRequestHeadFailureFunc
 
 	// OnGateRefusal is invoked after a CONNECT the rate-limit gate refused
-	// has been answered 429 (USK-1381). Scope refusals do not fire it.
-	// Nil disables — the refusal is only logged.
+	// has been answered 429 (USK-1381), and after one the scope gate — or
+	// LiveConns.Register's admission re-check — refused has been answered
+	// 403 (USK-1403). Nil disables — the refusal is only logged.
 	OnGateRefusal OnGateRefusalFunc
 
 	// InnerPeekTimeout bounds how long the handler waits for the first
@@ -239,17 +240,21 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		route := classifyTunnelRoute(cfg.PassthroughList, cfg.BuildCfg, ut)
 
 		// Step 2-3: scope and rate-limit policy checks. A denial is
-		// answered with 403 / 429 and the connection closes (USK-1246).
-		if resp, denial := connectPolicyReject(cfg, target, route.opaque(), connLogger); resp != nil {
+		// answered with 403 / 429 and the connection closes (USK-1246),
+		// then recorded (USK-1381 / USK-1403).
+		if resp, denial, scopeReason := connectPolicyReject(cfg, target, route.opaque(), connLogger); resp != nil {
 			writeForwardResponse(pc, resp)
 			reportRateLimitRefusal(ctx, cfg.OnGateRefusal, "connect", target, pc.RemoteAddr(), denial)
+			if scopeReason != "" {
+				reportScopeRefusal(ctx, cfg.OnGateRefusal, "connect", target, pc.RemoteAddr(), scopeReason)
+			}
 			return nil
 		}
 
 		// USK-1160: track the admitted tunnel so a policy change that no
 		// longer admits target cancels ctx — which every route below
 		// (passthrough relay, inner dispatch, TLS MITM stack) watches.
-		ctx, release, ok := trackAdmitted(ctx, cfg.LiveConns, "connect", target, func() (bool, string) {
+		ctx, release, err := trackAdmitted(ctx, cfg.LiveConns, "connect", target, func() (bool, string) {
 			allowed, reason, _ := connectScopeCheck(cfg.Scope, target, route.opaque())
 			return allowed, reason
 		}, func() (bool, string) {
@@ -257,8 +262,9 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 			return allowed, reason
 		}, connLogger)
 		defer release()
-		if !ok {
+		if err != nil {
 			writeForwardErrorResponse(pc, 403, "Forbidden", connectScopeDenyDetail)
+			reportScopeRefusal(ctx, cfg.OnGateRefusal, "connect", target, pc.RemoteAddr(), AdmissionRaceReason(err))
 			return nil
 		}
 
@@ -323,19 +329,20 @@ func RateLimitRefusalResponse() []byte {
 // response when the target is admitted, otherwise the response the caller
 // must send before closing — 403 for a scope denial, 429 for a rate-limit
 // denial (USK-1246) — after emitting the denial log line. denial is
-// non-nil only for a rate-limit refusal, so the caller can record it
-// (USK-1381). Scope runs first, so a scope-denied CONNECT consumes no
+// non-nil only for a rate-limit refusal (USK-1381) and scopeReason is
+// non-empty only for a scope refusal (USK-1403), so the caller can record
+// either. Scope runs first, so a scope-denied CONNECT consumes no
 // rate-limit token. opaque selects the strict scope check for routes that
 // never yield a path (USK-1130).
-func connectPolicyReject(cfg CONNECTHandlerConfig, target string, opaque bool, logger *slog.Logger) (resp []byte, denial *RateLimitDenial) {
+func connectPolicyReject(cfg CONNECTHandlerConfig, target string, opaque bool, logger *slog.Logger) (resp []byte, denial *RateLimitDenial, scopeReason string) {
 	allowed, reason, splitErr := connectScopeCheck(cfg.Scope, target, opaque)
 	if splitErr != nil {
 		logger.Debug("invalid CONNECT target", "error", splitErr)
-		return forwardErrorResponse(400, "Bad Request", "yorishiro-proxy: invalid CONNECT target"), nil
+		return forwardErrorResponse(400, "Bad Request", "yorishiro-proxy: invalid CONNECT target"), nil, ""
 	}
 	if !allowed {
 		logger.Info("CONNECT target blocked by scope", "reason", reason)
-		return forwardErrorResponse(403, "Forbidden", connectScopeDenyDetail), nil
+		return forwardErrorResponse(403, "Forbidden", connectScopeDenyDetail), nil, nonEmptyScopeReason(reason)
 	}
 	if cfg.RateLimiter != nil {
 		host, _, _ := net.SplitHostPort(target)
@@ -343,10 +350,10 @@ func connectPolicyReject(cfg CONNECTHandlerConfig, target string, opaque bool, l
 			logger.Info("CONNECT target blocked by rate limit",
 				"limit_type", denial.LimitType,
 				"effective_rps", denial.EffectiveRPS)
-			return RateLimitRefusalResponse(), denial
+			return RateLimitRefusalResponse(), denial, ""
 		}
 	}
-	return nil, nil
+	return nil, nil, ""
 }
 
 // connectScopeCheck is the CONNECT gate's scope check: scheme "https",

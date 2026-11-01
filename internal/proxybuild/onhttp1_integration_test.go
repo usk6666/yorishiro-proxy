@@ -240,8 +240,8 @@ func TestProxybuild_PlainHTTP_ForwardProxy_ReachesUpstream(t *testing.T) {
 
 // TestProxybuild_PlainHTTP_ScopeBlocks verifies the plain-HTTP forward
 // proxy honors TargetScope deny rules: a denied target produces a 403
-// response (the proxy's own response, not the upstream's) and no Stream
-// is recorded.
+// response (the proxy's own response, not the upstream's) and only the
+// refusal is recorded (one target_scope Stream, USK-1403).
 func TestProxybuild_PlainHTTP_ScopeBlocks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -310,9 +310,18 @@ func TestProxybuild_PlainHTTP_ScopeBlocks(t *testing.T) {
 		t.Errorf("Server header = %q, want yorishiro-proxy", got)
 	}
 
-	// No Stream should be recorded — scope denial happens before stack build.
+	// The scope denial happens before stack build, so no exchange is
+	// recorded; since USK-1403 the refusal itself is, as one
+	// target_scope error Stream with no Flow rows.
 	time.Sleep(200 * time.Millisecond)
-	if n := len(store.Streams()); n != 0 {
-		t.Errorf("expected 0 streams (scope denied), got %d", n)
+	streams := store.Streams()
+	if len(streams) != 1 {
+		t.Fatalf("expected 1 refusal stream (scope denied), got %d", len(streams))
+	}
+	if st := streams[0]; st.BlockedBy != "target_scope" || st.State != "error" {
+		t.Errorf("refusal stream BlockedBy=%q State=%q, want target_scope / error", st.BlockedBy, st.State)
+	}
+	if n := len(store.Flows()); n != 0 {
+		t.Errorf("expected 0 flows (scope denied), got %d", n)
 	}
 }

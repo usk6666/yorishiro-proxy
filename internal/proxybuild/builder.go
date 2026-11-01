@@ -495,8 +495,9 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	headRecorder := buildRequestHeadRecorder(deps.FlowStore, deps.RecordScope, listenerName, logger)
 
 	// Recorder for connections a listener-level gate refuses before any
-	// Envelope exists: the tcp_forwards rate-limit gate, and the CONNECT /
-	// SOCKS5 / plain-HTTP forward rate-limit gates via onGateRefusal.
+	// Envelope exists: the tcp_forwards scope and rate-limit gates, and the
+	// CONNECT / SOCKS5 / plain-HTTP forward scope and rate-limit gates via
+	// onGateRefusal (USK-1381 / USK-1403).
 	blockedRecorder := newBlockedConnRecorder(deps.FlowStore, listenerName, logger, deps.RecordScope)
 	onGateRefusal := gateRefusalCallback(blockedRecorder)
 

@@ -302,11 +302,12 @@ func TestProxybuild_GateRateLimitRecord_NoLimitUnchanged(t *testing.T) {
 	}
 }
 
-// TestProxybuild_GateRateLimitRecord_ScopeRefusalNotRecorded is test-plan
-// 6: a scope-refused CONNECT (403) spends no token and records no
-// rate_limit Stream; once the deny is lifted the next CONNECT is admitted
-// under a burst-1 per-host limit.
-func TestProxybuild_GateRateLimitRecord_ScopeRefusalNotRecorded(t *testing.T) {
+// TestProxybuild_GateRateLimitRecord_ScopeRefusalRecordedAsTargetScope is
+// test-plan 6, as amended by USK-1403: a scope-refused CONNECT (403) spends
+// no token and records exactly one target_scope Stream and no rate_limit
+// Stream; once the deny is lifted the next CONNECT is admitted under a
+// burst-1 per-host limit.
+func TestProxybuild_GateRateLimitRecord_ScopeRefusalRecordedAsTargetScope(t *testing.T) {
 	target, _ := acceptCountingUpstream(t)
 	p := startGateRateLimitProxy(t, burstOneLimiter(true), nil)
 	p.scope.SetPolicyRules(nil, []connector.TargetRule{{Hostname: "127.0.0.1", Ports: []int{portOf(t, target)}}})
@@ -320,9 +321,15 @@ func TestProxybuild_GateRateLimitRecord_ScopeRefusalNotRecorded(t *testing.T) {
 	if !strings.HasPrefix(line, "HTTP/1.1 200") {
 		t.Errorf("CONNECT after lifting the deny = %q, want 200 (the scope refusal must not spend the token)", line)
 	}
+	if s := p.waitScopeStreams(1); len(s) != 1 {
+		t.Errorf("%d target_scope Streams, want 1; streams=%v", len(s), p.store.Streams())
+	}
 	time.Sleep(200 * time.Millisecond)
 	if s := p.rateLimitStreams(); len(s) != 0 {
 		t.Errorf("%d rate_limit Streams, want 0", len(s))
+	}
+	if s := p.blockedStreams("target_scope"); len(s) != 1 {
+		t.Errorf("%d target_scope Streams after settling, want exactly 1", len(s))
 	}
 }
 

@@ -56,6 +56,42 @@ import (
 // it with errors.Is(context.Cause(ctx), ErrTargetScopeRevoked).
 var ErrTargetScopeRevoked = errors.New("target scope no longer admits this connection")
 
+// ScopeAdmissionError is the error Register returns when its admission
+// re-check refuses the connection — a policy change landed between the
+// gate's own check and the registration (USK-1403). It wraps
+// ErrTargetScopeRevoked and carries the scope check's reason so the gate
+// can record the refusal.
+type ScopeAdmissionError struct {
+	Reason string
+}
+
+// Error returns ErrTargetScopeRevoked's message followed by the reason.
+func (e *ScopeAdmissionError) Error() string {
+	return ErrTargetScopeRevoked.Error() + ": " + e.Reason
+}
+
+// Unwrap returns ErrTargetScopeRevoked.
+func (e *ScopeAdmissionError) Unwrap() error { return ErrTargetScopeRevoked }
+
+// admissionRaceReasonPrefix marks a recorded scope refusal that Register's
+// re-check decided rather than the gate itself.
+const admissionRaceReasonPrefix = "policy changed during admission: "
+
+// AdmissionRaceReason is the reason a gate records for a connection
+// Register refused with err (USK-1403): "policy changed during admission: "
+// followed by the scope check's reason (err's text when err is not a
+// *ScopeAdmissionError).
+func AdmissionRaceReason(err error) string {
+	var se *ScopeAdmissionError
+	if errors.As(err, &se) {
+		return admissionRaceReasonPrefix + nonEmptyScopeReason(se.Reason)
+	}
+	if err == nil {
+		return admissionRaceReasonPrefix + fallbackScopeReason
+	}
+	return admissionRaceReasonPrefix + err.Error()
+}
+
 // LiveConnAdmitFunc re-runs the admission scope check of the gate that
 // admitted a connection. It must be the same check the gate ran (same
 // scheme literal, host, port and path ""), so a connection is kept iff an
@@ -186,7 +222,7 @@ func (r *LiveConns) Register(ctx context.Context, c LiveConn) (context.Context, 
 
 	if c.Admit != nil {
 		if allowed, reason := c.Admit(); !allowed {
-			err := fmt.Errorf("%w: %s", ErrTargetScopeRevoked, reason)
+			err := &ScopeAdmissionError{Reason: reason}
 			cancel(err)
 			release()
 			return cctx, release, err
@@ -328,15 +364,16 @@ func (r *LiveConns) Len() int {
 	return len(r.conns)
 }
 
-// trackAdmitted registers a connection a gate just admitted. ok=false means
-// a policy change landed between the gate's check and the registration and
-// the connection must be rejected (an Info line was logged). On ok=true the
-// caller must use the returned ctx for everything that follows and defer
-// release.
+// trackAdmitted registers a connection a gate just admitted. A non-nil err
+// (Register's *ScopeAdmissionError) means a policy change landed between
+// the gate's check and the registration and the connection must be
+// rejected (an Info line was logged); AdmissionRaceReason(err) is the
+// reason to record (USK-1403). On nil the caller must use the returned
+// ctx for everything that follows. The caller defers release either way.
 //
 // admitOpaque is the gate's strict check (LiveConn.AdmitOpaque); nil when
 // admit is already strict.
-func trackAdmitted(ctx context.Context, reg *LiveConns, via, target string, admit, admitOpaque LiveConnAdmitFunc, logger *slog.Logger) (context.Context, func(), bool) {
+func trackAdmitted(ctx context.Context, reg *LiveConns, via, target string, admit, admitOpaque LiveConnAdmitFunc, logger *slog.Logger) (context.Context, func(), error) {
 	tctx, release, err := reg.Register(ctx, LiveConn{
 		ConnID:      ConnIDFromContext(ctx),
 		Listener:    ListenerNameFromContext(ctx),
@@ -348,9 +385,9 @@ func trackAdmitted(ctx context.Context, reg *LiveConns, via, target string, admi
 	if err != nil {
 		logger.Info("target blocked by scope (policy changed during admission)",
 			"via", via, "error", err)
-		return tctx, release, false
+		return tctx, release, err
 	}
-	return tctx, release, true
+	return tctx, release, nil
 }
 
 // liveConnKey is the context key under which Register stores the

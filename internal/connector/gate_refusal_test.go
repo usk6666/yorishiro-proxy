@@ -83,7 +83,9 @@ func TestNewCONNECTHandler_OnGateRefusal(t *testing.T) {
 		}
 		assertRateLimitRefusal(t, capt.calls(), "connect", "limited.example:443", "limited.example")
 	})
-	t.Run("scope refusal does not fire", func(t *testing.T) {
+	// USK-1403: a scope refusal fires the hook too, as target_scope,
+	// after the unchanged 403.
+	t.Run("scope refusal fires once as target_scope after the 403", func(t *testing.T) {
 		var capt gateRefusalCapture
 		scope := NewTargetScope()
 		scope.SetPolicyRules(nil, []TargetRule{{Hostname: "blocked.example"}})
@@ -97,9 +99,7 @@ func TestNewCONNECTHandler_OnGateRefusal(t *testing.T) {
 		})
 		got := runDeniedCONNECT(t, handler, "blocked.example:443")
 		assertCONNECTReject(t, got, 403, "Forbidden", connectScopeDenyDetail)
-		if n := len(capt.calls()); n != 0 {
-			t.Errorf("OnGateRefusal called %d times on a scope refusal, want 0", n)
-		}
+		assertScopeRefusal(t, capt.calls(), "connect", "blocked.example:443", "blocked.example", "blocked by policy deny rule")
 	})
 }
 
@@ -141,7 +141,9 @@ func TestNewHTTP1ForwardHandler_OnGateRefusal(t *testing.T) {
 			t.Errorf("ClientAddr = %q, want the ctx client address", calls[0].ClientAddr)
 		}
 	})
-	t.Run("scope refusal does not fire", func(t *testing.T) {
+	// USK-1403: a scope refusal fires the hook too, as target_scope,
+	// after the unchanged 403.
+	t.Run("scope refusal fires once as target_scope after the 403", func(t *testing.T) {
 		var capt gateRefusalCapture
 		scope := NewTargetScope()
 		scope.SetPolicyRules(nil, []TargetRule{{Hostname: "blocked.example"}})
@@ -152,11 +154,13 @@ func TestNewHTTP1ForwardHandler_OnGateRefusal(t *testing.T) {
 			OnGateRefusal: capt.fn,
 		})
 		got := runForwardRefusal(t, handler, "GET http://blocked.example/ HTTP/1.1\r\nHost: blocked.example\r\n\r\n")
-		if !bytes.HasPrefix(got, []byte("HTTP/1.1 403")) {
-			t.Errorf("client read %q, want 403", got)
+		if want := forwardErrorResponse(403, "Forbidden", "yorishiro-proxy: target blocked by scope"); !bytes.Equal(got, want) {
+			t.Errorf("client read %q, want %q", got, want)
 		}
-		if n := len(capt.calls()); n != 0 {
-			t.Errorf("OnGateRefusal called %d times on a scope refusal, want 0", n)
+		calls := capt.calls()
+		assertScopeRefusal(t, calls, "http1-forward", "blocked.example:80", "blocked.example", "blocked by policy deny rule")
+		if len(calls) == 1 && calls[0].ClientAddr != "192.0.2.7:4242" {
+			t.Errorf("ClientAddr = %q, want the ctx client address", calls[0].ClientAddr)
 		}
 	})
 }
@@ -229,7 +233,9 @@ func TestNewSOCKS5Handler_OnGateRefusal(t *testing.T) {
 		}
 		assertRateLimitRefusal(t, capt.calls(), "socks5", "limited.example:443", "limited.example")
 	})
-	t.Run("scope refusal does not fire", func(t *testing.T) {
+	// USK-1403: a negotiator scope refusal fires the hook too, as
+	// target_scope, after the unchanged REP=0x02.
+	t.Run("scope refusal fires once as target_scope after REP 0x02", func(t *testing.T) {
 		var capt gateRefusalCapture
 		neg := NewSOCKS5Negotiator(newTestLogger())
 		scope := NewTargetScope()
@@ -244,9 +250,7 @@ func TestNewSOCKS5Handler_OnGateRefusal(t *testing.T) {
 		if rep := runSOCKS5Refusal(t, handler, "blocked.example"); rep != socks5ReplyConnectionNotAllowed {
 			t.Errorf("REP = 0x%02x, want 0x02", rep)
 		}
-		if n := len(capt.calls()); n != 0 {
-			t.Errorf("OnGateRefusal called %d times on a scope refusal, want 0", n)
-		}
+		assertScopeRefusal(t, capt.calls(), "socks5", "blocked.example:443", "blocked.example", "blocked by policy deny rule")
 	})
 	t.Run("nil callback", func(t *testing.T) {
 		neg := NewSOCKS5Negotiator(newTestLogger())
