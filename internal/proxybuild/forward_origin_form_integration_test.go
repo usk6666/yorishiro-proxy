@@ -265,6 +265,33 @@ func TestProxybuild_ForwardOriginForm_StripsAndRecords(t *testing.T) {
 	}
 }
 
+// TestProxybuild_ForwardOriginForm_NoHostKeepsAbsoluteForm: an HTTP/1.0
+// absolute-form request without a Host header carries its authority only
+// in the target, so the target is relayed as received (no Host is added)
+// while Proxy-* are still stripped.
+func TestProxybuild_ForwardOriginForm_NoHostKeepsAbsoluteForm(t *testing.T) {
+	up := startFwdHeads(t, 0)
+	_, proxyAddr := startFwdOriginFormStack(t, nil)
+
+	req := "GET http://" + up.addr() + "/legacy?a=1 HTTP/1.0\r\n" +
+		"User-Agent: legacy/1.0\r\n" +
+		"Proxy-Connection: close\r\n" +
+		"\r\n"
+	want := "GET http://" + up.addr() + "/legacy?a=1 HTTP/1.0\r\n" +
+		"User-Agent: legacy/1.0\r\n" +
+		"\r\n"
+	c, br := fwdDial(t, proxyAddr)
+	if _, err := c.Write([]byte(req)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if status := readFwdResponse(t, br); !strings.Contains(status, " 200 ") {
+		t.Fatalf("status = %q, want 200", status)
+	}
+	if got := up.waitHead(t, 1); got != want {
+		t.Errorf("upstream head:\n got %q\nwant %q", got, want)
+	}
+}
+
 // fwdConnectProxy is an upstream HTTP CONNECT proxy that records each
 // CONNECT head and relays the tunnel.
 type fwdConnectProxy struct {

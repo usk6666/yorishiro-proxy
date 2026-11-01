@@ -178,6 +178,49 @@ func TestForwardOriginForm_Send(t *testing.T) {
 			},
 			want: "POST /p HTTP/1.1\r\nHost: h.test\r\nContent-Length: 3\r\n\r\nbye",
 		},
+		// No Host header (legal in HTTP/1.0): the absolute-form target is
+		// the only place the authority is carried, so it is kept as
+		// received. Proxy-* stripping still applies. No Host is added.
+		{
+			name: "no Host keeps absolute-form verbatim",
+			req:  "GET http://h.test/p?x=1 HTTP/1.0\r\nUser-Agent: ua\r\n\r\n",
+			want: "GET http://h.test/p?x=1 HTTP/1.0\r\nUser-Agent: ua\r\n\r\n",
+		},
+		{
+			name: "no Host keeps absolute-form but strips Proxy headers",
+			req:  "GET http://h.test HTTP/1.0\r\nProxy-Connection: keep-alive\r\nX-A:  1 \r\nproxy-authorization: Basic x\r\n\r\n",
+			want: "GET http://h.test HTTP/1.0\r\nX-A:  1 \r\n\r\n",
+		},
+		{
+			name: "no Host OPTIONS empty path keeps absolute-form",
+			req:  "OPTIONS http://h.test:8001 HTTP/1.0\r\n\r\n",
+			want: "OPTIONS http://h.test:8001 HTTP/1.0\r\n\r\n",
+		},
+		{
+			name: "whitespace before colon is not a Host header",
+			req:  "GET http://h.test/p HTTP/1.0\r\nHost : h.test\r\nProxy-Connection: k\r\n\r\n",
+			want: "GET http://h.test/p HTTP/1.0\r\nHost : h.test\r\n\r\n",
+		},
+		{
+			name:   "no Host changed path is spliced behind the prefix",
+			req:    "GET http://h.test/old?q=1 HTTP/1.0\r\nProxy-Connection: k\r\n\r\n",
+			mutate: func(m *envelope.HTTPMessage) { m.Path = "/new" },
+			want:   "GET http://h.test/new?q=1 HTTP/1.0\r\n\r\n",
+		},
+		{
+			name:   "no Host method-only change keeps absolute-form",
+			req:    "GET http://h.test/p HTTP/1.0\r\n\r\n",
+			mutate: func(m *envelope.HTTPMessage) { m.Method = "HEAD" },
+			want:   "HEAD http://h.test/p HTTP/1.0\r\n\r\n",
+		},
+		{
+			name: "no Host header edit re-serializes absolute-form without Proxy headers",
+			req:  "GET http://h.test/p HTTP/1.0\r\nProxy-Authorization: Basic x\r\nX-A:  1\r\n\r\n",
+			mutate: func(m *envelope.HTTPMessage) {
+				m.Headers = append(m.Headers, envelope.KeyValue{Name: "X-M", Value: "1"})
+			},
+			want: "GET http://h.test/p HTTP/1.0\r\nX-A:  1\r\nX-M: 1\r\n\r\n",
+		},
 		{
 			name: "origin-form without Proxy headers is verbatim",
 			req:  "GET /p?x HTTP/1.1\r\nHost: h.test\r\nX-A:  1 \r\n\r\n",
@@ -262,6 +305,22 @@ func TestForwardOriginForm_ZeroCopy(t *testing.T) {
 	}
 	if len(head) == 0 || len(opaque.rawReq.WireHead) == 0 || &head[0] != &opaque.rawReq.WireHead[0] {
 		t.Errorf("head does not alias rawReq.WireHead (a copy was made)")
+	}
+	if string(head) != wire {
+		t.Errorf("head = %q, want %q", head, wire)
+	}
+}
+
+// TestForwardOriginForm_NoHostZeroCopy: an absolute-form request with no
+// Host header and no Proxy-* header needs no conversion (its target is
+// kept as received), so it still takes the zero-copy path.
+func TestForwardOriginForm_NoHostZeroCopy(t *testing.T) {
+	const wire = "GET http://h.test/p HTTP/1.0\r\nX-A:  1 \r\n\r\n"
+	env := parseForwardRequest(t, wire, fwdOpts()...)
+	opaque := env.Opaque.(*opaqueHTTP1)
+	head, d := opaqueRequestHead(env.Message.(*envelope.HTTPMessage), opaque)
+	if !d.zeroCopy {
+		t.Errorf("zeroCopy = false, want true for a Host-less absolute-form request without Proxy headers")
 	}
 	if string(head) != wire {
 		t.Errorf("head = %q, want %q", head, wire)
