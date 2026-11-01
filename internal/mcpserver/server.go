@@ -57,6 +57,7 @@ var EnvVarMap = map[string]string{
 	"mcp-http-token":     "YP_MCP_HTTP_TOKEN",
 	"ui-dir":             "YP_UI_DIR",
 	"export-dir":         "YP_EXPORT_DIR",
+	"mcp-tools":          "YP_MCP_TOOLS",
 	"target-policy-file": "YP_TARGET_POLICY_FILE",
 	"open-browser":       "YP_OPEN_BROWSER",
 	"tls-fingerprint":    "YP_TLS_FINGERPRINT",
@@ -194,10 +195,16 @@ func registerFlags(fs *flag.FlagSet, cfg *config.Config) *serverFlags {
 			"    paths outside it are rejected. Must be a dedicated directory used only for exports: MCP callers\n"+
 			"    can overwrite any file in it (default ~/.yorishiro-proxy/exports) (env: YP_EXPORT_DIR)")
 
-	fs.Func("mcp-tools", "MCP tool allowlist", func(v string) error {
-		cfg.MCPTools = config.ParseMCPTools(v)
-		return nil
-	})
+	// USK-1120: MCP tool allowlist. Unset exposes every tool.
+	fs.Func("mcp-tools",
+		"comma-separated allowlist of MCP tools to expose (default: all tools). Unlisted tools are absent\n"+
+			"    from tools/list and calling one fails as an unknown tool, on stdio and HTTP. Names are exact,\n"+
+			"    e.g. resend_http,fuzz_http,query,docs (include docs so the agent can read the help).\n"+
+			"    The Web UI uses the same /mcp endpoint and needs the full tool set (env: YP_MCP_TOOLS)",
+		func(v string) error {
+			cfg.MCPTools = config.ParseMCPTools(v)
+			return nil
+		})
 
 	// -open-browser enables auto-opening the WebUI; default is disabled.
 	fs.BoolVar(&f.openBrowser, "open-browser", false, "open WebUI in browser when HTTP MCP starts (env: YP_OPEN_BROWSER)")
@@ -434,6 +441,11 @@ func checkResolvedConfig(cfg *config.Config, proxyCfg *config.ProxyConfig, confi
 	resolvedMaxBody := config.ResolveMaxBodySize(proxyCfg)
 	if resolvedThreshold > resolvedMaxBody {
 		return exportDirSetting{}, fmt.Errorf("invalid configuration: body_spill_threshold (%d) must be <= max_body_size (%d)", resolvedThreshold, resolvedMaxBody)
+	}
+
+	// USK-1120: every -mcp-tools entry must name a real MCP tool.
+	if err := mcp.ValidateToolAllowlist(cfg.MCPTools); err != nil {
+		return exportDirSetting{}, fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	// USK-1127: resolve the export directory and refuse to start when it
@@ -824,6 +836,10 @@ func buildMCPComponents(
 	}
 	if cfg.UIDir != "" {
 		opts = append(opts, mcp.WithUIDir(cfg.UIDir))
+	}
+	if cfg.MCPTools != nil {
+		opts = append(opts, mcp.WithToolAllowlist(cfg.MCPTools))
+		logToolAllowlist(logger, cfg.MCPTools)
 	}
 	// Set up Bearer token authentication middleware for HTTP transport.
 	// This is always configured when HTTP MCP is enabled (MCPHTTPAddr != "").

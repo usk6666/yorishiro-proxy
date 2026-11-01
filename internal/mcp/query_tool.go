@@ -518,7 +518,7 @@ func validateFuzzResultFilters(input queryInput) error {
 
 // registerQuery registers the query MCP tool.
 func (s *Server) registerQuery() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "query",
 		Description: "Unified read-only query: flows, flow detail, messages, status, config, ca_cert, " +
 			"intercept_queue, macros, macro, fuzz_jobs, fuzz_results. " +

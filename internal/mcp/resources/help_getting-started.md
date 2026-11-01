@@ -28,6 +28,22 @@ yorishiro-proxy server -mcp-http-addr 127.0.0.1:3000 -open-browser
 
 The connection info, including the auth token, is written to `~/.yorishiro-proxy/server.json`.
 
+### Limiting the exposed tools
+
+An operator can start the server with `-mcp-tools` (env `YP_MCP_TOOLS`), a comma-separated allowlist of tool names, to give an agent only some tools:
+
+```bash
+yorishiro-proxy server -stdio-mcp -no-http-mcp -mcp-tools resend_http,fuzz_http,query,docs
+```
+
+- Unlisted tools are absent from `tools/list`, and calling one fails with `unknown tool "<name>"`, the same error as a tool that does not exist. This applies to stdio and HTTP alike.
+- Names are exact and case-sensitive; an unknown name or an empty entry (`a,,b`) stops the server at startup. Unset means every tool.
+- `docs` is not added for you. Include it so the agent can still read this help.
+- No MCP tool can change the list; it is fixed until a restart.
+- The Web UI talks to the same `/mcp` endpoint and needs the full tool set. Use an instance without `-mcp-tools` (or the CLI) for operator work.
+
+It is an operator hardening control, not a security boundary between tenants.
+
 ## 2. Start a listener
 
 ```json

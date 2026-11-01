@@ -106,7 +106,7 @@ var availableManageActions = []string{"delete_flows", "export_flows", "import_fl
 
 // registerManage registers the manage MCP tool.
 func (s *Server) registerManage() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "manage",
 		Description: "Manage flow data and CA certificates. Actions: " +
 			"'delete_flows' (by ID, age, top-level protocol/scheme/http_version, or params.filter " +

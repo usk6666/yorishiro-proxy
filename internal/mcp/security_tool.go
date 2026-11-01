@@ -72,7 +72,7 @@ var availableSecurityActions = []string{"set_target_scope", "update_target_scope
 
 // registerSecurity registers the security MCP tool.
 func (s *Server) registerSecurity() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "security",
 		Description: "Configure runtime security settings (target scope, rate limits, diagnostic budgets) " +
 			"on the Agent Layer. The Policy Layer (set by config) is read-only and bounds Agent rules. " +

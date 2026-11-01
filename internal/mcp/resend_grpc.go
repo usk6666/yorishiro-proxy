@@ -153,7 +153,7 @@ type resendGRPCEndResult struct {
 
 // registerResendGRPC wires the resend_grpc tool into the MCP server.
 func (s *Server) registerResendGRPC() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "resend_grpc",
 		Description: "Resend a gRPC unary RPC on a freshly dialled HTTP/2 upstream. messages[] is the " +
 			"request-side length-prefixed message list (at least one entry required). With flow_id, " +

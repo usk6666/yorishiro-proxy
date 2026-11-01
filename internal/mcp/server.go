@@ -64,6 +64,11 @@ type Server struct {
 	// race on the publication of the Registry pointer.
 	grpcSchemas     *protoschema.Registry
 	grpcSchemasOnce sync.Once
+
+	// toolAllowlist, when non-nil, is the set of tool names registerTools
+	// may register (USK-1120, -mcp-tools). Set by WithToolAllowlist before
+	// registration; never mutated afterwards.
+	toolAllowlist map[string]bool
 }
 
 // tcpForwardHandler is the legacy TCP-forward dispatcher interface, kept
@@ -423,6 +428,34 @@ func (s *Server) RunHTTP(ctx context.Context, addr string, onListening ...func(a
 	return nil
 }
 
+// toolNames is the canonical list of tool names registered by
+// registerTools, in registration order. It backs ToolNames() and the
+// -mcp-tools validation; TestToolNames_MatchesRegisteredTools pins it to
+// what a default NewServer actually lists.
+var toolNames = []string{
+	"proxy_start",
+	"proxy_stop",
+	"configure",
+	"query",
+	"resend_http",
+	"resend_ws",
+	"resend_grpc",
+	"resend_raw",
+	"manage",
+	"fuzz_http",
+	"fuzz_ws",
+	"fuzz_grpc",
+	"fuzz_raw",
+	"macro",
+	"intercept",
+	"security",
+	"plugin_introspect",
+	"grpc_schema",
+	"docs",
+}
+
+// registerTools registers every MCP tool. Each registerX function goes
+// through addTool, which skips a tool outside s.toolAllowlist.
 func (s *Server) registerTools() {
 	s.registerProxyStart()
 	s.registerProxyStop()
