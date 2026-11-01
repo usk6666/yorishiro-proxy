@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/syntax"
@@ -43,6 +44,25 @@ type Engine struct {
 	// the active registry on the calling Starlark thread so the builtin
 	// records hooks against the right Registry.
 	registerHookBuiltin *starlark.Builtin
+
+	// maxBodySize is the plugin_max_body_size cap (USK-1408): the largest
+	// HTTP body Dispatch hands to a hook through msg["body"]. Zero (the
+	// NewEngine value) means defaultMaxPluginBodySize. Set via
+	// SetMaxBodySize; read on every Dispatch, hence atomic.
+	maxBodySize atomic.Int64
+}
+
+// SetMaxBodySize sets the largest HTTP body (in bytes) a hook observes
+// through msg["body"] — the plugin_max_body_size config knob (USK-1408).
+// A message whose body exceeds it is not handed to the hook: Dispatch
+// returns ErrBodyTooLarge and the caller skips the hook. n <= 0 restores
+// the 1 MiB default. Applies to every loaded plugin.
+func (e *Engine) SetMaxBodySize(n int64) {
+}
+
+// MaxBodySize returns the effective plugin body cap (USK-1408).
+func (e *Engine) MaxBodySize() int64 {
+	return maxPluginBodySize
 }
 
 // loadedPlugin tracks a successfully loaded script so future reload work

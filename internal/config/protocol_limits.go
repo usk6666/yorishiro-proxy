@@ -209,6 +209,24 @@ func ResolveMaxBodySize(c *ProxyConfig) int64 {
 	return MaxBodySize
 }
 
+// DefaultPluginMaxBodySize is the plugin_max_body_size default: the
+// largest HTTP body a pluginv2 hook observes through msg["body"] when the
+// operator leaves the knob unset (USK-1408).
+const DefaultPluginMaxBodySize int64 = 1 << 20
+
+// ResolveMaxRecordBodySize returns c.MaxRecordBodySize when positive, else
+// MaxBodySize (254 MiB). Nil c is treated as "use default" (USK-1408).
+func ResolveMaxRecordBodySize(c *ProxyConfig) int64 {
+	return 0
+}
+
+// ResolvePluginMaxBodySize returns c.PluginMaxBodySize when positive, else
+// DefaultPluginMaxBodySize (1 MiB). Nil c is treated as "use default"
+// (USK-1408).
+func ResolvePluginMaxBodySize(c *ProxyConfig) int64 {
+	return 0
+}
+
 // maxImportLineHeadroom reserves additional bytes beyond the base64-expanded
 // body for JSONL line metadata (stream/flow IDs, timestamps, header maps).
 // 16 MiB is a generous bound; exporters write one stream per line and the

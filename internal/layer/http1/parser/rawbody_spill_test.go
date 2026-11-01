@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -201,6 +202,92 @@ func TestParseResponse_RawBody_Identity_Spilled(t *testing.T) {
 	}
 	if !bytes.Equal(fileBytes, []byte(bodyOnWire)) {
 		t.Errorf("identity spilled bytes mismatch: got len=%d, want len=%d", len(fileBytes), len(bodyOnWire))
+	}
+}
+
+// TestParse_RawBody_SpillOverCap_KeepsPrefix is the USK-1408 (R18-b)
+// contract: when the spilled raw capture crosses its cap, the sink keeps
+// exactly the leading cap bytes in the disk-backed buffer and flags the
+// capture truncated — it no longer discards the whole file. Releasing the
+// buffer removes the spill file.
+func TestParse_RawBody_SpillOverCap_KeepsPrefix(t *testing.T) {
+	const threshold = 4 * 1024
+	const maxSize = 8 * 1024
+	const dataLen = 32 * 1024
+
+	chunkedBody := formatHex(dataLen) + "\r\n" + strings.Repeat("Q", dataLen) + "\r\n0\r\n\r\n"
+	identityBody := strings.Repeat("I", dataLen)
+	cases := []struct {
+		name   string
+		raw    string
+		onWire string
+	}{
+		{
+			name:   "chunked",
+			raw:    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + chunkedBody,
+			onWire: chunkedBody,
+		},
+		{
+			name:   "identity",
+			raw:    "HTTP/1.1 200 OK\r\nContent-Length: " + formatInt(dataLen) + "\r\n\r\n" + identityBody,
+			onWire: identityBody,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			resp, err := ParseResponse(newReader(tc.raw))
+			if err != nil {
+				t.Fatalf("ParseResponse() error: %v", err)
+			}
+			enableSpill(t, resp.Body, dir, threshold, maxSize)
+
+			// The semantic body read is unaffected by the raw-capture cap.
+			got, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("ReadAll(body) error: %v", err)
+			}
+			if len(got) != dataLen {
+				t.Errorf("decoded body len = %d, want %d", len(got), dataLen)
+			}
+
+			rp := resp.Body.(RawBodyProvider)
+			if !rp.RawBodyTruncated() {
+				t.Errorf("RawBodyTruncated = false, want true for %d wire bytes over cap %d", len(tc.onWire), maxSize)
+			}
+			bb := rp.RawBodyBuffer()
+			if bb == nil {
+				t.Fatalf("RawBodyBuffer = nil, want the leading %d wire bytes kept on disk", maxSize)
+			}
+			released := false
+			t.Cleanup(func() {
+				if !released {
+					_ = bb.Release()
+				}
+			})
+			kept, err := bb.Bytes(context.Background())
+			if err != nil {
+				t.Fatalf("RawBodyBuffer.Bytes error: %v", err)
+			}
+			if len(kept) != maxSize {
+				t.Errorf("kept raw prefix len = %d, want exactly %d", len(kept), maxSize)
+			}
+			if !bytes.Equal(kept, []byte(tc.onWire[:min(len(tc.onWire), maxSize)])) {
+				t.Errorf("kept raw bytes are not the leading %d wire bytes", maxSize)
+			}
+
+			if err := bb.Release(); err != nil {
+				t.Fatalf("Release: %v", err)
+			}
+			released = true
+			left, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatalf("ReadDir: %v", err)
+			}
+			if len(left) != 0 {
+				t.Errorf("spill dir holds %d files after Release, want 0", len(left))
+			}
+		})
 	}
 }
 
