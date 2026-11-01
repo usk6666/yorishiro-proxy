@@ -323,7 +323,7 @@ Parameters (key=value):
   params.format=jsonl|har           Export format (default: jsonl)
   params.output_path=<path>         File path for export output (inside the server export dir)
   params.input_path=<path>          File path for import input (inside the server export dir)
-  params.on_conflict=skip|replace   Import conflict policy (default: skip)
+  params.on_conflict=<policy>       Import conflict policy: skip (default) | replace | merge
 
 Note: output_path / input_path are confined to the server's export
       directory (server flag -export-dir / YP_EXPORT_DIR, default

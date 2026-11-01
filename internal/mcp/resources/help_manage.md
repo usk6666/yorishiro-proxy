@@ -65,9 +65,34 @@ Import flows from a JSONL file. Each line must be a valid export record with ver
 
 **Parameters:**
 - **input_path** (string, required): File path to read the JSONL import data, confined to the server's export directory (see "File paths" below), e.g. `"flows.jsonl"`.
-- **on_conflict** (string, optional): Conflict resolution policy for duplicate flow IDs. `"skip"` (default) skips existing flows; `"replace"` deletes and re-imports.
+- **on_conflict** (string, optional): What to do when a line's stream ID is already stored. `"skip"` (default) keeps the stored stream and ignores the line; `"replace"` deletes the stored stream and re-imports it; `"merge"` updates the stored stream from the line (the latest line wins for state, tags, failure_reason, timings, TLS fields; conn_id, timestamp, origin, listener_name and client_addr keep their stored values) and inserts the line's flows whose IDs are not stored yet. `"merge"` is idempotent — importing the same lines again changes nothing — and is the policy for flow sink files (below), where one stream spans many lines. Under `"merge"` a line whose flow names another stream than the line's stream is an error.
 
-Returns: imported, skipped, errors, source.
+Flow sink `"gap"` lines are skipped under every policy. Imported rows are not re-emitted by this server's own flow sink.
+
+Returns: imported (new streams), skipped, merged (lines merged into a stored stream; `"merge"` only), errors, source.
+
+### Flow sink files
+A server started with a `flow_sink` block in its `-config` file streams every committed record to `<dir>/flows.jsonl` as it is written: one line per stream creation, stream update and saved flow (recording, `resend_*`, `fuzz_*`, budget and capacity audit rows; not rows written by `import_flows`). SQLite stays the system of record; the sink is a best-effort replica for an off-host consumer. The directory is set by the operator at boot only — no MCP tool can change it, and it may not overlap the export directory, so `manage` can neither read nor plant files there. To bring sink lines into an instance, copy them into its export directory and run `import_flows` with `on_conflict: "merge"` (a line is subject to the same import line-size limit as an `export_flows` line, derived from `max_body_size`).
+
+```json
+{"flow_sink": {"dir": "/var/lib/yorishiro/sink", "max_file_bytes": 67108864, "max_files": 0,
+               "queue_max_events": 4096, "queue_max_bytes": 268435456,
+               "include_bodies": true, "wire_level": "semantic", "fsync": false}}
+```
+
+Only `dir` is required; the values shown are the defaults. `wire_level` takes the `export_flows` vocabulary (`semantic` default, one overlay level, or `all`).
+
+**The sink is not masked.** The SafetyFilter Output Filter applies only where an MCP tool returns recorded data; sink lines carry bodies and raw bytes exactly as recorded. Protect the directory like the database.
+
+**Line format** — a superset of the `export_flows` JSONL record (`version` `"1"`), so every line imports:
+- `event`: `stream_created`, `stream_updated`, `flow_saved` or `gap`.
+- `stream`: the stream's snapshot as stored when the line was written (so it can be newer than the event; the latest line per stream ID wins). `flows`: empty, or the one saved flow (headers, body and `raw_bytes` base64 as stored; an intercept variant pair is two lines).
+- `seq`: per-run event number from 1; `run_id`: one per server process; `emitted_at`: write time (RFC 3339, UTC).
+- A flow whose body + raw bytes exceed `queue_max_bytes` is written without them, with `body_omitted` / `body_size` / `body_sha256` and `raw_bytes_omitted` / `raw_bytes_size` / `raw_bytes_sha256`; importing it marks the flow `body_truncated`.
+
+**Loss is detectable, not prevented.** The proxy never waits for the sink: when the in-memory queue (`queue_max_events` / `queue_max_bytes`) is full, the event is dropped. The next line written is then preceded by `{"event":"gap","gap":{"dropped":N,"dropped_bytes":B,"first_seq":F,"last_seq":L}}` covering exactly the missing `seq` numbers (also written at shutdown for drops no later event reported). `query { resource: "status" }` reports `flow_sink` {dir, run_id, emitted, dropped_events, dropped_bytes, write_errors}. A `seq` jump with no gap line means lines were lost after writing (for example a crash before `fsync`).
+
+**Rotation** — when the next line would take `flows.jsonl` past `max_file_bytes`, the file is renamed to `flows-<UTC timestamp>-<n>.jsonl` (names sort chronologically) and a new `flows.jsonl` is started, so a line never spans two files and a rotated file is complete. A non-empty `flows.jsonl` found at startup (an earlier run's, possibly ending in a torn line after a crash) is rotated away first. The consumer reads rotated files and deletes them when ingested; the proxy deletes rotated files itself only with `max_files` > 0 (oldest first). At shutdown, queued lines are flushed for up to 5 s.
 
 ### File paths (output_path / input_path)
 Every file `export_flows` writes and `import_flows` reads lives in one **export directory** on the proxy server's filesystem. The operator sets it at server start with `-export-dir` / `YP_EXPORT_DIR` (default `~/.yorishiro-proxy/exports/`); no MCP tool can change it. `query { resource: "status" }` (and `resource: "config"`) reports it as `export_dir`, which is how HTTP-remote callers learn where their files land.
@@ -244,6 +269,17 @@ The server refuses to start if the export directory contains its config file, ta
   "params": {
     "input_path": "export.jsonl",
     "on_conflict": "replace"
+  }
+}
+```
+
+### Import a flow sink file
+```json
+{
+  "action": "import_flows",
+  "params": {
+    "input_path": "flows-20261101T120000.000000000Z-000001.jsonl",
+    "on_conflict": "merge"
   }
 }
 ```
