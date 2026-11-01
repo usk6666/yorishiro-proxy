@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -114,5 +115,159 @@ func TestRecordStep_RecordCap_InMemoryBodyTruncated(t *testing.T) {
 	}
 	if got := len(env.Raw); got <= 4096 {
 		t.Errorf("envelope Raw len = %d after Process, want the full wire bytes", got)
+	}
+}
+
+// TestRecordStep_RecordCap_ParserTruncationMerged pins that a record-cap cut
+// keeps a parser-side http_anomaly_raw_body_truncated detail already carried
+// by the message and appends the record-cap note after it.
+func TestRecordStep_RecordCap_ParserTruncationMerged(t *testing.T) {
+	const parserDetail = "raw body capture truncated at 4096 bytes"
+	cases := []struct {
+		name    string
+		cap     int64
+		wantCut bool
+	}{
+		{name: "parser cut plus record cut", cap: 1024, wantCut: true},
+		{name: "parser cut only", cap: 64 << 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &mockWriter{}
+			step := NewRecordStep(w, nil, WithMaxBodySize(tc.cap))
+			env, _ := recordCapResponse(4096, false)
+			m := env.Message.(*envelope.HTTPMessage)
+			m.Anomalies = []envelope.Anomaly{{Type: envelope.AnomalyRawBodyTruncated, Detail: parserDetail}}
+
+			step.Process(context.Background(), env)
+
+			if len(w.flows) != 1 {
+				t.Fatalf("expected 1 flow, got %d", len(w.flows))
+			}
+			got := w.flows[0].Metadata[rawTruncatedKey]
+			if !strings.HasPrefix(got, parserDetail) {
+				t.Errorf("metadata %s = %q, want it to keep the parser detail %q first", rawTruncatedKey, got, parserDetail)
+			}
+			hasRecordNote := strings.Contains(got, "max_record_body_size")
+			if hasRecordNote != tc.wantCut {
+				t.Errorf("metadata %s = %q, record-cap note present = %v, want %v", rawTruncatedKey, got, hasRecordNote, tc.wantCut)
+			}
+		})
+	}
+}
+
+// TestRecordStep_RecordCap_SpilledFileBacked pins the disk-spill raw path:
+// the recorded prefix is byte-identical to the wire prefix whether the cut
+// falls inside the body or inside the header section.
+func TestRecordStep_RecordCap_SpilledFileBacked(t *testing.T) {
+	cases := []struct {
+		name    string
+		cap     int64 // 0 = exactly the full wire length
+		bodyLen int
+		wantCut bool
+	}{
+		{name: "cut inside body", cap: 100, bodyLen: 8 << 10, wantCut: true},
+		{name: "cut inside header", cap: 10, bodyLen: 8 << 10, wantCut: true},
+		{name: "exactly at cap", cap: 0, bodyLen: 512},
+		{name: "under cap", cap: 64 << 10, bodyLen: 512},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, wire := recordCapResponse(tc.bodyLen, true)
+			_ = env.RawBuffer.Release()
+			fb, err := bodybuf.NewFile(t.TempDir(), "rec", 0)
+			if err != nil {
+				t.Fatalf("NewFile: %v", err)
+			}
+			t.Cleanup(func() { _ = fb.Release() })
+			if _, err := fb.Write(wire[len(env.Raw):]); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			env.RawBuffer = fb
+			limit := tc.cap
+			if limit == 0 {
+				limit = int64(len(wire))
+			}
+			w := &mockWriter{}
+			step := NewRecordStep(w, nil, WithMaxBodySize(limit))
+
+			step.Process(context.Background(), env)
+
+			if len(w.flows) != 1 {
+				t.Fatalf("expected 1 flow, got %d", len(w.flows))
+			}
+			fl := w.flows[0]
+			want := wire
+			if int64(len(want)) > limit {
+				want = wire[:limit]
+			}
+			if !bytes.Equal(fl.RawBytes, want) {
+				t.Errorf("RawBytes len = %d, want the leading %d wire bytes", len(fl.RawBytes), len(want))
+			}
+			if _, marked := fl.Metadata[rawTruncatedKey]; marked != tc.wantCut {
+				t.Errorf("metadata %s present = %v, want %v (metadata=%v)", rawTruncatedKey, marked, tc.wantCut, fl.Metadata)
+			}
+		})
+	}
+}
+
+// TestRecordStep_RecordCap_ModifiedVariant pins that the modified variant's
+// RawBytes re-encoded by the WireEncoder is bounded by the record cap too,
+// and that the truncation mark follows the stored bytes. The live envelope
+// is never cut.
+func TestRecordStep_RecordCap_ModifiedVariant(t *testing.T) {
+	cases := []struct {
+		name       string
+		modBodyLen int
+		wantCut    bool
+	}{
+		// Header-only edit on a 4 KiB response: the re-encoded image is
+		// still over the 1 KiB cap.
+		{name: "header edit over cap", modBodyLen: 4096, wantCut: true},
+		// Body shrunk under the cap: the re-encoded image fits, so the
+		// mark derived from the ingress Raw must not survive.
+		{name: "body shrunk under cap", modBodyLen: 16},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const recCap = 1024
+			snap, _ := recordCapResponse(4096, false)
+			current, _ := recordCapResponse(4096, false)
+			cm := current.Message.(*envelope.HTTPMessage)
+			cm.Headers = []envelope.KeyValue{{Name: "X-Edited", Value: "1"}}
+			cm.Body = bytes.Repeat([]byte("M"), tc.modBodyLen)
+			encoded := append([]byte("HTTP/1.1 200 OK\r\nX-Edited: 1\r\nContent-Length: "+strconv.Itoa(tc.modBodyLen)+"\r\n\r\n"), cm.Body...)
+
+			w := &mockWriter{}
+			step := NewRecordStep(w, nil,
+				WithMaxBodySize(recCap),
+				WithWireEncoder(envelope.ProtocolHTTP, func(*envelope.Envelope) ([]byte, error) {
+					return append([]byte(nil), encoded...), nil
+				}),
+			)
+
+			step.Process(withSnapshot(context.Background(), snap), current)
+
+			if len(w.flows) != 2 {
+				t.Fatalf("expected 2 flows (variant pair), got %d", len(w.flows))
+			}
+			origFlow, modFlow := w.flows[0], w.flows[1]
+			if int64(len(origFlow.RawBytes)) != recCap {
+				t.Errorf("original RawBytes len = %d, want cap %d", len(origFlow.RawBytes), recCap)
+			}
+			want := encoded
+			if len(want) > recCap {
+				want = encoded[:recCap]
+			}
+			if !bytes.Equal(modFlow.RawBytes, want) {
+				t.Errorf("modified RawBytes len = %d, want the leading %d encoded bytes", len(modFlow.RawBytes), len(want))
+			}
+			if _, marked := modFlow.Metadata[rawTruncatedKey]; marked != tc.wantCut {
+				t.Errorf("modified metadata %s present = %v, want %v (value=%q)", rawTruncatedKey, marked, tc.wantCut, modFlow.Metadata[rawTruncatedKey])
+			}
+			if got := len(cm.Body); got != tc.modBodyLen {
+				t.Errorf("live Body len = %d after Process, want %d (record must not mutate the wire copy)", got, tc.modBodyLen)
+			}
+		})
 	}
 }
