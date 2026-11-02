@@ -17,12 +17,32 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
 
-// perStreamEventChanCap is the per-stream event channel capacity. Bounded
-// memory: at most cap events queued per stream while the aggregator is
-// draining. The bound exists to cap memory during transient aggregator
-// stalls — WINDOW_UPDATE fires at frame-arrival (not at Send consumption),
-// so a full event channel does NOT stall connection-level flow control.
-const perStreamEventChanCap = 32
+// queuedEvent is one received event waiting in a channel's receive queue.
+// credit is the stream flow-control credit the event carries — its DATA
+// payload length, 0 for header blocks — returned to the peer once the
+// consumer has taken the event (USK-1399). hdrBytes is what a header block
+// is charged against the queued header-block budget (headerBlockCharge);
+// 0 for DATA.
+type queuedEvent struct {
+	env      *envelope.Envelope
+	credit   uint32
+	hdrBytes uint64
+}
+
+// pushResult is the outcome of channel.push.
+type pushResult uint8
+
+const (
+	// pushQueued: the event was appended.
+	pushQueued pushResult = iota
+	// pushDropped: the receive side is closed; the event is unreachable.
+	pushDropped
+	// pushOverflow: the queue already holds the per-stream event cap.
+	pushOverflow
+	// pushHeaderOverflow: the header block would take the queued
+	// header-block bytes past the per-stream budget.
+	pushHeaderOverflow
+)
 
 // channel implements layer.Channel for one HTTP/2 stream, using the
 // event-granular envelope shape (H2HeadersEvent / H2DataEvent /
@@ -51,25 +71,43 @@ type channel struct {
 	// concurrent reader (tests, aggregator inspection paths) cannot race.
 	h2Stream atomic.Uint32
 
-	recv chan *envelope.Envelope
-	// recvMu serializes close(recv) against sends from the reader goroutine.
-	// The reader (deliverEnvelope) holds it for the duration of a send-select;
-	// closeChannelRecv acquires it before closing. Close() sequences
-	// markTerminated → closeChannelRecv so a reader blocked in the send-select
-	// unblocks via the termDone case and releases recvMu before close runs.
-	recvMu        sync.Mutex
-	errCh         chan *layer.StreamError
-	closeRecvOnce sync.Once
-	closeSendOnce sync.Once
+	// Receive queue (USK-1399, RFC-001 §9.1 point 3). The reader goroutine
+	// appends with push, which never blocks, so a consumer that stops
+	// reading one stream cannot stall the connection's other streams. The
+	// consumer — Next, or the detach drain — takes events with pop and
+	// returns their stream credit (returnRecvCredit), so the queued DATA
+	// payload never exceeds the advertised stream window: the peer cannot
+	// send past credit it has not been given back. Flow control bounds
+	// bytes, not events, and not header blocks at all, so two more bounds
+	// apply to what waits unread: the event count — every queued event,
+	// small DATA frames included — is capped at Layer.streamEventCap, and
+	// the header-block bytes at Layer.streamHeaderBudget.
+	//
+	// qMu guards q, qHdrBytes and recvClosed. qNotify (capacity 1, never
+	// closed) wakes a consumer waiting for an event or for the receive side
+	// to close.
+	qMu     sync.Mutex
+	q       []queuedEvent
+	qNotify chan struct{}
+	// qHdrBytes is the sum of hdrBytes over q.
+	qHdrBytes uint64
+	// recvClosed is set by closeRecv when no further event will be queued:
+	// the assembler reached its terminal state, the stream failed, or the
+	// connection shut down. Queued events are still delivered; once they
+	// are drained the consumer sees io.EOF (or the stream error). Distinct
+	// from termDone so a later RST_STREAM (failStream) can still install
+	// its own terminal error via markTerminated without being shadowed by
+	// an io.EOF stamp. push drops events once it is set (USK-721: e.g. a
+	// peer that keeps writing DATA after END_STREAM).
+	recvClosed bool
 
-	// recvClosed is set atomically by closeChannelRecv before closing
-	// ch.recv. deliverEnvelope reads it under recvMu (USK-721) to skip
-	// the send-select when recv has been closed by an assembler-driven
-	// terminal — for example, when an upstream that violated the protocol
-	// keeps writing DATA after END_STREAM. Distinct from termDone so a
-	// later RST_STREAM (failStream) can still install its own terminal
-	// error via markTerminated without being shadowed by an io.EOF stamp.
-	recvClosed atomic.Bool
+	// creditMu guards unacked: stream credit the consumer has taken but
+	// not yet handed to the writer, batched up to Layer.streamCreditBatch.
+	creditMu sync.Mutex
+	unacked  uint32
+
+	errCh         chan *layer.StreamError
+	closeSendOnce sync.Once
 
 	// closedLocal is set by closeStream (Close / CloseWithCode) after the
 	// channel is terminated. Together with the stream being closed on the
@@ -129,7 +167,7 @@ type channel struct {
 	// detachCloseOnce guards closeDetached against re-entry.
 	detachCloseOnce sync.Once
 	// detachFrameRecordCB is invoked synchronously inside runDetachDrain
-	// for every H2DataEvent envelope drained from ch.recv BEFORE the
+	// for every H2DataEvent envelope drained from the queue BEFORE the
 	// payload is written to the detach pipe. Set at most once by the
 	// DetachStream variadic Option WithFrameRecordCallback (USK-889).
 	//
@@ -156,12 +194,187 @@ func newChannel(l *Layer, h2Stream uint32) *channel {
 	c := &channel{
 		layer:    l,
 		streamID: uuid.New().String(),
-		recv:     make(chan *envelope.Envelope, perStreamEventChanCap),
+		qNotify:  make(chan struct{}, 1),
 		errCh:    make(chan *layer.StreamError, 1),
 		termDone: make(chan struct{}),
 	}
 	c.h2Stream.Store(h2Stream)
 	return c
+}
+
+// push appends a received event for the consumer. Reader goroutine only;
+// never blocks. limit is the per-stream event cap, counted over every
+// queued event. A header block is also charged against the Layer's
+// queued header-block budget; a queue holding no header-block bytes always
+// admits one, so a single block larger than the budget still reaches a
+// consumer that reads.
+func (c *channel) push(env *envelope.Envelope, credit uint32, limit int) pushResult {
+	hdr := headerBlockCharge(env)
+	c.qMu.Lock()
+	if c.recvClosed {
+		c.qMu.Unlock()
+		return pushDropped
+	}
+	if len(c.q) >= limit {
+		c.qMu.Unlock()
+		return pushOverflow
+	}
+	if hdr > 0 && c.qHdrBytes > 0 && c.qHdrBytes+hdr > c.layer.streamHeaderBudget {
+		c.qMu.Unlock()
+		return pushHeaderOverflow
+	}
+	c.q = append(c.q, queuedEvent{env: env, credit: credit, hdrBytes: hdr})
+	c.qHdrBytes += hdr
+	c.qMu.Unlock()
+	c.wakeConsumer()
+	return pushQueued
+}
+
+// headerBlockCharge is what a queued header block costs against the
+// per-stream header-block budget: its raw HPACK bytes plus its decoded
+// fields, each measured as in SETTINGS_MAX_HEADER_LIST_SIZE (name + value +
+// 32, RFC 9113 §6.5.2). Pseudo-headers parsed out into event fields and
+// decode anomalies are charged the same way. 0 for any other event.
+func headerBlockCharge(env *envelope.Envelope) uint64 {
+	const fieldOverhead = 32
+	var n uint64
+	field := func(name, value string) {
+		n += uint64(len(name)) + uint64(len(value)) + fieldOverhead
+	}
+	var anomalies []envelope.Anomaly
+	switch m := env.Message.(type) {
+	case *H2HeadersEvent:
+		for _, kv := range m.Headers {
+			field(kv.Name, kv.Value)
+		}
+		for _, v := range []string{m.Method, m.Scheme, m.Authority, m.Path, m.RawQuery, m.StatusReason, m.ConnectProtocol} {
+			if v != "" {
+				field("", v)
+			}
+		}
+		anomalies = m.Anomalies
+	case *H2TrailersEvent:
+		for _, kv := range m.Trailers {
+			field(kv.Name, kv.Value)
+		}
+		anomalies = m.Anomalies
+	default:
+		return 0
+	}
+	for _, a := range anomalies {
+		field(string(a.Type), a.Detail)
+	}
+	return n + uint64(len(env.Raw))
+}
+
+// pop removes the oldest queued event. ok is false when the queue is
+// empty; closed then reports whether the receive side is closed, i.e. no
+// event will ever arrive. The caller returns ev.credit with
+// returnRecvCredit once the consumer has the event.
+func (c *channel) pop() (ev queuedEvent, ok, closed bool) {
+	c.qMu.Lock()
+	if len(c.q) == 0 {
+		closed = c.recvClosed
+		c.qMu.Unlock()
+		return queuedEvent{}, false, closed
+	}
+	ev = c.q[0]
+	c.q[0] = queuedEvent{}
+	c.q = c.q[1:]
+	c.qHdrBytes -= ev.hdrBytes
+	if len(c.q) == 0 {
+		c.q = nil // let the backing array go
+	}
+	more := len(c.q) > 0 || c.recvClosed
+	c.qMu.Unlock()
+	if more {
+		// Keep a wake-up available for another waiter (DetachStream's
+		// drain taking over from a Next caller).
+		c.wakeConsumer()
+	}
+	return ev, true, false
+}
+
+// wakeConsumer signals qNotify without blocking.
+func (c *channel) wakeConsumer() {
+	select {
+	case c.qNotify <- struct{}{}:
+	default:
+	}
+}
+
+// closeRecv marks the receive side closed: queued events stay deliverable,
+// later pushes are dropped. Idempotent.
+func (c *channel) closeRecv() {
+	c.qMu.Lock()
+	c.recvClosed = true
+	c.qMu.Unlock()
+	c.wakeConsumer()
+}
+
+// releaseQueue closes the receive side and drops every queued event. Used
+// when the consumer closes the channel: nobody will read them, and their
+// stream credit is never returned — the stream is reset or fully closed.
+func (c *channel) releaseQueue() {
+	c.qMu.Lock()
+	c.recvClosed = true
+	c.q = nil
+	c.qHdrBytes = 0
+	c.qMu.Unlock()
+	c.wakeConsumer()
+}
+
+// queuedEvents reports how many received events are waiting for the
+// consumer. Test / diagnostic helper.
+func (c *channel) queuedEvents() int {
+	c.qMu.Lock()
+	defer c.qMu.Unlock()
+	return len(c.q)
+}
+
+// queuedHeaderBytes reports the header-block bytes waiting for the
+// consumer (see headerBlockCharge). Diagnostic helper.
+func (c *channel) queuedHeaderBytes() uint64 {
+	c.qMu.Lock()
+	defer c.qMu.Unlock()
+	return c.qHdrBytes
+}
+
+// returnRecvCredit hands n bytes of stream flow-control credit back to the
+// peer once the consumer has taken them (RFC-001 §9.1 point 3). Credit is
+// batched: a WINDOW_UPDATE goes out when at least Layer.streamCreditBatch
+// bytes (half the advertised stream window) have accumulated, carrying
+// exactly the accumulated amount. None is sent once END_STREAM has been
+// received — the peer can send no more DATA on the stream.
+//
+// Never blocks: the writer is woken and writes the WINDOW_UPDATE itself
+// (grantStreamCredit), so a consumer is never held up by a full writer
+// queue. Safe from any goroutine.
+func (c *channel) returnRecvCredit(n uint32) {
+	if n == 0 {
+		return
+	}
+	id := c.h2Stream.Load()
+	if id == 0 {
+		return
+	}
+	c.creditMu.Lock()
+	c.unacked += n
+	if c.unacked < c.layer.streamCreditBatch {
+		c.creditMu.Unlock()
+		return
+	}
+	amount := c.unacked
+	c.unacked = 0
+	c.creditMu.Unlock()
+
+	c.mu.Lock()
+	ended := c.recvEndStream
+	c.mu.Unlock()
+	if ended {
+		return
+	}
+	c.layer.grantStreamCredit(id, amount)
 }
 
 // Closed returns a channel closed when this Channel has reached its terminal
@@ -247,18 +460,12 @@ func (c *channel) H2Layer() *Layer { return c.layer }
 // receive paths), but the guard is defensive — any future caller that
 // races allocation against teardown is covered.
 //
-// Note: this intentionally does NOT close ch.recv. Closing from this
-// external goroutine would race with the reader goroutine's in-flight
-// ch.recv <- env send. We rely on markTerminated closing termDone, which
-// deliverEnvelope's select observes to short-circuit subsequent sends
-// before they would land on a closed channel. (USK-721: there is NO
-// process-wide recover() — an earlier comment claimed a "defer-recover
-// protects" mechanism that does not actually exist; the safety here is
-// purely the termDone gate. The matching ch.recvClosed atomic also
-// short-circuits the assembler-terminal close path, which closes recv
-// without closing termDone.) Any ch.recv close happens later when the
-// caller eventually invokes channel.Close (bilateral close or session
-// teardown).
+// Note: this intentionally does NOT close the receive side. markTerminated
+// closes termDone, which deliverEnvelope checks before queuing, so no
+// further event is queued; events already queued stay deliverable ahead of
+// the error (Next drains the queue before errCh). The queue is released
+// when the caller eventually invokes channel.Close (bilateral close or
+// session teardown).
 func (c *channel) MarkTerminatedWithRST(code uint32, err error) {
 	if id := c.h2Stream.Load(); id != 0 {
 		c.mu.Lock()
@@ -286,38 +493,34 @@ func (c *channel) MarkTerminatedWithRST(code uint32, err error) {
 // Returns io.EOF on normal close, *layer.StreamError on stream error,
 // ctx.Err() on cancellation.
 //
-// Drain priority: already-buffered envelopes on c.recv take precedence over
-// c.errCh. The reader goroutine populates both independently — when the peer
+// Drain priority: already-queued envelopes take precedence over c.errCh.
+// The reader goroutine populates both independently — when the peer
 // sends HEADERS, DATA(END_STREAM), and a trailing RST_STREAM in quick
 // succession (e.g., x/net/http2 server emits RST after a handler returns
 // without draining the request body), the multi-way select would otherwise
 // pick the StreamError before the consumer drains the response envelopes
-// already sitting in recv. That race surfaces as a phantom upstream error on
+// already sitting in the queue. That race surfaces as a phantom upstream error on
 // a stream whose response actually arrived intact, which then cascades into
 // a spurious RST_STREAM(CANCEL) toward the original client because the
 // session never gets to deliver the response.
+//
+// The same holds when the wait itself picks c.errCh: the reader may queue
+// the stream's last events and fail it between the empty pop and the
+// select, leaving the notification and the error ready at once. The error
+// is then put back and the queued event returned; the error follows once
+// the queue is empty.
+//
+// Taking an event returns its stream flow-control credit to the peer
+// (USK-1399): what the peer may send on this stream follows what the
+// consumer has read.
 func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
-	// Fast path: drain any envelope already sitting in recv before consulting
-	// errCh. This is non-blocking — if recv is empty we fall through to the
-	// multi-way select below.
-	select {
-	case env, ok := <-c.recv:
+	for {
+		ev, ok, closed := c.pop()
 		if ok {
-			return env, nil
+			c.returnRecvCredit(ev.credit)
+			return ev.env, nil
 		}
-		// recv is closed; drain a pending error if any, otherwise EOF.
-		select {
-		case se := <-c.errCh:
-			return nil, c.observeStreamError(se)
-		default:
-		}
-		return nil, io.EOF
-	default:
-	}
-	select {
-	case env, ok := <-c.recv:
-		if !ok {
-			// Drain a pending error if any.
+		if closed {
 			select {
 			case se := <-c.errCh:
 				return nil, c.observeStreamError(se)
@@ -325,13 +528,27 @@ func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 			}
 			return nil, io.EOF
 		}
-		return env, nil
-	case se := <-c.errCh:
-		return nil, c.observeStreamError(se)
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-c.layer.shutdown:
-		return nil, io.EOF
+		select {
+		case <-c.qNotify:
+		case se := <-c.errCh:
+			if ev, ok, _ := c.pop(); ok {
+				// Put the error back for the Next that finds the queue
+				// empty. errCh holds one error and was just emptied; if
+				// another producer refilled it meanwhile, that error is
+				// the one delivered, as when both race to send.
+				select {
+				case c.errCh <- se:
+				default:
+				}
+				c.returnRecvCredit(ev.credit)
+				return ev.env, nil
+			}
+			return nil, c.observeStreamError(se)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-c.layer.shutdown:
+			return nil, io.EOF
+		}
 	}
 }
 
@@ -706,13 +923,13 @@ func (c *channel) closeStream(code uint32) {
 				code:     code,
 			}})
 		}
-		// Order matters: markTerminated FIRST so a reader currently blocked
-		// in deliverEnvelope's send-select unblocks via the termDone case
-		// before we acquire recvMu to close ch.recv. Reversing this risks a
-		// deadlock when the consumer has stopped draining and the reader is
-		// stuck mid-send holding recvMu.
+		// markTerminated first so Err() is stable before the receive side
+		// closes. The consumer is done with the stream, so the queued
+		// events are released rather than left for a reader that will
+		// never come (USK-1399); their stream credit is not returned —
+		// the stream is reset above or already fully closed.
 		c.markTerminated(io.EOF)
-		c.layer.closeChannelRecv(c)
+		c.releaseQueue()
 		// Terminated, so failStream / broadcastShutdown no longer need to
 		// reach it: drop it from l.channels once the stream is closed.
 		c.closedLocal.Store(true)
@@ -726,8 +943,10 @@ func (c *channel) closeStream(code uint32) {
 //
 //   - a peer RST_STREAM (handleStreamRST → failStream): RFC 9113 §5.4.2
 //     forbids answering RST_STREAM with RST_STREAM;
-//   - a stream-level WINDOW_UPDATE error (reader), which enqueues its own
-//     RST_STREAM before failStream;
+//   - a stream-level WINDOW_UPDATE error, DATA beyond the stream receive
+//     window, or an unread queue that reached its event cap or header-block
+//     budget (reader), each of which enqueues its own RST_STREAM before
+//     failStream;
 //   - MarkTerminatedWithRST, which emits its own RST_STREAM;
 //   - a peer GOAWAY whose last_stream_id is below a stream this Layer
 //     initiated (failStreamsAfterGoAway): RFC 9113 §6.8 — the GOAWAY

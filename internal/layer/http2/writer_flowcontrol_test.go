@@ -258,8 +258,13 @@ func TestWriter_FlowControl_GoAwayRefusesBlockedStream(t *testing.T) {
 	if err := peer.wr.WriteHeaders(1, false, true, enc); err != nil {
 		t.Fatal(err)
 	}
-	if err := peer.wr.WriteData(1, false, make([]byte, 1000)); err != nil {
-		t.Fatal(err)
+	// Stream credit follows reads in half-window batches (USK-1399), so the
+	// peer sends half the advertised 16 MiB stream window; drainChannel
+	// reads it and the batch makes the writer owe stream 1 a WINDOW_UPDATE.
+	for left := defaultLargeStreamWindow / 2; left > 0; left -= 16384 {
+		if err := peer.wr.WriteData(1, false, make([]byte, 16384)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	wuOK := waitFCFrame(frames, fcProbeTimeout, func(f closeProbeFrame) bool {
 		return f.typ == frame.TypeWindowUpdate && f.streamID == 1

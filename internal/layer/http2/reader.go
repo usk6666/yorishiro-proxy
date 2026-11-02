@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -289,7 +290,7 @@ func (l *Layer) handleStreamHeaders(f *frame.Frame) error {
 // reaches the same stream state as a single-frame one (USK-1137).
 func (l *Layer) finishHeaderFrame(streamID uint32, ch *channel, asm *eventAssembler, env *envelope.Envelope, blockEndStream bool) {
 	if env != nil {
-		l.deliverEnvelope(ch, env, asm)
+		l.deliverEnvelope(ch, env, asm, 0)
 	}
 	if blockEndStream {
 		l.retireOnRecv(streamID, EventRecvEndStream)
@@ -409,30 +410,39 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 		return err
 	}
 	endStream := f.Header.Flags.Has(frame.FlagEndStream)
+	streamID := f.Header.StreamID
+	length := f.Header.Length
 
-	// Consume connection-level recv window using full frame length (incl.
-	// padding) per RFC 9113 §6.9.1.
-	if f.Header.Length > 0 {
-		if err := l.conn.ConsumeRecvWindow(int32(f.Header.Length)); err != nil {
+	// Both windows are consumed with the full frame length, padding
+	// included (RFC 9113 §6.9.1). Connection credit is returned on arrival
+	// for every DATA frame — delivered, ignored or rejected alike — so one
+	// stream's consumer never holds back the connection window (RFC-001
+	// §9.1 point 2). Stream credit is returned as the consumer reads
+	// (channel.returnRecvCredit, point 3).
+	if length > 0 {
+		if err := l.conn.ConsumeRecvWindow(int32(length)); err != nil {
 			return err
 		}
-		if err := l.conn.Streams().ConsumeRecvWindow(f.Header.StreamID, int32(f.Header.Length)); err != nil {
+		l.connWindowUpdate(length)
+		if err := l.conn.Streams().ConsumeRecvWindow(streamID, int32(length)); err != nil {
 			// DATA on a closed stream (USK-1144): typically frames the
 			// peer sent before it saw our RST_STREAM, which RFC 9113 §5.1
-			// says to ignore. It still counted against the connection
-			// window (§6.9), so give that back.
-			if l.conn.Streams().IsClosed(f.Header.StreamID) {
-				l.connWindowUpdate(f.Header.Length)
+			// says to ignore.
+			if l.conn.Streams().IsClosed(streamID) {
+				return nil
+			}
+			var se *StreamError
+			if errors.As(err, &se) && se.Code == ErrCodeFlowControl {
+				l.resetStreamFlowControl(streamID, se)
 				return nil
 			}
 			return err
 		}
 	}
 
-	asm, ch, _ := l.assemblerFor(f.Header.StreamID, false)
+	asm, ch, _ := l.assemblerFor(streamID, false)
 	if asm == nil {
 		// The stream closed between the window accounting and here.
-		l.connWindowUpdate(f.Header.Length)
 		return nil
 	}
 
@@ -440,34 +450,106 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 	// revised — deterministic 1:1 mapping).
 	env := asm.handleDataFrame(payload, endStream)
 
-	// USK-637: WINDOW_UPDATE fires at frame-arrival time (Layer-level),
-	// BEFORE the event is delivered to the aggregator/Pipeline. This keeps
-	// transport-layer ACKing independent of Pipeline consumption speed: a
-	// long-held Pipeline Step cannot stall the connection-level window for
-	// other streams. The per-stream event channel (bounded at 32 slots) is
-	// the only backpressure mechanism — if it fills, the reader blocks on
-	// the deliver step, but WINDOW_UPDATE has already gone out.
-	l.maybeWindowUpdate(f.Header.StreamID, f.Header.Length)
+	// The pad-length byte and padding count against the stream window but
+	// never reach the consumer, so their credit is returned now; it rides
+	// the next batched WINDOW_UPDATE (RFC 9113 §6.9.1). Nothing is
+	// returned on END_STREAM: the peer can send no more DATA.
+	if pad := length - uint32(len(payload)); pad > 0 && !endStream {
+		ch.returnRecvCredit(pad)
+	}
 
 	if env != nil {
-		l.deliverEnvelope(ch, env, asm)
+		l.deliverEnvelope(ch, env, asm, uint32(len(payload)))
 	}
-	// Close the Channel's recv side if the assembler has reached terminal
-	// state. deliverEnvelope already closes recv via its own isDone check on
-	// the terminal path; this is a safe idempotent backstop because
-	// closeChannelRecv is guarded by sync.Once.
+	// Close the Channel's receive side if the assembler has reached its
+	// terminal state. deliverEnvelope already does so on the terminal
+	// path; this is an idempotent backstop.
 	if asm.isDone() {
 		ch.markRecvEnded()
 		l.closeChannelRecv(ch)
 	}
 	if endStream {
-		l.retireOnRecv(f.Header.StreamID, EventRecvEndStream)
+		l.retireOnRecv(streamID, EventRecvEndStream)
 	}
 	return nil
 }
 
-// connWindowUpdate enqueues a connection-level WINDOW_UPDATE for n bytes of
-// DATA that will not be delivered to any stream. No-op for n == 0.
+// resetStreamFlowControl handles DATA beyond the stream receive window the
+// Layer advertised: a stream error FLOW_CONTROL_ERROR (RFC 9113 §6.9.1).
+// The stream is reset and its Channel fails with the events already queued
+// still deliverable; the connection and its other streams carry on. The
+// frame's connection credit has already been returned.
+//
+// A stream whose channel already ended with a reset of its own — this one,
+// queued for an earlier over-window frame and not yet written, or any other
+// — or that its consumer closed (Close queues its own RST_STREAM) gets no
+// further RST_STREAM: the peer may keep sending until it reads the first.
+func (l *Layer) resetStreamFlowControl(streamID uint32, se *StreamError) {
+	l.mu.Lock()
+	ch := l.channels[streamID]
+	l.mu.Unlock()
+	if ch != nil && (ch.streamAlreadyReset() || ch.closedLocal.Load()) {
+		return
+	}
+	slog.Debug("http2: peer exceeded the stream receive window; resetting stream",
+		"role", l.role.String(),
+		"conn_stream_id", l.streamID,
+		"h2_stream_id", streamID,
+		"reason", se.Reason)
+	l.enqueueWrite(writeRequest{rst: &writeRST{streamID: streamID, code: ErrCodeFlowControl}})
+	l.failStream(streamID, &layer.StreamError{
+		Code:   layer.ErrorProtocol,
+		Reason: "FLOW_CONTROL_ERROR: " + se.Reason,
+	})
+}
+
+// resetStreamQueueFull handles a stream whose unread receive queue reached
+// one of the bounds flow control does not provide (RFC-001 §9.1 point 3):
+// the event cap (Layer.streamEventCap, counting every queued event, since
+// flow control bounds DATA by bytes but not by frame count) or the queued
+// header-block budget (Layer.streamHeaderBudget). A compliant peer can
+// reach either — many small frames, or 1xx responses, sent to a stream
+// whose consumer is held — so this is not taken as misbehaviour; the
+// stream is reset with ENHANCE_YOUR_CALM to bound the memory. Its consumer
+// gets the queued events, then the stream error. Sibling streams are
+// unaffected.
+//
+// The first reset for each bound on a connection is logged at Warn, later
+// ones at Debug (R16 operator signal without a per-stream log flood).
+func (l *Layer) resetStreamQueueFull(ch *channel, res pushResult) {
+	streamID := ch.h2Stream.Load()
+	attrs := []any{
+		"role", l.role.String(),
+		"conn_stream_id", l.streamID,
+		"h2_stream_id", streamID,
+	}
+	var msg, reason string
+	var warned *atomic.Bool
+	if res == pushHeaderOverflow {
+		warned = &l.headerBudgetWarned
+		msg = "http2: stream reset: unread header-block bytes reached budget"
+		reason = fmt.Sprintf("ENHANCE_YOUR_CALM: unread header blocks reached the per-stream budget of %d bytes", l.streamHeaderBudget)
+		attrs = append(attrs, "queued_header_bytes", ch.queuedHeaderBytes(), "header_budget", l.streamHeaderBudget)
+	} else {
+		warned = &l.eventCapWarned
+		msg = "http2: stream reset: unread event queue reached cap"
+		reason = fmt.Sprintf("ENHANCE_YOUR_CALM: unread event queue reached the per-stream cap of %d events", l.streamEventCap)
+		attrs = append(attrs, "queued_events", ch.queuedEvents(), "event_cap", l.streamEventCap)
+	}
+	if warned.CompareAndSwap(false, true) {
+		slog.Warn(msg, attrs...)
+	} else {
+		slog.Debug(msg, attrs...)
+	}
+	l.enqueueWrite(writeRequest{rst: &writeRST{streamID: streamID, code: ErrCodeEnhanceYourCalm}})
+	l.failStream(streamID, &layer.StreamError{
+		Code:   layer.ErrorProtocol,
+		Reason: reason,
+	})
+}
+
+// connWindowUpdate enqueues a connection-level WINDOW_UPDATE returning n
+// bytes of DATA that arrived (RFC-001 §9.1 point 2). No-op for n == 0.
 func (l *Layer) connWindowUpdate(n uint32) {
 	if n == 0 {
 		return
@@ -630,17 +712,19 @@ func (l *Layer) emitChannel(ch *channel) {
 	}
 }
 
-// deliverEnvelope sends env on ch's recv chan, applying backpressure. The
-// per-stream event channel is bounded (perStreamEventChanCap); a long-
-// blocking aggregator causes the reader to block here, but WINDOW_UPDATE
-// has already been sent at frame-arrival time so connection-level flow
-// control is not affected.
+// deliverEnvelope queues env for ch's consumer. It never blocks: the queued
+// DATA is bounded by the stream window the Layer advertised (stream credit
+// is only returned as the consumer reads), the event count by
+// Layer.streamEventCap and the header-block bytes by
+// Layer.streamHeaderBudget; a breach of either of the last two resets the
+// stream (USK-1399). credit is the event's stream flow-control credit — its
+// DATA payload length, 0 for header blocks.
 //
-// If the channel's recv has already been closed (e.g., by the aggregator
-// invoking MarkTerminatedWithRST on a MaxBodySize violation), the event
-// is silently dropped — the stream is terminated from the consumer's
-// perspective, so the event would be unreachable anyway.
-func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventAssembler) {
+// The event is dropped when the channel has been terminated (consumer
+// Close, MarkTerminatedWithRST, a stream error) or its receive side closed
+// (USK-721: a stray frame after the assembler's terminal state): the
+// stream is over from the consumer's perspective.
+func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventAssembler, credit uint32) {
 	if env.FlowID == "" {
 		env.FlowID = uuid.New().String()
 	}
@@ -648,84 +732,44 @@ func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventA
 		env.Context = l.envelopeContextWithTime()
 	}
 
-	// Skip delivery if the channel has been terminated externally
-	// (MarkTerminatedWithRST or channel.Close()).
 	select {
 	case <-ch.termDone:
 		return
 	default:
 	}
 
-	// Serialize the send against close(ch.recv) in closeChannelRecv. Holding
-	// recvMu during the send-select makes close+send mutually exclusive.
-	// channel.Close() closes termDone before acquiring recvMu, so a blocked
-	// reader unblocks via the termDone case and releases the lock before the
-	// close runs — no deadlock.
-	ch.recvMu.Lock()
-	// Re-check termDone under the lock; it may have been closed between the
-	// early check and lock acquisition.
-	select {
-	case <-ch.termDone:
-		ch.recvMu.Unlock()
-		return
-	default:
-	}
-	// USK-721 safety net: if the recv channel has been closed (by an
-	// assembler-driven terminal that did NOT also close termDone), skip
-	// the send. Without this check a stray frame after asm.phaseDone —
-	// e.g. a non-conforming peer that writes DATA after END_STREAM, or a
-	// future assembler bug that walks past phaseDone — would land on a
-	// closed channel and panic the reader goroutine (no recover() exists
-	// in the production data path).
-	if ch.recvClosed.Load() {
-		ch.recvMu.Unlock()
-		return
-	}
-	// Mark recvEndStream BEFORE delivering the terminal envelope. A consumer
+	// Mark recvEndStream BEFORE queuing the terminal envelope. A consumer
 	// that reads the final event and immediately calls Close() must see
 	// recvEndStream=true so the channel does not emit RST_STREAM(CANCEL) on a
-	// stream that finished cleanly. Without this pre-send mark, Close races
-	// the post-send markRecvEnded below and surfaces as a spurious CANCEL on
-	// the wire (e2e flake observed in TestRawBytesRecording_ContainsWireFrames
-	// and friends).
+	// stream that finished cleanly (e2e flake observed in
+	// TestRawBytesRecording_ContainsWireFrames and friends). It also stops
+	// the consumer's reads of the last events from sending a stream
+	// WINDOW_UPDATE the peer can no longer use.
 	terminal := asm != nil && asm.isDone()
 	if terminal {
 		ch.markRecvEnded()
 	}
-	select {
-	case ch.recv <- env:
-	case <-l.shutdown:
-		ch.recvMu.Unlock()
+	switch res := ch.push(env, credit, l.streamEventCap); res {
+	case pushOverflow, pushHeaderOverflow:
+		l.resetStreamQueueFull(ch, res)
 		return
-	case <-ch.termDone:
-		ch.recvMu.Unlock()
+	case pushDropped:
 		return
 	}
-	ch.recvMu.Unlock()
-
-	// recv close still runs after delivery so the consumer's next Next call
-	// returns io.EOF rather than racing the in-flight send.
 	if terminal {
 		l.closeChannelRecv(ch)
 	}
 }
 
-// closeChannelRecv idempotently closes ch's recv chan. Acquires ch.recvMu
-// to serialize against the reader goroutine's send in deliverEnvelope.
+// closeChannelRecv closes ch's receive side: events already queued stay
+// deliverable, after which the consumer sees io.EOF (or the stream error
+// installed by failStream). Idempotent.
 //
-// USK-721: also flips ch.recvClosed atomically so deliverEnvelope can
-// short-circuit before its send-select if a stray frame arrives after the
-// assembler reached terminal state. Distinct from markTerminated /
-// termDone so this path does NOT install a terminal error — letting a
-// later RST_STREAM (failStream) win the first-writer-wins race in
-// markTerminated.
+// USK-721: distinct from markTerminated / termDone so this path does NOT
+// install a terminal error — letting a later RST_STREAM (failStream) win
+// the first-writer-wins race in markTerminated.
 func (l *Layer) closeChannelRecv(ch *channel) {
-	ch.recvMu.Lock()
-	defer ch.recvMu.Unlock()
-	ch.closeRecvOnce.Do(func() {
-		ch.recvClosed.Store(true)
-		close(ch.recv)
-	})
+	ch.closeRecv()
 }
 
 // failStream delivers a stream error to ch and closes its recv side.
@@ -790,8 +834,8 @@ func (l *Layer) isLocallyInitiated(streamID uint32) bool {
 	return (streamID%2 == 1) == (l.role == ClientRole)
 }
 
-// broadcastShutdown closes all per-channel recv chans and the channelOut chan.
-// Idempotent via sync.Once on each channel.
+// broadcastShutdown terminates every channel, closes its receive side and
+// closes the channelOut chan. Idempotent.
 func (l *Layer) broadcastShutdown() {
 	l.mu.Lock()
 	channels := make([]*channel, 0, len(l.channels))
@@ -851,18 +895,6 @@ func (l *Layer) handleReadError(err error) {
 		}})
 	}
 	l.shutdownOnce.Do(func() { close(l.shutdown) })
-}
-
-// maybeWindowUpdate enqueues WINDOW_UPDATE frames matching the consumed
-// dataLen. Fires at frame-arrival time (RFC-001 §9.1 revised) independent
-// of Pipeline consumption. The simple "replace what was consumed" strategy
-// keeps us well inside the recv windows for streaming bodies.
-func (l *Layer) maybeWindowUpdate(streamID uint32, dataLen uint32) {
-	if dataLen == 0 {
-		return
-	}
-	l.enqueueWrite(writeRequest{windowUpdate: &writeWindowUpdate{streamID: 0, increment: dataLen}})
-	l.enqueueWrite(writeRequest{windowUpdate: &writeWindowUpdate{streamID: streamID, increment: dataLen}})
 }
 
 // envelopeContextWithTime returns the layer's context template with a fresh
