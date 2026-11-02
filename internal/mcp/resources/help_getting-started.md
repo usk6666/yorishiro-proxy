@@ -41,6 +41,7 @@ yorishiro-proxy server -stdio-mcp -no-http-mcp -mcp-tools resend_http,fuzz_http,
 - `docs` is not added for you. Include it so the agent can still read this help.
 - No MCP tool can change the list; it is fixed until a restart.
 - The Web UI talks to the same `/mcp` endpoint and needs the full tool set. Use an instance without `-mcp-tools` (or the CLI) for operator work.
+- The list hides tools, not capabilities. Several tools can send traffic upstream, so leaving out `resend_*` alone does not stop an agent from sending: `resend_*` and `fuzz_*` send requests, `macro` (`run_macro`) runs request chains, `intercept` (`release` / `modify_and_forward`) forwards held and possibly modified traffic, and `grpc_schema` (`discover`) connects to a target's reflection endpoint. Leave out every one of them to block agent-originated traffic.
 
 It is an operator hardening control, not a security boundary between tenants.
 
