@@ -108,14 +108,25 @@ func (s *RecordStep) finishStreamedFlow(fl *flow.Flow, headerAt time.Time, c *st
 	fl.Body = c.semantic
 	fl.BodyTruncated = c.semCut
 
-	raw := make([]byte, 0, len(fl.RawBytes)+len(c.raw))
-	raw = append(raw, fl.RawBytes...)
-	raw = append(raw, c.raw...)
+	// Head + observed raw body, cut at the record cap. Each part is clamped
+	// to the room left under limit first, so the result is bounded by limit;
+	// append sizes it, with no length sum computed for an allocation.
+	head, body := fl.RawBytes, c.raw
 	cut := c.rawCut
-	if int64(len(raw)) > limit {
-		raw = raw[:limit:limit]
+	if limit < 0 {
+		limit = 0
+	}
+	if int64(len(head)) > limit {
+		head = head[:limit]
 		cut = true
 	}
+	room := limit - int64(len(head))
+	if int64(len(body)) > room {
+		body = body[:room]
+		cut = true
+	}
+	raw := append([]byte(nil), head...)
+	raw = append(raw, body...)
 	fl.RawBytes = raw
 	if fl.Metadata["wire_bytes"] == "partial" {
 		// The head came from the encoder and the body's wire bytes are

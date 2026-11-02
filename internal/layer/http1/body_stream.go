@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,10 +57,11 @@ func (c *channel) maybeStreamResponse(rawResp *parser.RawResponse) (probe *probe
 	case layer.BodyStream:
 		return nil, c.streamResponse(rawResp, nil), nil
 	case layer.BodyBufferUpTo:
-		if n, ok := declaredContentLength(rawResp); ok && n > mode.Limit {
+		limit := c.probeLimit(mode.Limit)
+		if n, ok := declaredContentLength(rawResp); ok && n > limit {
 			return nil, c.streamResponse(rawResp, nil), nil
 		}
-		probe, perr := c.probeBody(rawResp, mode.Limit)
+		probe, perr := c.probeBody(rawResp, limit)
 		if perr != nil {
 			return nil, nil, perr
 		}
@@ -76,6 +78,34 @@ func (c *channel) maybeStreamResponse(rawResp *parser.RawResponse) (probe *probe
 	default:
 		return nil, nil, nil
 	}
+}
+
+// probeLimit clamps a BufferUpTo limit to what the probe can buffer: its
+// spill file and the parser's raw capture are both bounded by
+// max_body_size, and the probe reads limit+1 bytes, so the effective limit
+// is min(limit, max_body_size-1). A larger body is streamed past the
+// plugin, never refused (USK-1409 review F-6).
+func (c *channel) probeLimit(limit int64) int64 {
+	return min(limit, c.maxBodySize()-1)
+}
+
+// probeRawCaptureCap is the raw-capture cap during a probe: twice
+// max_body_size (saturating), so chunk framing of up to the body's own size
+// fits. A body framed more heavily than that cannot stream after a probe
+// and falls back to buffering, bounded by max_body_size.
+func probeRawCaptureCap(maxBody int64) int64 {
+	if maxBody > math.MaxInt64/2 {
+		return math.MaxInt64
+	}
+	return 2 * maxBody
+}
+
+// maxBodySize is the resolved max_body_size.
+func (c *channel) maxBodySize() int64 {
+	if c.bodyOpts.maxBody > 0 {
+		return c.bodyOpts.maxBody
+	}
+	return config.MaxBodySize
 }
 
 // responseBodyMode returns the body mode for rawResp. The predicate is not
@@ -204,7 +234,13 @@ func (p *probedBody) release() {
 // body. Raw-body spill is configured first, as for a buffered body, so the
 // wire bytes of the probed prefix are captured whatever its size.
 func (c *channel) probeBody(rawResp *parser.RawResponse, limit int64) (probe *probedBody, err error) {
-	configureRawBodySpill(rawResp.Body, c.bodyOpts)
+	// The raw capture holds the probed prefix's wire bytes, which a streamed
+	// body forwards first; if it is cut, the body cannot stream. Its cap
+	// leaves headroom over the semantic bound (limit < max_body_size) for
+	// chunk framing (USK-1409 review F-6).
+	rawOpts := c.bodyOpts
+	rawOpts.maxBody = probeRawCaptureCap(c.maxBodySize())
+	configureRawBodySpill(rawResp.Body, rawOpts)
 	if limit < 0 {
 		limit = 0
 	}
@@ -212,19 +248,20 @@ func (c *channel) probeBody(rawResp *parser.RawResponse, limit int64) (probe *pr
 	if threshold <= 0 {
 		threshold = config.DefaultBodySpillThreshold
 	}
-	maxBody := c.bodyOpts.maxBody
-	if maxBody <= 0 {
-		maxBody = config.MaxBodySize
-	}
+	maxBody := c.maxBodySize()
 	memCap := min(limit, threshold) + 1
 	hint := int64(streamCopyBufSize)
 	if n, ok := declaredContentLength(rawResp); ok {
 		hint = n + 1
 	}
 	probe = &probedBody{}
+	// The error path releases through pb, not the named result: a
+	// `return nil, err` sets probe to nil before deferred functions run,
+	// which leaked a spilled probe's file and fd (USK-1409 review F-5).
+	pb := probe
 	defer func() {
 		if err != nil {
-			probe.release()
+			pb.release()
 			probe = nil
 			releaseOrphanRawBodyBuffer(rawResp.Body)
 		}

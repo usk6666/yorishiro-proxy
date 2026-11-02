@@ -219,7 +219,8 @@ func TestBodyStream_BufferUpToProbe_ErrorAfterSpillReleasesFile(t *testing.T) {
 	}
 }
 
-// probeSpillFiles counts the semantic body spill files in dir.
+// probeSpillFiles counts the semantic body spill files in dir (not the
+// parser's raw-capture spill, "yorishiro-body-raw-*").
 func probeSpillFiles(t *testing.T, dir string) int {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -229,7 +230,8 @@ func probeSpillFiles(t *testing.T, dir string) int {
 	}
 	n := 0
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), config.BodySpillPrefix) {
+		name := e.Name()
+		if strings.HasPrefix(name, config.BodySpillPrefix) && !strings.HasPrefix(name, config.BodySpillPrefix+"raw-") {
 			n++
 		}
 	}
