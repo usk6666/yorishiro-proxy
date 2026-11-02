@@ -428,8 +428,9 @@ package http2layer
 // の WINDOW_UPDATE は consumer が event を取り出した分だけ (advertise した
 // stream window の半分単位で batch して) 送るので、止まった consumer が
 // 止めるのは自 stream だけで、queue は advertise した window で上限が
-// 決まる。window 超過の DATA → RST_STREAM(FLOW_CONTROL_ERROR)、queued event
-// が max(1024, window/1024) 超 → RST_STREAM(ENHANCE_YOUR_CALM)。§9.1
+// 決まる。window 超過の DATA → RST_STREAM(FLOW_CONTROL_ERROR)、未読 queue が
+// max(1024, window/1024) event (小さな DATA を含む全 event) または window
+// bytes 分の header block に達したら → RST_STREAM(ENHANCE_YOUR_CALM)。§9.1
 // (USK-1399) 参照。
 func New(conn net.Conn, role Role) layer.Layer
 ```
@@ -932,16 +933,16 @@ N9: レガシー削除 + ドキュメント
 1. **HTTP/2 Layer は常に event-granular**。Channel は 3 種類の event を yield する: `H2HeadersEvent` (HEADERS フレーム由来)、`H2DataEvent` (DATA フレーム、もしくは BodyBuffer drain chunk 由来)、`H2TrailersEvent` (END_STREAM 付き trailer HEADERS 由来)。
 2. **connection-level credit は到着時に返す**。frame reader は DATA フレームごとに、到着した時点で connection-level WINDOW_UPDATE を返す (配送・無視 (closed stream、送信済み GOAWAY 後)・拒否のいずれでも)。接続レベル WINDOW は consumer / Pipeline のレイテンシから完全に decouple され、どれだけ長い hold でも他 stream の connection window を奪わない。
 3. **stream-level credit は consumer の読み取りに従い、back-pressure は stream-scoped**。各 stream はメモリ上の event queue を持ち、接続に 1 本の frame reader がそれを埋める (frame reader はこの queue で block しない)。stream-level WINDOW_UPDATE は event が queue を *出た* 時点 — `Channel.Next`、または detach drain で detach reader が bytes を消費した (`io.Pipe` の write が返った) 時点 — で返し、batch する: 蓄積が advertise した `SETTINGS_INITIAL_WINDOW_SIZE` の半分 (既定 16 MiB なら 8 MiB、Firefox の 128 KiB なら 64 KiB、RFC 既定 65535 なら 32767) に達したら、その蓄積量ちょうどの WINDOW_UPDATE を 1 つ送る (ブラウザや `x/net/http2` と同じ)。padding (pad-length byte + padding) は consumer に届かないので到着時に credit し、次の batch に乗せる。END_STREAM 受信後は stream WINDOW_UPDATE を送らない。consumer が止まる (Intercept hold、遅い SSE client、読まない WS-over-h2 peer) と、止まるのは *その stream* だけ (advertise した window で止まる)。接続と他 stream は流れ続ける。
-   - **上限。** stream あたりの queued DATA は advertise した stream window を超えない (peer は返されていない credit を超えて送れない)。超えた DATA は stream error: RST_STREAM(FLOW_CONTROL_ERROR) で stream の Channel が失敗し、接続は生き残る (RFC 9113 §6.9.1)。フロー制御で縛れない event (長さ 0 の DATA、header block) は stream あたり `max(1024, window/1024)` 個 (16 MiB なら 16384、128 KiB 以下なら 1024) が上限で、超えると RST_STREAM(ENHANCE_YOUR_CALM) で reset し、queued event の後に stream error を consumer に渡す。
+   - **上限。** stream あたりの queued DATA は advertise した stream window を超えない (peer は返されていない credit を超えて送れない)。超えた DATA は stream error: RST_STREAM(FLOW_CONTROL_ERROR) で stream の Channel が失敗し、接続は生き残る (RFC 9113 §6.9.1)。フロー制御は DATA を bytes で縛るがフレーム数では縛らず、header block はまったく縛らないので、stream が未読のまま積む分にはさらに 2 つの上限がある。(a) **event 数上限:** 小さな DATA・長さ 0 の DATA・header block を含む全 queued event を数え、stream あたり `max(1024, window/1024)` 個 (16 MiB なら 16384、128 KiB 以下なら 1024) まで。event ごとの overhead (envelope + raw のコピー) を縛るもので、queued event 1 個あたり平均 1 KiB 以上の window を前提にしている。(b) **header block budget:** queued header block の bytes — raw HPACK block + decode 済み field (field ごとに `SETTINGS_MAX_HEADER_LIST_SIZE` と同じく name + value + 32) — は advertise した stream window を超えない。peer が 1xx HEADERS をいくつでも送れる response stream で効く。header block の bytes を 1 つも持たない queue は block を必ず 1 つ受け入れるので、budget より大きい単一 block (1 MiB fragment / 1 MiB decoded-list の上限まで) も consumer に届く。どちらかを超えると RST_STREAM(ENHANCE_YOUR_CALM) で reset し、queued event の後に stream error を consumer に渡す。どちらの上限も未読で待っている event だけに効き、読み続ける consumer には効かない — ただし stream の consumer が hold 中なら *準拠した* peer でも到達しうる (例: Intercept で hold 中の request に server が SSE を 1 event 1 DATA frame で送ると、Firefox の 128 KiB window では未読 1024 event で reset される)。reset は上限であって peer への判定ではない。各上限の最初の reset は接続ごとに Warn、以降は Debug でログする。
    - **Layer 内 spill なし。** queue はメモリのみで、window が上限。`HTTPAggregatorLayer` は自身が組み立てる body 用に BodyBuffer spill (既定 10 MiB) を持ち続ける。
-   - **接続あたりの最悪値 (理論値)** は window × 同時 stream 数: ServerRole (client 側) 16 MiB × advertise した MAX_CONCURRENT_STREAMS 500 ≈ 7.8 GiB、ClientRole (upstream) 既定 16 MiB × peer の MAX_CONCURRENT_STREAMS (100 / 128 / 256 → 1.6 / 2 / 4 GiB)、ClientRole Firefox 128 KiB × 100 = 12.5 MiB。到達には全 stream が window 満杯で未読のまま hold される必要がある。接続単位の queued-bytes budget は保留 (RSS 問題が観測されたら再検討)。
+   - **最悪値 (理論値)** は stream あたり DATA window + header block budget (= window) + 受け入れた header block 1 つ (≤ 約 2 MiB)、つまり約 2 × window + 2 MiB に、event 数上限分の event overhead を加えたもの。接続あたりはそれ × 同時 stream 数: ServerRole (client 側) は request stream が header block を最大 2 つ (request + trailers) しか持たないので 16 MiB + 4 MiB × advertise した MAX_CONCURRENT_STREAMS 500 ≈ 9.8 GiB、ClientRole (upstream) 既定は (2 × 16 MiB + 2 MiB) × peer の MAX_CONCURRENT_STREAMS (100 / 128 / 256 → 3.3 / 4.3 / 8.5 GiB)、ClientRole Firefox は (2 × 128 KiB + 2 MiB) × 100 ≈ 225 MiB。到達には全 stream が window 満杯で未読のまま hold され、*かつ* peer が 1xx で header budget を埋める必要がある。接続単位の queued-bytes budget は保留 (RSS 問題が観測されたら再検討)。
    - **会計順序。** writer は WINDOW_UPDATE を書く *前に* ローカルの受信 window を増やす。peer が update を読んだ直後に送る bytes が古い window で測られることはない。
 4. **集約は HTTP/2 Layer の性質ではなく wrapper Layer の責務**。plain HTTP/2 トラフィック向けに `HTTPAggregatorLayer` が H2 event を消費し、request/response ごとに 1 つの `HTTPMessage` を生成する (N6.5 のユーザ可視挙動を保持、HTTP/1.x と parity)。gRPC 向けには `GRPCLayer` が同じ event を消費し `GRPCStartMessage` / `GRPCDataMessage` / `GRPCEndMessage` を生成する (集約しない)。
 
 **なぜこれでフロー制御が解決するか:**
 
 - 接続レベルの ACK は application 層の処理速度から独立: frame reader が DATA フレームを socket から取り出した時点で返る。frame reader 自身は stream の consumer を待たないので、個別 stream のブロックは接続への back-pressure にならない。
-- stream あたりのメモリは consumer の停止時間ではなく advertise した stream window (+ event 数上限) で決まる。USK-1399 以前は両 window を到着時に credit し、上限は 32 slot の per-stream channel だけで、溢れると frame reader が block した — 1 本の未読 stream (読むのを止めた SSE client、hold 中の gRPC / WS-over-h2 message) が、tunnel 間で共有される pooled upstream 接続を含め、接続上の全 stream を止めていた。
+- stream あたりのメモリは consumer の停止時間ではなく advertise した stream window (DATA に加え、同じ大きさの queued header block budget と event 数上限) で決まる。USK-1399 以前は両 window を到着時に credit し、上限は 32 slot の per-stream channel だけで、溢れると frame reader が block した — 1 本の未読 stream (読むのを止めた SSE client、hold 中の gRPC / WS-over-h2 message) が、tunnel 間で共有される pooled upstream 接続を含め、接続上の全 stream を止めていた。
 - plain HTTP ユーザは HTTPAggregatorLayer 経由で「1 exchange あたり 1 HTTPMessage」の同じ ergonomics を維持する。streaming プロトコル (gRPC、将来の SSE) のユーザは event を到着順に見る。
 
 **却下した代替案:**

@@ -73,7 +73,11 @@
 // reader has the bytes), batched at half the local InitialWindowSize. A
 // stalled consumer therefore stalls only its own stream, and its queue is
 // bounded by the advertised stream window: DATA beyond it resets the
-// stream with FLOW_CONTROL_ERROR, and more than max(1024, window/1024)
-// queued events reset it with ENHANCE_YOUR_CALM. The writer raises the
-// local receive window before writing the WINDOW_UPDATE that grants it.
+// stream with FLOW_CONTROL_ERROR. Flow control bounds DATA by bytes, not
+// by frame count, and does not bound header blocks, so an unread queue
+// that reaches max(1024, window/1024) events (every event counts, small
+// DATA frames included) or window bytes of header blocks is reset with
+// ENHANCE_YOUR_CALM — a bound a compliant peer can reach when the
+// stream's consumer is held. The writer raises the local receive window
+// before writing the WINDOW_UPDATE that grants it.
 package http2

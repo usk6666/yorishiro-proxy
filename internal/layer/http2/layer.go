@@ -284,15 +284,27 @@ type Layer struct {
 	// Layers always resolve to H2FingerprintDefault.
 	h2Fingerprint H2Fingerprint
 
-	// streamCreditBatch and streamEventCap are derived once in New from the
-	// local SETTINGS_INITIAL_WINDOW_SIZE, which this Layer only advertises
-	// in its preface (USK-1399, RFC-001 §9.1 point 3). streamCreditBatch is
+	// streamCreditBatch, streamEventCap and streamHeaderBudget are derived
+	// once in New from the local SETTINGS_INITIAL_WINDOW_SIZE, which this
+	// Layer only advertises in its preface (USK-1399, RFC-001 §9.1 point 3). streamCreditBatch is
 	// the read-driven stream WINDOW_UPDATE batch: half the advertised stream
 	// window. streamEventCap bounds the events one stream may queue for its
-	// consumer — DATA is already bounded by the stream window, but
-	// zero-length DATA and header blocks are not flow-controlled.
-	streamCreditBatch uint32
-	streamEventCap    int
+	// consumer, counting every event: flow control bounds DATA by bytes but
+	// not by frame count (a peer may send many small or zero-length DATA
+	// frames), and does not bound header blocks at all, so this caps the
+	// per-event overhead. streamHeaderBudget bounds the header-block bytes
+	// (raw + decoded, see headerBlockCharge) one stream may queue unread —
+	// a peer may send any number of 1xx responses — at the advertised
+	// stream window.
+	streamCreditBatch  uint32
+	streamEventCap     int
+	streamHeaderBudget uint64
+
+	// eventCapWarned / headerBudgetWarned make the first reset for each
+	// queue bound on this connection a Warn and later ones Debug, so a peer
+	// resetting streams in a loop cannot flood the log.
+	eventCapWarned     atomic.Bool
+	headerBudgetWarned atomic.Bool
 
 	mu         sync.Mutex
 	channels   map[uint32]*channel
@@ -733,6 +745,7 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		h2Fingerprint:      fp,
 		streamCreditBatch:  streamCreditBatchFor(local.InitialWindowSize),
 		streamEventCap:     streamEventCapFor(local.InitialWindowSize),
+		streamHeaderBudget: uint64(local.InitialWindowSize),
 	}
 	if role == ServerRole && o.clientIdleTimeout != nil {
 		l.streamsChanged = make(chan struct{}, 1)
@@ -815,7 +828,11 @@ func streamCreditBatchFor(initialWindow uint32) uint32 {
 
 // streamEventCapFor returns the per-stream queued-event cap for a local
 // initial stream window: max(1024, window/1024). 16384 for the default
-// 16 MiB window; 1024 for 128 KiB (Firefox) or less.
+// 16 MiB window; 1024 for 128 KiB (Firefox) or less. The cap counts every
+// queued event, so it budgets an average of at least 1 KiB of window per
+// event; a peer that sends a held stream many smaller frames (e.g. one SSE
+// event per DATA frame) is reset once the cap is reached, even within its
+// flow-control window.
 func streamEventCapFor(initialWindow uint32) int {
 	if c := int(initialWindow / 1024); c > minStreamEventCap {
 		return c

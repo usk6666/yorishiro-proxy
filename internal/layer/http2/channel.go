@@ -20,10 +20,13 @@ import (
 // queuedEvent is one received event waiting in a channel's receive queue.
 // credit is the stream flow-control credit the event carries — its DATA
 // payload length, 0 for header blocks — returned to the peer once the
-// consumer has taken the event (USK-1399).
+// consumer has taken the event (USK-1399). hdrBytes is what a header block
+// is charged against the queued header-block budget (headerBlockCharge);
+// 0 for DATA.
 type queuedEvent struct {
-	env    *envelope.Envelope
-	credit uint32
+	env      *envelope.Envelope
+	credit   uint32
+	hdrBytes uint64
 }
 
 // pushResult is the outcome of channel.push.
@@ -36,6 +39,9 @@ const (
 	pushDropped
 	// pushOverflow: the queue already holds the per-stream event cap.
 	pushOverflow
+	// pushHeaderOverflow: the header block would take the queued
+	// header-block bytes past the per-stream budget.
+	pushHeaderOverflow
 )
 
 // channel implements layer.Channel for one HTTP/2 stream, using the
@@ -71,14 +77,20 @@ type channel struct {
 	// consumer — Next, or the detach drain — takes events with pop and
 	// returns their stream credit (returnRecvCredit), so the queued DATA
 	// payload never exceeds the advertised stream window: the peer cannot
-	// send past credit it has not been given back. The event count, which
-	// flow control does not bound, is capped at Layer.streamEventCap.
+	// send past credit it has not been given back. Flow control bounds
+	// bytes, not events, and not header blocks at all, so two more bounds
+	// apply to what waits unread: the event count — every queued event,
+	// small DATA frames included — is capped at Layer.streamEventCap, and
+	// the header-block bytes at Layer.streamHeaderBudget.
 	//
-	// qMu guards q and recvClosed. qNotify (capacity 1, never closed) wakes
-	// a consumer waiting for an event or for the receive side to close.
+	// qMu guards q, qHdrBytes and recvClosed. qNotify (capacity 1, never
+	// closed) wakes a consumer waiting for an event or for the receive side
+	// to close.
 	qMu     sync.Mutex
 	q       []queuedEvent
 	qNotify chan struct{}
+	// qHdrBytes is the sum of hdrBytes over q.
+	qHdrBytes uint64
 	// recvClosed is set by closeRecv when no further event will be queued:
 	// the assembler reached its terminal state, the stream failed, or the
 	// connection shut down. Queued events are still delivered; once they
@@ -191,8 +203,13 @@ func newChannel(l *Layer, h2Stream uint32) *channel {
 }
 
 // push appends a received event for the consumer. Reader goroutine only;
-// never blocks. limit is the per-stream event cap.
+// never blocks. limit is the per-stream event cap, counted over every
+// queued event. A header block is also charged against the Layer's
+// queued header-block budget; a queue holding no header-block bytes always
+// admits one, so a single block larger than the budget still reaches a
+// consumer that reads.
 func (c *channel) push(env *envelope.Envelope, credit uint32, limit int) pushResult {
+	hdr := headerBlockCharge(env)
 	c.qMu.Lock()
 	if c.recvClosed {
 		c.qMu.Unlock()
@@ -202,10 +219,52 @@ func (c *channel) push(env *envelope.Envelope, credit uint32, limit int) pushRes
 		c.qMu.Unlock()
 		return pushOverflow
 	}
-	c.q = append(c.q, queuedEvent{env: env, credit: credit})
+	if hdr > 0 && c.qHdrBytes > 0 && c.qHdrBytes+hdr > c.layer.streamHeaderBudget {
+		c.qMu.Unlock()
+		return pushHeaderOverflow
+	}
+	c.q = append(c.q, queuedEvent{env: env, credit: credit, hdrBytes: hdr})
+	c.qHdrBytes += hdr
 	c.qMu.Unlock()
 	c.wakeConsumer()
 	return pushQueued
+}
+
+// headerBlockCharge is what a queued header block costs against the
+// per-stream header-block budget: its raw HPACK bytes plus its decoded
+// fields, each measured as in SETTINGS_MAX_HEADER_LIST_SIZE (name + value +
+// 32, RFC 9113 §6.5.2). Pseudo-headers parsed out into event fields and
+// decode anomalies are charged the same way. 0 for any other event.
+func headerBlockCharge(env *envelope.Envelope) uint64 {
+	const fieldOverhead = 32
+	var n uint64
+	field := func(name, value string) {
+		n += uint64(len(name)) + uint64(len(value)) + fieldOverhead
+	}
+	var anomalies []envelope.Anomaly
+	switch m := env.Message.(type) {
+	case *H2HeadersEvent:
+		for _, kv := range m.Headers {
+			field(kv.Name, kv.Value)
+		}
+		for _, v := range []string{m.Method, m.Scheme, m.Authority, m.Path, m.RawQuery, m.StatusReason, m.ConnectProtocol} {
+			if v != "" {
+				field("", v)
+			}
+		}
+		anomalies = m.Anomalies
+	case *H2TrailersEvent:
+		for _, kv := range m.Trailers {
+			field(kv.Name, kv.Value)
+		}
+		anomalies = m.Anomalies
+	default:
+		return 0
+	}
+	for _, a := range anomalies {
+		field(string(a.Type), a.Detail)
+	}
+	return n + uint64(len(env.Raw))
 }
 
 // pop removes the oldest queued event. ok is false when the queue is
@@ -222,6 +281,7 @@ func (c *channel) pop() (ev queuedEvent, ok, closed bool) {
 	ev = c.q[0]
 	c.q[0] = queuedEvent{}
 	c.q = c.q[1:]
+	c.qHdrBytes -= ev.hdrBytes
 	if len(c.q) == 0 {
 		c.q = nil // let the backing array go
 	}
@@ -259,6 +319,7 @@ func (c *channel) releaseQueue() {
 	c.qMu.Lock()
 	c.recvClosed = true
 	c.q = nil
+	c.qHdrBytes = 0
 	c.qMu.Unlock()
 	c.wakeConsumer()
 }
@@ -269,6 +330,14 @@ func (c *channel) queuedEvents() int {
 	c.qMu.Lock()
 	defer c.qMu.Unlock()
 	return len(c.q)
+}
+
+// queuedHeaderBytes reports the header-block bytes waiting for the
+// consumer (see headerBlockCharge). Diagnostic helper.
+func (c *channel) queuedHeaderBytes() uint64 {
+	c.qMu.Lock()
+	defer c.qMu.Unlock()
+	return c.qHdrBytes
 }
 
 // returnRecvCredit hands n bytes of stream flow-control credit back to the
@@ -435,6 +504,12 @@ func (c *channel) MarkTerminatedWithRST(code uint32, err error) {
 // a spurious RST_STREAM(CANCEL) toward the original client because the
 // session never gets to deliver the response.
 //
+// The same holds when the wait itself picks c.errCh: the reader may queue
+// the stream's last events and fail it between the empty pop and the
+// select, leaving the notification and the error ready at once. The error
+// is then put back and the queued event returned; the error follows once
+// the queue is empty.
+//
 // Taking an event returns its stream flow-control credit to the peer
 // (USK-1399): what the peer may send on this stream follows what the
 // consumer has read.
@@ -456,6 +531,18 @@ func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		select {
 		case <-c.qNotify:
 		case se := <-c.errCh:
+			if ev, ok, _ := c.pop(); ok {
+				// Put the error back for the Next that finds the queue
+				// empty. errCh holds one error and was just emptied; if
+				// another producer refilled it meanwhile, that error is
+				// the one delivered, as when both race to send.
+				select {
+				case c.errCh <- se:
+				default:
+				}
+				c.returnRecvCredit(ev.credit)
+				return ev.env, nil
+			}
 			return nil, c.observeStreamError(se)
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -857,8 +944,9 @@ func (c *channel) closeStream(code uint32) {
 //   - a peer RST_STREAM (handleStreamRST → failStream): RFC 9113 §5.4.2
 //     forbids answering RST_STREAM with RST_STREAM;
 //   - a stream-level WINDOW_UPDATE error, DATA beyond the stream receive
-//     window, or a flood of unread events (reader), each of which enqueues
-//     its own RST_STREAM before failStream;
+//     window, or an unread queue that reached its event cap or header-block
+//     budget (reader), each of which enqueues its own RST_STREAM before
+//     failStream;
 //   - MarkTerminatedWithRST, which emits its own RST_STREAM;
 //   - a peer GOAWAY whose last_stream_id is below a stream this Layer
 //     initiated (failStreamsAfterGoAway): RFC 9113 §6.8 — the GOAWAY

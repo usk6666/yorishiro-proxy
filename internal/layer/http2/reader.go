@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -478,7 +479,18 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 // The stream is reset and its Channel fails with the events already queued
 // still deliverable; the connection and its other streams carry on. The
 // frame's connection credit has already been returned.
+//
+// A stream whose channel already ended with a reset of its own — this one,
+// queued for an earlier over-window frame and not yet written, or any other
+// — or that its consumer closed (Close queues its own RST_STREAM) gets no
+// further RST_STREAM: the peer may keep sending until it reads the first.
 func (l *Layer) resetStreamFlowControl(streamID uint32, se *StreamError) {
+	l.mu.Lock()
+	ch := l.channels[streamID]
+	l.mu.Unlock()
+	if ch != nil && (ch.streamAlreadyReset() || ch.closedLocal.Load()) {
+		return
+	}
 	slog.Debug("http2: peer exceeded the stream receive window; resetting stream",
 		"role", l.role.String(),
 		"conn_stream_id", l.streamID,
@@ -491,23 +503,48 @@ func (l *Layer) resetStreamFlowControl(streamID uint32, se *StreamError) {
 	})
 }
 
-// resetStreamEventFlood handles a peer that queued Layer.streamEventCap
-// events on one stream the consumer has not read. DATA is bounded by the
-// stream window, but zero-length DATA frames are not flow-controlled, so
-// the count is capped separately. The stream is reset with
-// ENHANCE_YOUR_CALM; its consumer gets the queued events, then the stream
-// error. Sibling streams are unaffected.
-func (l *Layer) resetStreamEventFlood(ch *channel) {
+// resetStreamQueueFull handles a stream whose unread receive queue reached
+// one of the bounds flow control does not provide (RFC-001 §9.1 point 3):
+// the event cap (Layer.streamEventCap, counting every queued event, since
+// flow control bounds DATA by bytes but not by frame count) or the queued
+// header-block budget (Layer.streamHeaderBudget). A compliant peer can
+// reach either — many small frames, or 1xx responses, sent to a stream
+// whose consumer is held — so this is not taken as misbehaviour; the
+// stream is reset with ENHANCE_YOUR_CALM to bound the memory. Its consumer
+// gets the queued events, then the stream error. Sibling streams are
+// unaffected.
+//
+// The first reset for each bound on a connection is logged at Warn, later
+// ones at Debug (R16 operator signal without a per-stream log flood).
+func (l *Layer) resetStreamQueueFull(ch *channel, res pushResult) {
 	streamID := ch.h2Stream.Load()
-	slog.Warn("http2: peer queued too many unread events on one stream; resetting stream",
+	attrs := []any{
 		"role", l.role.String(),
 		"conn_stream_id", l.streamID,
 		"h2_stream_id", streamID,
-		"event_cap", l.streamEventCap)
+	}
+	var msg, reason string
+	var warned *atomic.Bool
+	if res == pushHeaderOverflow {
+		warned = &l.headerBudgetWarned
+		msg = "http2: stream reset: unread header-block bytes reached budget"
+		reason = fmt.Sprintf("ENHANCE_YOUR_CALM: unread header blocks reached the per-stream budget of %d bytes", l.streamHeaderBudget)
+		attrs = append(attrs, "queued_header_bytes", ch.queuedHeaderBytes(), "header_budget", l.streamHeaderBudget)
+	} else {
+		warned = &l.eventCapWarned
+		msg = "http2: stream reset: unread event queue reached cap"
+		reason = fmt.Sprintf("ENHANCE_YOUR_CALM: unread event queue reached the per-stream cap of %d events", l.streamEventCap)
+		attrs = append(attrs, "queued_events", ch.queuedEvents(), "event_cap", l.streamEventCap)
+	}
+	if warned.CompareAndSwap(false, true) {
+		slog.Warn(msg, attrs...)
+	} else {
+		slog.Debug(msg, attrs...)
+	}
 	l.enqueueWrite(writeRequest{rst: &writeRST{streamID: streamID, code: ErrCodeEnhanceYourCalm}})
 	l.failStream(streamID, &layer.StreamError{
 		Code:   layer.ErrorProtocol,
-		Reason: fmt.Sprintf("ENHANCE_YOUR_CALM: more than %d unread events queued on the stream", l.streamEventCap),
+		Reason: reason,
 	})
 }
 
@@ -675,11 +712,13 @@ func (l *Layer) emitChannel(ch *channel) {
 	}
 }
 
-// deliverEnvelope queues env for ch's consumer. It never blocks: the queue
-// is bounded by the stream window the Layer advertised (stream credit is
-// only returned as the consumer reads) and by Layer.streamEventCap, whose
-// breach resets the stream (USK-1399). credit is the event's stream
-// flow-control credit — its DATA payload length, 0 for header blocks.
+// deliverEnvelope queues env for ch's consumer. It never blocks: the queued
+// DATA is bounded by the stream window the Layer advertised (stream credit
+// is only returned as the consumer reads), the event count by
+// Layer.streamEventCap and the header-block bytes by
+// Layer.streamHeaderBudget; a breach of either of the last two resets the
+// stream (USK-1399). credit is the event's stream flow-control credit — its
+// DATA payload length, 0 for header blocks.
 //
 // The event is dropped when the channel has been terminated (consumer
 // Close, MarkTerminatedWithRST, a stream error) or its receive side closed
@@ -710,9 +749,9 @@ func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventA
 	if terminal {
 		ch.markRecvEnded()
 	}
-	switch ch.push(env, credit, l.streamEventCap) {
-	case pushOverflow:
-		l.resetStreamEventFlood(ch)
+	switch res := ch.push(env, credit, l.streamEventCap); res {
+	case pushOverflow, pushHeaderOverflow:
+		l.resetStreamQueueFull(ch, res)
 		return
 	case pushDropped:
 		return
