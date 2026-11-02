@@ -72,10 +72,28 @@ type ExportOptions struct {
 }
 
 // ExportRecord represents a single JSONL line in the export format.
+//
+// The flow sink writes the same record with the superset fields below
+// set; export_flows leaves them empty, so its lines are unchanged.
 type ExportRecord struct {
-	Stream  *ExportStream `json:"stream"`
+	Stream  *ExportStream `json:"stream,omitempty"`
 	Flows   []*ExportFlow `json:"flows"`
 	Version string        `json:"version"`
+
+	// Event is the flow sink event kind (SinkEvent): "stream_created",
+	// "stream_updated", "flow_saved" or "gap". Empty on export_flows lines.
+	Event string `json:"event,omitempty"`
+	// Seq is the flow sink's per-run event sequence number, starting at 1.
+	// Every committed write the sink observes takes the next number, so a
+	// number missing between two lines is accounted for by a "gap" line.
+	Seq uint64 `json:"seq,omitempty"`
+	// RunID identifies the sink instance (one per process) that wrote the
+	// line; Seq is only meaningful within one RunID.
+	RunID string `json:"run_id,omitempty"`
+	// EmittedAt is when the sink wrote the line (RFC 3339, UTC).
+	EmittedAt string `json:"emitted_at,omitempty"`
+	// Gap is set on "gap" lines only.
+	Gap *SinkGap `json:"gap,omitempty"`
 }
 
 // ExportStream is the JSON-serializable representation of a Stream.
@@ -91,13 +109,16 @@ type ExportStream struct {
 	// round-trip unchanged. Empty on import is preserved as empty (no
 	// URL-scheme backfill) — wire-recorded value can legitimately be
 	// empty (e.g., raw TCP).
-	Scheme     string            `json:"scheme,omitempty"`
-	State      string            `json:"state"`
-	Timestamp  string            `json:"timestamp"`
-	DurationMs int64             `json:"duration_ms"`
-	Tags       map[string]string `json:"tags,omitempty"`
-	ConnInfo   *ExportConnInfo   `json:"conn_info,omitempty"`
-	BlockedBy  string            `json:"blocked_by,omitempty"`
+	Scheme string `json:"scheme,omitempty"`
+	State  string `json:"state"`
+	// FailureReason classifies an errored stream (Stream.FailureReason).
+	// Omitted when empty so older exports round-trip unchanged.
+	FailureReason string            `json:"failure_reason,omitempty"`
+	Timestamp     string            `json:"timestamp"`
+	DurationMs    int64             `json:"duration_ms"`
+	Tags          map[string]string `json:"tags,omitempty"`
+	ConnInfo      *ExportConnInfo   `json:"conn_info,omitempty"`
+	BlockedBy     string            `json:"blocked_by,omitempty"`
 	// Origin classifies how the source Stream came into existence
 	// ('proxy' | 'resend' | 'fuzz'). Omitted from the JSONL line when
 	// empty so older exports continue to round-trip unchanged; on import
@@ -151,6 +172,16 @@ type ExportFlow struct {
 	// exports.
 	WireLevel string            `json:"wire_level,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+
+	// The fields below are set only by the flow sink, on an event too
+	// large for its queue: the body / raw bytes are left out and their
+	// size and SHA-256 are recorded instead.
+	BodyOmitted     bool   `json:"body_omitted,omitempty"`
+	BodySize        *int64 `json:"body_size,omitempty"`
+	BodySHA256      string `json:"body_sha256,omitempty"`
+	RawBytesOmitted bool   `json:"raw_bytes_omitted,omitempty"`
+	RawBytesSize    *int64 `json:"raw_bytes_size,omitempty"`
+	RawBytesSHA256  string `json:"raw_bytes_sha256,omitempty"`
 }
 
 // ExportStreams exports streams matching the filter to a JSONL writer.
@@ -220,20 +251,21 @@ func ExportStreams(ctx context.Context, store Store, w io.Writer, opts ExportOpt
 // streamToExport converts a Stream to its export representation.
 func streamToExport(s *Stream) *ExportStream {
 	es := &ExportStream{
-		ID:           s.ID,
-		ConnID:       s.ConnID,
-		Protocol:     s.Protocol,
-		Scheme:       s.Scheme,
-		State:        s.State,
-		Timestamp:    s.Timestamp.UTC().Format(time.RFC3339Nano),
-		DurationMs:   s.Duration.Milliseconds(),
-		Tags:         s.Tags,
-		BlockedBy:    s.BlockedBy,
-		Origin:       string(s.Origin),
-		ListenerName: s.ListenerName,
-		SendMs:       s.SendMs,
-		WaitMs:       s.WaitMs,
-		ReceiveMs:    s.ReceiveMs,
+		ID:            s.ID,
+		ConnID:        s.ConnID,
+		Protocol:      s.Protocol,
+		Scheme:        s.Scheme,
+		State:         s.State,
+		FailureReason: s.FailureReason,
+		Timestamp:     s.Timestamp.UTC().Format(time.RFC3339Nano),
+		DurationMs:    s.Duration.Milliseconds(),
+		Tags:          s.Tags,
+		BlockedBy:     s.BlockedBy,
+		Origin:        string(s.Origin),
+		ListenerName:  s.ListenerName,
+		SendMs:        s.SendMs,
+		WaitMs:        s.WaitMs,
+		ReceiveMs:     s.ReceiveMs,
 	}
 	if s.ConnInfo != nil {
 		es.ConnInfo = &ExportConnInfo{

@@ -2356,12 +2356,21 @@ type queryStatusResult struct {
 	// per-kind counts, and the most recent rejections with their target.
 	// Same nil-vs-populated semantics as H1Upstream.
 	ConnectionRejections *proxybuild.ConnectionRejectionsSnapshot `json:"connection_rejections,omitempty"`
+	// FlowSink (USK-1119) reports the flow sink's counters (emitted /
+	// dropped_events / dropped_bytes / write_errors) when a flow_sink is
+	// configured; absent otherwise.
+	FlowSink *flow.SinkStats `json:"flow_sink,omitempty"`
 	// ExportDir is the directory that confines manage export_flows /
 	// import_flows file paths (USK-1127). Relative output_path /
 	// input_path values resolve against it. Published here so remote
 	// (HTTP MCP) callers can learn where their exports land. Empty means
 	// file export / import is disabled.
 	ExportDir string `json:"export_dir"`
+}
+
+// flowSinkStatser is implemented by *flow.SQLiteStore (USK-1119).
+type flowSinkStatser interface {
+	FlowSinkStats() (flow.SinkStats, bool)
 }
 
 // queryRateLimitStatus holds rate limit information for the status response.
@@ -2459,6 +2468,12 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 			return nil, nil, fmt.Errorf("count flows: %w", err)
 		}
 		result.TotalFlows = count
+	}
+
+	if fs, ok := s.flowStore.store.(flowSinkStatser); ok {
+		if stats, ok := fs.FlowSinkStats(); ok {
+			result.FlowSink = &stats
+		}
 	}
 
 	if s.misc.dbPath != "" {

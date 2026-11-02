@@ -325,6 +325,11 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	defer infra.Cleanup()
 	logger := infra.Logger
 	store := infra.Store
+	// USK-1119: attach the flow sink before any listener or MCP tool can
+	// write, so the replica starts with the first record.
+	if err := InitFlowSink(store, proxyCfg, logger); err != nil {
+		return err
+	}
 	prepareExportDir(exportDir, logger)
 
 	// Initialize CA and certificate issuer for HTTPS MITM.
