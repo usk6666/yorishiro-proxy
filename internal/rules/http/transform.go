@@ -357,3 +357,30 @@ func CompileTransformRule(id string, priority int, direction RuleDirection, host
 
 	return rule, nil
 }
+
+// MatchesReplaceBody reports whether an enabled replace_body rule for
+// direction dir matches env / msg on the conditions the header section
+// carries (host, path, method — the same matchesConditions TransformRequest
+// / TransformResponse apply). The HTTP body-mode predicate uses it to keep a
+// body buffered when a body rewrite may apply to it (USK-1409).
+func (e *TransformEngine) MatchesReplaceBody(env *envelope.Envelope, msg *envelope.HTTPMessage, dir envelope.Direction) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	want := DirectionRequest
+	if dir == envelope.Receive {
+		want = DirectionResponse
+	}
+	for i := range e.rules {
+		rule := &e.rules[i]
+		if !rule.Enabled || rule.ActionType != TransformReplaceBody {
+			continue
+		}
+		if rule.Direction != want && rule.Direction != DirectionBoth {
+			continue
+		}
+		if e.matchesConditions(rule, env, msg, dir) {
+			return true
+		}
+	}
+	return false
+}

@@ -69,6 +69,19 @@ type bodyCaptureSink struct {
 	// via newBodyCaptureSinkWithCap; spill mode honors spill.maxSize
 	// instead, so this knob does not reach disk-backed bodies.
 	memoryCap int64
+	// tap, when non-nil, receives every wire byte slice written to the
+	// sink, synchronously and in order (USK-1409 raw forwarding). Once a
+	// tap is installed the sink stops accumulating: the bytes already
+	// captured stay, nothing further is stored.
+	tap func([]byte)
+}
+
+// setTap installs fn as the raw tap. See tap.
+func (s *bodyCaptureSink) setTap(fn func([]byte)) {
+	if s == nil {
+		return
+	}
+	s.tap = fn
 }
 
 // newBodyCaptureSinkWithCap returns a sink in memory-only mode bounded by
@@ -90,10 +103,14 @@ func (s *bodyCaptureSink) enableSpill(cfg rawBodySpillConfig) {
 // Truncation past maxSize (memory cap or spill cap) sets truncated=true and
 // drops further bytes.
 func (s *bodyCaptureSink) write(p []byte) {
-	if s == nil || s.truncated {
+	if s == nil || len(p) == 0 {
 		return
 	}
-	if len(p) == 0 {
+	if s.tap != nil {
+		s.tap(p)
+		return
+	}
+	if s.truncated {
 		return
 	}
 

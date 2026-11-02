@@ -46,9 +46,13 @@ import (
 
 // testStore implements flow.Writer for capturing recorded streams and flows.
 type testStore struct {
-	mu             sync.Mutex
-	streams        []*flow.Stream
-	flows          []*flow.Flow
+	mu      sync.Mutex
+	streams []*flow.Stream
+	flows   []*flow.Flow
+	// events records SaveFlow ("flow:<direction>") and Stream state
+	// updates ("state:<state>") in the order the store saw them (USK-1409:
+	// a streamed response's Flow must land before the final Stream state).
+	events         []string
 	appendTagBatch []map[string]string
 }
 
@@ -69,6 +73,9 @@ func (s *testStore) UpdateStream(_ context.Context, id string, update flow.Strea
 			cloned[k] = v
 		}
 		s.appendTagBatch = append(s.appendTagBatch, cloned)
+	}
+	if update.State != "" {
+		s.events = append(s.events, "state:"+update.State)
 	}
 	for _, st := range s.streams {
 		if st.ID == id {
@@ -134,6 +141,7 @@ func (s *testStore) SaveFlow(_ context.Context, f *flow.Flow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.flows = append(s.flows, f)
+	s.events = append(s.events, "flow:"+f.Direction)
 	return nil
 }
 
@@ -333,6 +341,11 @@ type proxyOpts struct {
 	// session.SessionOptions.OnPipelineDrop so a test can observe the
 	// BlockedBy attribution of a policy Drop / Respond.
 	onPipelineDrop func(ctx context.Context, env *envelope.Envelope, blockedBy string)
+	// responseBodyMode is threaded into BuildConfig.ResponseBodyMode
+	// (USK-1409). nil keeps every response body buffered; the body
+	// streaming tests pass the production predicate
+	// (proxybuild.NewHTTPBodyModeFunc) built from the harness engines.
+	responseBodyMode layer.BodyModeFunc
 }
 
 // startHTTPMITMProxy starts a FullListener configured for HTTP MITM (not
@@ -366,6 +379,7 @@ func startHTTPMITMProxy(
 		BodySpillDir:       opts.bodySpillDir,
 		BodySpillThreshold: opts.bodySpillThreshold,
 		MaxBodySize:        opts.maxBodySize,
+		ResponseBodyMode:   opts.responseBodyMode,
 	}
 
 	onStack := func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {

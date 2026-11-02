@@ -147,5 +147,7 @@ func newUpstreamH1Layer(conn net.Conn, label, scheme string, envCtx envelope.Env
 		// SSE through a forward proxy is a real use case (HTTP back-channel
 		// to legacy services), so the same predicate applies here.
 		http1.WithStreamingResponseDetect(http1.IsSSEResponse),
+		// USK-1409: stream response bodies no rule / plugin needs whole.
+		http1.WithResponseBodyMode(cfg.ResponseBodyMode),
 	)
 }

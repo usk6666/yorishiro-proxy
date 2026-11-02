@@ -273,16 +273,33 @@ func numFromAny(v any) int64 {
 }
 
 // waitForFlowCount polls query(resource=flows) until it observes at
-// least n recorded flows, or until the timeout elapses.
+// least n recorded flows whose response (Receive) row has landed, or until
+// the timeout elapses. A stream row alone is not enough: the client can
+// see the response's last byte before the response Flow row is saved
+// (RFC-001 §3.2.1, USK-1409), so status_code is the readiness signal.
 func waitForFlowCount(t *testing.T, h *mcptest.Harness, n int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		res := h.MustOK(t, "query", map[string]any{"resource": "flows"})
-		if got := numFromAny(res.Decoded["count"]); got >= int64(n) {
+		var parsed struct {
+			Flows []struct {
+				StatusCode int `json:"status_code"`
+			} `json:"flows"`
+		}
+		if err := json.Unmarshal([]byte(res.Text), &parsed); err != nil {
+			t.Fatalf("decode query(flows): %v (text=%q)", err, res.Text)
+		}
+		withResponse := 0
+		for _, f := range parsed.Flows {
+			if f.StatusCode != 0 {
+				withResponse++
+			}
+		}
+		if withResponse >= n {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %d flows within %v", n, timeout)
+	t.Fatalf("timed out waiting for %d flows with a recorded response within %v", n, timeout)
 }
