@@ -382,6 +382,92 @@ func TestRequestStream_ClientCutMidBody(t *testing.T) {
 	assertChannelsEnd(t, cl)
 }
 
+// TestRequestStream_ClientResetMidBody (U1): the client resets the
+// connection (TCP RST) mid-body. A reset is a client cut like a FIN: the
+// upstream Send forwards the bytes received, half-closes the upstream and
+// returns nil; the body ends truncated with TruncatedBody; the upstream
+// Layer carries no further exchange; the client Layer parses nothing
+// further.
+func TestRequestStream_ClientResetMidBody(t *testing.T) {
+	cl, peer := newStreamingClient(t, streamAll)
+	up, wire := newCapturingUpstream(t)
+	const head = "PUT /reset HTTP/1.1\r\nHost: up.test\r\nContent-Length: 10\r\n\r\n"
+	peerWrite(t, peer, head+"abcd")
+	ch := nextChannelWithin(t, cl)
+	env := nextRequestWithin(t, ch, 2*time.Second)
+	msg := streamedMsg(t, env)
+	done := sendAsync(up.OpenExchange(), env)
+	wire.waitLen(t, len(head)+4)
+	// SO_LINGER 0: Close sends RST, so the proxy's pending read fails with
+	// ECONNRESET rather than reading EOF.
+	if err := peer.(*net.TCPConn).SetLinger(0); err != nil {
+		t.Fatalf("SetLinger: %v", err)
+	}
+	_ = peer.Close()
+
+	if err := waitErr(t, done); err != nil {
+		t.Errorf("upstream Send after a client reset = %v, want nil (the response keeps flowing)", err)
+	}
+	wire.waitEOF(t)
+	if got := string(wire.bytes()); got != head+"abcd" {
+		t.Errorf("upstream wire = %q, want the head and the 4 bytes received", got)
+	}
+	res, _ := msg.BodyStream.Result()
+	if !res.Truncated || !hasAnomalyType(res.Anomalies, envelope.AnomalyTruncatedBody) {
+		t.Errorf("result = %+v, want Truncated with AnomalyTruncatedBody", res)
+	}
+	var se *layer.StreamError
+	if !errors.As(res.Err, &se) || se.Code != layer.ErrorAborted {
+		t.Errorf("result err = %v, want an aborted StreamError", res.Err)
+	}
+	if !up.Retired() {
+		t.Error("upstream Layer not retired after a client reset mid-body; its connection must carry no further exchange")
+	}
+	_ = ch.Close()
+	assertChannelsEnd(t, cl)
+}
+
+// TestRequestStream_BodyFramingErrorRetiresUpstream (R8): a malformed
+// chunk-size line mid-body is a protocol error, not a client cut: Send
+// returns an error that is never replay-safe, the upstream Layer — which
+// already received part of the body — carries no further exchange, and
+// the client Layer parses nothing further.
+func TestRequestStream_BodyFramingErrorRetiresUpstream(t *testing.T) {
+	cl, peer := newStreamingClient(t, streamAll)
+	up, wire := newCapturingUpstream(t)
+	const head = "POST /bad HTTP/1.1\r\nHost: up.test\r\nTransfer-Encoding: chunked\r\n\r\n"
+	const chunk = "5\r\nhello\r\n"
+	peerWrite(t, peer, head+chunk)
+	ch := nextChannelWithin(t, cl)
+	env := nextRequestWithin(t, ch, 2*time.Second)
+	msg := streamedMsg(t, env)
+	done := sendAsync(up.OpenExchange(), env)
+	wire.waitLen(t, len(head)+len(chunk))
+	peerWrite(t, peer, "zz\r\nGET /smuggled HTTP/1.1\r\nHost: a\r\n\r\n")
+
+	err := waitErr(t, done)
+	if err == nil {
+		t.Fatal("upstream Send after a malformed chunk-size line = nil, want an error")
+	}
+	var stale *StaleUpstreamError
+	if errors.As(err, &stale) && stale.ReplaySafe {
+		t.Errorf("Send error = %v, want it never replay-safe (part of the body was sent)", err)
+	}
+	res, _ := msg.BodyStream.Result()
+	if res.Truncated {
+		t.Errorf("result = %+v, want a protocol error, not a truncation", res)
+	}
+	var se *layer.StreamError
+	if !errors.As(res.Err, &se) || se.Code != layer.ErrorProtocol {
+		t.Errorf("result err = %v, want a protocol StreamError", res.Err)
+	}
+	if !up.Retired() {
+		t.Error("upstream Layer not retired after a body-stage error; its connection is mid-body and must carry no further exchange")
+	}
+	_ = ch.Close()
+	assertChannelsEnd(t, cl)
+}
+
 // TestRequestStream_HeaderStageStaleKeepsStream (T10, R11): a header-stage
 // stale write on a streamed PUT reports a replay-safe StaleUpstreamError
 // and leaves the one-shot body untouched, so the same Envelope replayed on
