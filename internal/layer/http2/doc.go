@@ -64,9 +64,20 @@
 //
 // # Flow control
 //
-// WINDOW_UPDATE frames are sent eagerly during body assembly: when the
-// stream-level recv window has been consumed by ≥50% of the local
-// InitialWindowSize, or when the connection-level recv window has been
-// consumed by ≥50% of the initial 65535. This keeps backpressure in lock-
-// step with consumer drain rate without holding excessive bytes in memory.
+// Connection-level WINDOW_UPDATE is sent for every DATA frame as it
+// arrives, so no consumer can hold back the connection window (RFC-001
+// §9.1 point 2). Stream-level WINDOW_UPDATE follows consumer reads
+// (point 3, USK-1399): each stream queues its events without ever
+// blocking the frame reader, and its credit is returned as the consumer
+// takes events (Channel.Next, or the detach drain once the detached
+// reader has the bytes), batched at half the local InitialWindowSize. A
+// stalled consumer therefore stalls only its own stream, and its queue is
+// bounded by the advertised stream window: DATA beyond it resets the
+// stream with FLOW_CONTROL_ERROR. Flow control bounds DATA by bytes, not
+// by frame count, and does not bound header blocks, so an unread queue
+// that reaches max(1024, window/1024) events (every event counts, small
+// DATA frames included) or window bytes of header blocks is reset with
+// ENHANCE_YOUR_CALM — a bound a compliant peer can reach when the
+// stream's consumer is held. The writer raises the local receive window
+// before writing the WINDOW_UPDATE that grants it.
 package http2

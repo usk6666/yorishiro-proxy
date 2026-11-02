@@ -64,9 +64,14 @@ type writeSched struct {
 	// when the stream's Channel leaves l.channels (USK-1176). Applied after
 	// pending, so a reset and its pruning recorded together both apply.
 	forget map[uint32]struct{}
-	// hasPending mirrors len(pending) > 0 || len(forget) > 0 so the
-	// writer's per-frame check is a single atomic load when nothing is in
-	// flight. Written under mu.
+	// credit maps stream id to receive credit a consumer has handed over
+	// (grantStreamCredit) and the writer has not yet written as a
+	// WINDOW_UPDATE (USK-1399). Keyed by stream, so it holds at most one
+	// entry per open stream however long the writer is stuck.
+	credit map[uint32]uint32
+	// hasPending mirrors len(pending) > 0 || len(forget) > 0 ||
+	// len(credit) > 0 so the writer's per-frame check is a single atomic
+	// load when nothing is in flight. Written under mu.
 	hasPending atomic.Bool
 }
 
@@ -82,7 +87,20 @@ func newWriteSched() *writeSched {
 		reset:   make(map[uint32]error),
 		pending: make(map[uint32]error),
 		forget:  make(map[uint32]struct{}),
+		credit:  make(map[uint32]uint32),
 	}
+}
+
+// grantStreamCredit hands n bytes of stream receive credit to the writer,
+// which raises the local window and writes the WINDOW_UPDATE (USK-1399).
+// Called by consumers as they read; never blocks, so a consumer is not
+// held up by a full writer queue (the pending-reset pattern of USK-1166).
+func (l *Layer) grantStreamCredit(streamID, n uint32) {
+	l.sched.mu.Lock()
+	l.sched.credit[streamID] += n
+	l.sched.hasPending.Store(true)
+	l.sched.mu.Unlock()
+	l.signalWindowUpdate()
 }
 
 // forgetStreamWrites tells the writer to drop streamID's reset entry: the
@@ -110,17 +128,22 @@ func (l *Layer) resetStreamWrites(streamID uint32, err error) {
 	l.signalWindowUpdate()
 }
 
-// applyPendingResets moves resets recorded by other goroutines into the
-// writer-owned state. Writer goroutine only.
-func (l *Layer) applyPendingResets() {
+// applyPending moves resets recorded by other goroutines into the
+// writer-owned state, then writes the stream credit consumers handed over.
+// Writer goroutine only.
+func (l *Layer) applyPending() {
 	if !l.sched.hasPending.Load() {
 		return
 	}
 	l.sched.mu.Lock()
 	pending := l.sched.pending
 	forget := l.sched.forget
+	credit := l.sched.credit
 	l.sched.pending = make(map[uint32]error)
 	l.sched.forget = make(map[uint32]struct{})
+	if len(credit) > 0 {
+		l.sched.credit = make(map[uint32]uint32)
+	}
 	l.sched.hasPending.Store(false)
 	l.sched.mu.Unlock()
 	for id, err := range pending {
@@ -128,6 +151,9 @@ func (l *Layer) applyPendingResets() {
 	}
 	for id := range forget {
 		delete(l.sched.reset, id)
+	}
+	for id, n := range credit {
+		l.writeStreamCredit(id, n)
 	}
 }
 

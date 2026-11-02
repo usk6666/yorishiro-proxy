@@ -127,7 +127,7 @@ type writeGoAway struct {
 // USK-1166: the writer never blocks on flow control. DATA that does not fit
 // the peer's windows is parked per stream (see writeSched) and resumed when
 // windowUpdated fires; the same signal carries stream resets recorded by the
-// reader. Writes still parked at exit are failed with ErrWriterClosed by
+// reader and stream receive credit handed over by consumers (USK-1399). Writes still parked at exit are failed with ErrWriterClosed by
 // failParkedWrites, so the exit invariant above covers them too.
 func (l *Layer) writerLoop() {
 	defer close(l.writerDone)
@@ -149,7 +149,7 @@ func (l *Layer) writerLoop() {
 		case req := <-l.writerQueue:
 			l.dispatchWrite(req)
 		case <-l.windowUpdated:
-			l.applyPendingResets()
+			l.applyPending()
 			l.serviceParked()
 		}
 	}
@@ -174,16 +174,17 @@ func (l *Layer) failDrainQueuedWrites() {
 
 func (l *Layer) dispatchWrite(req writeRequest) {
 	// Resets observed by the reader must apply before any later-dequeued
-	// write for the same stream is considered. A window grant that is
+	// write for the same stream is considered; stream credit handed over
+	// before this request was queued goes out ahead of it. A window grant that is
 	// already signalled goes to parked streams first, so newly queued DATA
 	// cannot take connection window ahead of them; the drained signal is
 	// acted on here, so no wake is lost.
 	select {
 	case <-l.windowUpdated:
-		l.applyPendingResets()
+		l.applyPending()
 		l.serviceParked()
 	default:
-		l.applyPendingResets()
+		l.applyPending()
 	}
 	switch {
 	case req.headers != nil:
@@ -228,23 +229,49 @@ func (l *Layer) handleWriteRST(req *writeRST) {
 	deliverDone(req.done, err)
 }
 
+// handleWriteWindowUpdate writes a queued WINDOW_UPDATE. The local receive
+// window is raised BEFORE the frame is written (USK-1399): the peer may
+// spend the credit the moment it reads the frame, and the reader must
+// already count it, or those bytes overrun a stale window and look like a
+// FLOW_CONTROL_ERROR. skipLocalUpdate marks the startup connection
+// increment, whose window New raised itself.
 func (l *Layer) handleWriteWindowUpdate(req *writeWindowUpdate) {
-	// RFC 9113 §5.1: no WINDOW_UPDATE on a closed stream. The reader queues
-	// stream-level WINDOW_UPDATE at DATA arrival, so the stream can close
-	// before it is written; the connection-level one still goes out.
-	if req.streamID != 0 && l.conn.Streams().Get(req.streamID) == nil {
-		deliverDone(req.done, nil)
-		return
-	}
-	err := l.frameWriter.WriteWindowUpdate(req.streamID, req.increment)
-	if err == nil && !req.skipLocalUpdate {
+	if !req.skipLocalUpdate {
+		var err error
 		if req.streamID == 0 {
-			_ = l.conn.IncrementRecvWindow(req.increment)
+			err = l.conn.IncrementRecvWindow(req.increment)
 		} else {
-			_ = l.conn.Streams().IncrementRecvWindow(req.streamID, req.increment)
+			// Fails when the stream has closed and left StreamMap:
+			// RFC 9113 §5.1 allows no WINDOW_UPDATE on a closed stream.
+			err = l.conn.Streams().IncrementRecvWindow(req.streamID, req.increment)
+		}
+		if err != nil {
+			deliverDone(req.done, nil)
+			return
 		}
 	}
+	err := l.frameWriter.WriteWindowUpdate(req.streamID, req.increment)
+	if err == nil && l.opts.afterWindowUpdateWrite != nil {
+		l.opts.afterWindowUpdateWrite(req.streamID)
+	}
 	deliverDone(req.done, err)
+}
+
+// writeStreamCredit returns n bytes of stream-level receive credit to the
+// peer: the credit the consumer handed over with grantStreamCredit. As in
+// handleWriteWindowUpdate the local window is raised before the frame is
+// written. A stream that has closed and left StreamMap gets nothing
+// (RFC 9113 §5.1). Writer goroutine only.
+func (l *Layer) writeStreamCredit(streamID, n uint32) {
+	if err := l.conn.Streams().IncrementRecvWindow(streamID, n); err != nil {
+		return
+	}
+	if err := l.frameWriter.WriteWindowUpdate(streamID, n); err != nil {
+		return
+	}
+	if l.opts.afterWindowUpdateWrite != nil {
+		l.opts.afterWindowUpdateWrite(streamID)
+	}
 }
 
 func (l *Layer) handleWritePingAck(req *writePingAck) {

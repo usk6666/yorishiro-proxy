@@ -565,11 +565,16 @@ package http2layer
 // must wrap with HTTPAggregatorLayer (see below); gRPC consumers wrap with
 // GRPCLayer. See §9.1 revised resolution for the rationale.
 //
-// Flow control: the Layer appends DATA bytes to a per-stream BodyBuffer and
-// sends WINDOW_UPDATE at append time, independent of whether the Pipeline
-// has consumed the event yet. Per-stream soft cap triggers stream-level
-// stall + disk spill; hard cap triggers RST_STREAM. Connection-level WINDOW
-// is decoupled from Pipeline latency.
+// Flow control: connection-level WINDOW_UPDATE is sent as each DATA frame
+// arrives, so connection WINDOW is decoupled from Pipeline latency. Each
+// stream queues its events in memory without ever blocking the frame
+// reader; stream-level WINDOW_UPDATE is sent as the consumer takes events
+// (batched at half the advertised stream window), so a stalled consumer
+// stalls only its own stream and the queue is bounded by the advertised
+// window. DATA past the window → RST_STREAM(FLOW_CONTROL_ERROR); an unread
+// queue reaching max(1024, window/1024) events (all events, small DATA
+// frames included) or window bytes of header blocks →
+// RST_STREAM(ENHANCE_YOUR_CALM). See §9.1 (USK-1399).
 func New(conn net.Conn, role Role) layer.Layer
 ```
 
@@ -1463,24 +1468,29 @@ N9: Legacy Removal + Documentation
 
 **Resolved:** 2026-04-15
 **Revised:** 2026-04-23 (supersedes the 2026-04-15 in-layer aggregation model; see OQ#2 resolution for motivation)
+**Revised:** 2026-11-03 (USK-1399: stream-level credit follows consumer reads; points 2 and 3 below)
 
 **Problem:** HTTP/2 has per-stream and per-connection flow control (WINDOW_UPDATE frames). If a Pipeline Step blocks for minutes (e.g., `InterceptStep` waiting for AI agent action), the stream's WINDOW fills and the downstream side stalls. If *many* concurrent streams on the same connection all block simultaneously, connection-level WINDOW fills and the entire HTTP/2 connection stalls, impacting unrelated streams.
 
-**Resolution: Event-granular HTTP/2 Layer with bounded per-stream buffers; aggregation is an upper-layer wrapper.**
+**Resolution: Event-granular HTTP/2 Layer with per-stream queues bounded by the advertised stream window; aggregation is an upper-layer wrapper.**
 
 The initial resolution (2026-04-15) folded aggregation inside the HTTP/2 Layer so `Channel.Next()` returned one complete `HTTPMessage` per stream. Work on OQ#2 (gRPC granularity) revealed this model cannot coexist with streaming gRPC — long-lived bidi streams never "complete", so there is nothing to aggregate. The underlying design mistake was letting Pipeline latency propagate into the transport layer. The revision below fixes that by decoupling the two concerns.
 
 **Decision:**
 
 1. **HTTP/2 Layer is always event-granular.** Its Channels yield three event types on each stream: `H2HeadersEvent` (from HEADERS frame), `H2DataEvent` (from DATA frame *or* from a BodyBuffer chunk — see below), and `H2TrailersEvent` (from trailer HEADERS frame with END_STREAM).
-2. **Per-stream buffer drives flow control.** Each stream owns a `BodyBuffer` (reusing the N6.5 memory-then-spill primitive). DATA frames are appended to the buffer as they arrive; the Layer sends WINDOW_UPDATE **at append time**, not at Pipeline-consume time. Connection-level WINDOW is therefore decoupled from Pipeline latency entirely — no Pipeline hold, however long, can affect other streams on the same connection.
-3. **Back-pressure is stream-scoped, not connection-scoped.** If a stream's BodyBuffer grows past a per-stream soft cap while the Pipeline holds it, the Layer stops replenishing *that stream's* WINDOW (stream-level stall), then spills to disk, then RST_STREAMs if a hard cap is breached. Other streams are never affected.
+2. **Connection-level credit follows arrival.** The frame reader returns connection-level WINDOW_UPDATE for every DATA frame as it arrives — delivered, ignored (closed stream, after a sent GOAWAY) or rejected alike. Connection-level WINDOW is therefore decoupled from consumer and Pipeline latency entirely — no hold, however long, can take connection window from other streams.
+3. **Stream-level credit follows consumer reads; back-pressure is stream-scoped.** Each stream owns an in-memory queue of events, filled by the connection's single frame reader, which never blocks on it. Stream-level WINDOW_UPDATE is returned when an event *leaves* that queue — `Channel.Next`, or the detach drain once the detached reader has consumed the bytes (`io.Pipe` write returned) — batched: one WINDOW_UPDATE carrying exactly the accumulated bytes once they reach half the advertised `SETTINGS_INITIAL_WINDOW_SIZE` (8 MiB for the default 16 MiB window, 64 KiB for Firefox's 128 KiB, 32767 for the RFC default 65535), as browsers and `x/net/http2` do. Padding (pad-length byte + padding) never reaches the consumer, so its credit is returned at arrival and rides the next batch. No stream WINDOW_UPDATE is sent once END_STREAM has been received. A stalled consumer — an Intercept hold, a slow SSE client, a WS-over-h2 peer that stops reading — therefore stalls *that stream* at its advertised window; the connection and its other streams keep flowing.
+   - **Bound.** Queued DATA per stream never exceeds the advertised stream window, because the peer cannot send past credit that has not been returned; DATA beyond it is a stream error: RST_STREAM(FLOW_CONTROL_ERROR), the stream's Channel fails, the connection survives (RFC 9113 §6.9.1). Flow control bounds DATA by bytes but not by frame count, and does not bound header blocks at all, so two more bounds apply to what a stream queues unread. (a) **Event cap:** every queued event counts — small and zero-length DATA frames as well as header blocks — up to `max(1024, window/1024)` per stream (16384 for 16 MiB, 1024 for 128 KiB or less), which bounds the per-event overhead (envelope + raw copy) and assumes an average of at least 1 KiB of window per queued event. (b) **Header-block budget:** the queued header blocks' bytes — raw HPACK block plus decoded fields, each field counted as name + value + 32 as in `SETTINGS_MAX_HEADER_LIST_SIZE` — may not exceed the advertised stream window; this matters for a response stream, where the peer may send any number of 1xx HEADERS. A queue holding no header-block bytes always admits one block, so a single block larger than the budget (up to the 1 MiB fragment / 1 MiB decoded-list limits) still reaches a consumer. Either breach resets the stream with RST_STREAM(ENHANCE_YOUR_CALM) and delivers the queued events, then the stream error, to the consumer. Both bounds apply only to events waiting unread, never to a consumer that keeps reading — but a *compliant* peer can reach them while the stream's consumer is held (e.g. a server sending an SSE stream as one small event per DATA frame to a request held by Intercept, which with Firefox's 128 KiB window is reset after 1024 unread events); the reset is the bound, not a verdict on the peer. The first reset for each bound on a connection is logged at Warn, later ones at Debug.
+   - **No spill in the Layer.** The queue is memory-only; the window is the bound. `HTTPAggregatorLayer` keeps its own BodyBuffer spill (default 10 MiB) for the bodies it assembles.
+   - **Worst case (theoretical)** per stream is the DATA window + the header-block budget (= window) + one admitted header block (≤ ~2 MiB), i.e. about 2 × window + 2 MiB, plus the per-event overhead of up to the event cap; per connection, that times the concurrent streams. ServerRole (client-facing): a request stream carries at most two header blocks (request + trailers), so 16 MiB + 4 MiB × 500 advertised MAX_CONCURRENT_STREAMS ≈ 9.8 GiB; ClientRole (upstream) default: (2 × 16 MiB + 2 MiB) × the peer's MAX_CONCURRENT_STREAMS (100 / 128 / 256 → 3.3 / 4.3 / 8.5 GiB); ClientRole Firefox: (2 × 128 KiB + 2 MiB) × 100 ≈ 225 MiB. Reaching it needs every stream held unread at a full window *and* a peer filling the header budget with 1xx responses. A per-connection queued-bytes budget is deferred; re-open on an observed RSS problem.
+   - **Accounting order.** The writer raises the local receive window *before* writing the WINDOW_UPDATE that announces it, so bytes the peer sends the moment it reads the update are never measured against a stale window.
 4. **Aggregation is a wrapper Layer, not a property of HTTP/2 Layer.** For plain HTTP/2 traffic the `HTTPAggregatorLayer` consumes H2 events and produces one `HTTPMessage` per request/response (preserving the N6.5 user-visible behavior for HTTP/1.x parity). For gRPC, `GRPCLayer` consumes the same events and produces `GRPCStartMessage` / `GRPCDataMessage` / `GRPCEndMessage` without ever aggregating.
 
 **Why this resolves the flow control concern:**
 
-- Transport-layer ACKing is now independent of application-layer processing speed. WINDOW_UPDATE fires as soon as the byte reaches the per-stream buffer, which happens within microseconds of the frame reader goroutine pulling it off the socket. Pipeline blocking an individual stream cannot backpressure the connection.
-- Worst-case memory per connection is `perStreamSoftCap × MAX_CONCURRENT_STREAMS`. Once the soft cap is reached for a stream, that stream spills to disk; the soft cap itself is tunable. The disk-spill path is already proven in N6.5.
+- Connection-level ACKing is independent of application-layer processing speed: it fires when the frame reader pulls the DATA frame off the socket. The frame reader itself never waits on a stream's consumer, so blocking an individual stream cannot backpressure the connection.
+- Per-stream memory is bounded by the advertised stream window (DATA, plus an equal budget for queued header blocks and the event-count cap), not by how long a consumer stalls. Before USK-1399 both windows were credited on arrival and the only bound was a 32-slot per-stream channel whose overflow blocked the frame reader — one unread stream (an SSE client that stopped reading, a held gRPC or WS-over-h2 message) stalled every stream on the connection, including pooled upstream connections shared across tunnels.
 - Plain HTTP users see the same "one HTTPMessage per exchange" ergonomics as before, via HTTPAggregatorLayer. Streaming-protocol users (gRPC, future SSE) see events as they arrive.
 
 **Rejected alternatives:**
