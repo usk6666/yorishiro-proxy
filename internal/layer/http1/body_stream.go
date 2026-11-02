@@ -7,11 +7,13 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
@@ -45,10 +47,10 @@ type streamedResponse struct {
 
 // maybeStreamResponse applies the body-mode decision to a parsed final
 // response. It returns streamed != nil when the body is streamed. For a
-// layer.BodyBufferUpTo decision whose body turned out to fit, prefix holds
-// the whole body already read; the caller then assembles the buffered
-// envelope from it.
-func (c *channel) maybeStreamResponse(rawResp *parser.RawResponse) (prefix []byte, streamed *streamedResponse, err error) {
+// layer.BodyBufferUpTo decision that read part or all of the body, probe
+// holds what was read (probe.ended when the body fit); the caller then
+// assembles the buffered envelope from it.
+func (c *channel) maybeStreamResponse(rawResp *parser.RawResponse) (probe *probedBody, streamed *streamedResponse, err error) {
 	mode := c.responseBodyMode(rawResp)
 	switch mode.Kind {
 	case layer.BodyStream:
@@ -57,11 +59,11 @@ func (c *channel) maybeStreamResponse(rawResp *parser.RawResponse) (prefix []byt
 		if n, ok := declaredContentLength(rawResp); ok && n > mode.Limit {
 			return nil, c.streamResponse(rawResp, nil), nil
 		}
-		probe, fits, perr := c.probeBody(rawResp, mode.Limit)
+		probe, perr := c.probeBody(rawResp, mode.Limit)
 		if perr != nil {
 			return nil, nil, perr
 		}
-		if fits {
+		if probe.ended {
 			return probe, nil, nil
 		}
 		if s := c.streamResponse(rawResp, probe); s != nil {
@@ -176,44 +178,164 @@ func (c *channel) responseHeadEnvelope(rawResp *parser.RawResponse) (*envelope.E
 	return env, msg
 }
 
-// probeBody reads up to limit+1 semantic body bytes (USK-1409 R14). fits
-// reports that the body ended within limit; the bytes read are returned
-// either way. Raw-body spill is configured first, as for a buffered body,
-// so the wire bytes of the probed prefix are captured whatever its size.
-func (c *channel) probeBody(rawResp *parser.RawResponse, limit int64) (probe []byte, fits bool, err error) {
+// probedBody is the semantic body a BufferUpTo probe read: in memory up to
+// body_spill_threshold, spilled to a BodyBuffer file beyond it (the same
+// representation readBodyWithThreshold gives a buffered body). ended
+// reports that the body ended within the probe's limit.
+type probedBody struct {
+	body  []byte
+	bb    *bodybuf.BodyBuffer
+	ended bool
+}
+
+// release frees the spilled copy, if any.
+func (p *probedBody) release() {
+	if p != nil && p.bb != nil {
+		_ = p.bb.Release()
+		p.bb = nil
+	}
+}
+
+// probeBody reads up to limit+1 semantic body bytes (USK-1409 R14).
+// Memory is sized from the body, not from limit: the in-memory part grows
+// with the bytes read (seeded from a declared Content-Length) and stops at
+// body_spill_threshold, past which the probe spills to a BodyBuffer file
+// bounded by max_body_size — as readBodyWithThreshold does for a buffered
+// body. Raw-body spill is configured first, as for a buffered body, so the
+// wire bytes of the probed prefix are captured whatever its size.
+func (c *channel) probeBody(rawResp *parser.RawResponse, limit int64) (probe *probedBody, err error) {
 	configureRawBodySpill(rawResp.Body, c.bodyOpts)
 	if limit < 0 {
 		limit = 0
 	}
-	buf := make([]byte, limit+1)
-	n, rerr := io.ReadFull(rawResp.Body, buf)
+	threshold := c.bodyOpts.spillThreshold
+	if threshold <= 0 {
+		threshold = config.DefaultBodySpillThreshold
+	}
+	maxBody := c.bodyOpts.maxBody
+	if maxBody <= 0 {
+		maxBody = config.MaxBodySize
+	}
+	memCap := min(limit, threshold) + 1
+	hint := int64(streamCopyBufSize)
+	if n, ok := declaredContentLength(rawResp); ok {
+		hint = n + 1
+	}
+	probe = &probedBody{}
+	defer func() {
+		if err != nil {
+			probe.release()
+			probe = nil
+			releaseOrphanRawBodyBuffer(rawResp.Body)
+		}
+	}()
+
+	var rerr error
+	probe.body, rerr = readUpTo(rawResp.Body, memCap, hint)
+	if rerr != nil {
+		if isBodyEnd(rerr) {
+			probe.ended = true
+			if probe.body == nil {
+				probe.body = []byte{}
+			}
+			return probe, nil
+		}
+		return nil, fmt.Errorf("http1: read response body: %w", rerr)
+	}
+	if memCap > limit {
+		// limit+1 bytes read: the body does not fit.
+		return probe, nil
+	}
+
+	// Over body_spill_threshold but possibly within limit: spill.
+	bb, ferr := bodybuf.NewFile(c.bodyOpts.spillDir, config.BodySpillPrefix, maxBody)
+	if ferr != nil {
+		return nil, fmt.Errorf("http1: create body file: %w", ferr)
+	}
+	probe.bb = bb
+	head := probe.body
+	probe.body = nil
+	if _, werr := bb.Write(head); werr != nil {
+		return nil, bodyWriteErr(werr)
+	}
+	_, cerr := io.CopyN(bb, rawResp.Body, limit+1-int64(len(head)))
 	switch {
-	case rerr == nil:
-		return buf[:n], false, nil
-	case errors.Is(rerr, io.EOF) || errors.Is(rerr, io.ErrUnexpectedEOF):
-		return buf[:n], true, nil
+	case cerr == nil:
+		return probe, nil
+	case isBodyEnd(cerr):
+		probe.ended = true
+		return probe, nil
 	default:
-		releaseOrphanRawBodyBuffer(rawResp.Body)
-		return nil, false, fmt.Errorf("http1: read response body: %w", rerr)
+		return nil, bodyWriteErr(cerr)
 	}
 }
 
-// streamResponse builds the streamed-body Envelope for rawResp. semPrefix
+// readUpTo reads from r until n bytes were read (nil error) or r ends
+// (its error, io.EOF / io.ErrUnexpectedEOF at the body's end). The buffer
+// starts at min(hint, n) bytes and doubles as needed, so a short body
+// costs a short allocation whatever n is.
+func readUpTo(r io.Reader, n, hint int64) ([]byte, error) {
+	buf := make([]byte, 0, min(max(hint, 512), n))
+	for int64(len(buf)) < n {
+		if len(buf) == cap(buf) {
+			next := make([]byte, len(buf), min(int64(cap(buf))*2, n))
+			copy(next, buf)
+			buf = next
+		}
+		m, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+m]
+		if err != nil {
+			return buf, err
+		}
+	}
+	return buf, nil
+}
+
+// isBodyEnd reports whether err from a body read marks the body's end
+// (clean, or truncated — truncation is surfaced via bodyTruncationAnomaly).
+func isBodyEnd(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// bodyWriteErr maps a BodyBuffer write / copy error the way
+// readBodyWithThreshold does.
+func bodyWriteErr(err error) error {
+	if errors.Is(err, bodybuf.ErrMaxSizeExceeded) {
+		return &layer.StreamError{
+			Code:   layer.ErrorInternalError,
+			Reason: "http1: body exceeds max size",
+		}
+	}
+	return fmt.Errorf("http1: read body: %w", err)
+}
+
+// streamResponse builds the streamed-body Envelope for rawResp. probe
 // holds body bytes a probe already read (nil when none); their wire bytes
 // are still in the parser's raw capture and are forwarded first. Returns
-// nil when that capture was cut (the prefix cannot be forwarded verbatim).
-func (c *channel) streamResponse(rawResp *parser.RawResponse, semPrefix []byte) *streamedResponse {
+// nil when that capture was cut (the prefix cannot be forwarded verbatim)
+// or a spilled probe cannot be reopened; probe is then left to the caller.
+// Otherwise the stream owns the probe's spilled copy.
+func (c *channel) streamResponse(rawResp *parser.RawResponse, probe *probedBody) *streamedResponse {
 	src := &h1BodySource{
 		ch:   c,
 		body: rawResp.Body,
 		done: make(chan struct{}),
 	}
-	if semPrefix != nil {
+	if probe != nil {
 		rp, ok := rawResp.Body.(parser.RawBodyProvider)
 		if !ok || rp.RawBodyTruncated() {
 			return nil
 		}
-		src.semPrefix = semPrefix
+		if probe.bb != nil {
+			r, err := probe.bb.Reader()
+			if err != nil {
+				return nil
+			}
+			src.semPrefixR = r
+			src.semPrefixBuf = probe.bb
+			probe.bb = nil
+		}
+		src.semPrefix = probe.body
 		src.rawPrefix = rp.RawBody()
 		src.rawPrefixBuf = rp.RawBodyBuffer()
 	}
@@ -271,6 +393,16 @@ type h1BodySource struct {
 	rawPrefixBuf *bodybuf.BodyBuffer
 	prefixState  atomic.Int32
 
+	// semPrefixR / semPrefixBuf: a probe prefix that spilled past
+	// body_spill_threshold, read from its file (after semPrefix, which is
+	// then empty). Set before the stream is published and never reassigned;
+	// semPrefixOnce closes and releases them exactly once — from Read when
+	// exhausted or from Finish. semPrefixDone is reading-goroutine state.
+	semPrefixR    io.ReadCloser
+	semPrefixBuf  *bodybuf.BodyBuffer
+	semPrefixOnce sync.Once
+	semPrefixDone bool
+
 	// fwd, when set by an HTTP/1.x client Channel, receives the raw body
 	// bytes; fwdErr latches its first write error. Reading goroutine only.
 	fwd    *bufio.Writer
@@ -290,7 +422,34 @@ func (s *h1BodySource) Read(p []byte) (int, error) {
 		s.semPrefix = s.semPrefix[n:]
 		return n, nil
 	}
+	if s.semPrefixR != nil && !s.semPrefixDone {
+		n, err := s.semPrefixR.Read(p)
+		if err == nil {
+			return n, nil
+		}
+		s.semPrefixDone = true
+		s.releaseSemPrefix()
+		if !errors.Is(err, io.EOF) {
+			return n, fmt.Errorf("http1: read probed body: %w", err)
+		}
+		if n > 0 {
+			return n, nil
+		}
+	}
 	return s.body.Read(p)
+}
+
+// releaseSemPrefix closes and releases a spilled probe prefix. Safe to call
+// from Finish concurrently with a Read: closing an *os.File makes an
+// in-flight Read on it return an error.
+func (s *h1BodySource) releaseSemPrefix() {
+	if s.semPrefixR == nil {
+		return
+	}
+	s.semPrefixOnce.Do(func() {
+		_ = s.semPrefixR.Close()
+		_ = s.semPrefixBuf.Release()
+	})
 }
 
 // onRaw is the parser raw tap: forward the wire bytes, then report them to
@@ -366,6 +525,7 @@ func (s *h1BodySource) flushForward() error {
 // the receive loop.
 func (s *h1BodySource) Finish(cause error) envelope.BodyResult {
 	defer close(s.done)
+	s.releaseSemPrefix()
 	if s.prefixState.CompareAndSwap(prefixPending, prefixReleased) && s.rawPrefixBuf != nil {
 		_ = s.rawPrefixBuf.Release()
 	}

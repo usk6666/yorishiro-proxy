@@ -60,7 +60,12 @@ func appendCapped(dst, p []byte, limit int64, cut bool) ([]byte, bool) {
 // that is what reached the wire. env.Raw is never mutated.
 func (s *RecordStep) recordStreamedHTTP(ctx context.Context, snap, env *envelope.Envelope, bs *envelope.BodyStream) {
 	saveCtx := context.WithoutCancel(ctx)
-	headerAt := time.Now()
+	// R7: the Flow timestamp is header arrival, which the producer stamps
+	// on the Envelope; RecordStep runs after the other Steps.
+	headerAt := env.Context.ReceivedAt
+	if headerAt.IsZero() {
+		headerAt = time.Now()
+	}
 	capture := &streamBodyCapture{limit: s.recordCap()}
 
 	var flows []*flow.Flow

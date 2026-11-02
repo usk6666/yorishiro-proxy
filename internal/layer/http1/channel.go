@@ -1402,7 +1402,7 @@ func (c *channel) parseResponse() (env *envelope.Envelope, isInformational, trun
 // via detachStreamingBody; such responses are by definition final), then
 // the USK-1409 body mode (src non-nil for a streamed body). prefix is the
 // body a BufferUpTo probe read when it fit; the caller buffers it.
-func (c *channel) unbufferedResponse(rawResp *parser.RawResponse) (out *streamedResponse, prefix []byte, err error) {
+func (c *channel) unbufferedResponse(rawResp *parser.RawResponse) (out *streamedResponse, prefix *probedBody, err error) {
 	if c.streamingDetect != nil && c.streamingDetect(rawResp) {
 		return &streamedResponse{env: c.buildStreamingResponseEnvelope(rawResp)}, nil, nil
 	}
@@ -2423,6 +2423,28 @@ func concatWireBytes(headerBytes, bodyBytes []byte) []byte {
 	return out
 }
 
+// drainResponseBody reads the response body into memory or a spilled
+// BodyBuffer (readBodyWithThreshold), continuing behind a BufferUpTo probe
+// when there is one. On error a probe's spilled copy is released.
+func (c *channel) drainResponseBody(r io.Reader, probe *probedBody) (*bodybuf.BodyBuffer, []byte, error) {
+	switch {
+	case probe == nil:
+		return readBodyWithThreshold(r, c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
+	case probe.ended:
+		return probe.bb, probe.body, nil
+	case probe.bb != nil:
+		bb := probe.bb
+		if _, err := io.Copy(bb, r); err != nil {
+			_ = bb.Release()
+			return nil, nil, bodyWriteErr(err)
+		}
+		return bb, nil, nil
+	default:
+		return readBodyWithThreshold(io.MultiReader(bytes.NewReader(probe.body), r),
+			c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
+	}
+}
+
 // assembleResponseBody drains the body, configures USK-772 disk-spill, and
 // returns the dechunked-body BodyBuffer/bytes plus the anomalies and
 // trailers that the caller must merge into the resulting HTTPMessage.
@@ -2431,21 +2453,15 @@ func concatWireBytes(headerBytes, bodyBytes []byte) []byte {
 // gocyclo threshold (15) — the body extraction + anomaly accumulation
 // is a single logical concern.
 //
-// prefix holds body bytes already read from rawResp.Body by a USK-1409
-// BufferUpTo probe that found the body within its limit; they are
-// assembled ahead of whatever the reader still yields (nothing, since the
-// probe stopped at the end).
-func (c *channel) assembleResponseBody(rawResp *parser.RawResponse, prefix []byte) (*bodybuf.BodyBuffer, []byte, []envelope.Anomaly, []envelope.KeyValue, error) {
+// probe holds body bytes already read from rawResp.Body by a USK-1409
+// BufferUpTo probe (nil when none). When the probe reached the body's end
+// it is the body as is; otherwise the rest of the body is read behind it.
+func (c *channel) assembleResponseBody(rawResp *parser.RawResponse, probe *probedBody) (*bodybuf.BodyBuffer, []byte, []envelope.Anomaly, []envelope.KeyValue, error) {
 	// USK-772: configure raw-body disk-spill on the parser body reader before
 	// drain. See parseRequest for rationale.
 	configureRawBodySpill(rawResp.Body, c.bodyOpts)
 
-	var src io.Reader = rawResp.Body
-	if prefix != nil {
-		src = io.MultiReader(bytes.NewReader(prefix), rawResp.Body)
-	}
-	bb, body, err := readBodyWithThreshold(src,
-		c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
+	bb, body, err := c.drainResponseBody(rawResp.Body, probe)
 	if err != nil {
 		// USK-772: same rationale as parseRequest — release any spilled
 		// raw-body temp file the parser sink had already promoted before

@@ -59,8 +59,12 @@ type BodyStreamSource interface {
 // the goroutine that ended it. A callback registered after completion runs
 // immediately on the registering goroutine.
 //
-// Observers and callbacks must not block and must not call back into the
-// BodyStream.
+// Observers and callbacks must not call back into the BodyStream or its
+// producer. They run inline on the goroutine that reads or ends the body,
+// so their time is added to the transfer: observers should be cheap, and a
+// completion callback may do bounded synchronous work — RecordStep's saves
+// the Flow rows to the store, which for a chunked HTTP/1.x body happens
+// before the terminal chunk is flushed to the client.
 type BodyStream struct {
 	src BodyStreamSource
 
