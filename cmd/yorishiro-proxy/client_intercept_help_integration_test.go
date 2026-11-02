@@ -175,12 +175,35 @@ func TestE2E_ClientInterceptHelp_ModifyAndForwardExamples(t *testing.T) {
 		t.Fatal("clientToolHelp[intercept] has no `action=modify_and_forward` example")
 	}
 
+	// The default listener sends the upstream origin-form (GitHub PR 309):
+	// that is what a user following the help gets. forward_as_received
+	// keeps the client's absolute-form target, and a rewritten path /
+	// raw_query is then spliced behind its "scheme://authority" — the
+	// other half of what help_intercept.md documents for http.path /
+	// http.raw_query.
+	for _, mode := range []struct {
+		name              string
+		forwardAsReceived bool
+	}{
+		{name: "default_origin_form", forwardAsReceived: false},
+		{name: "forward_as_received", forwardAsReceived: true},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			runInterceptHelpModifyAndForwardExamples(t, schema, examples, mode.forwardAsReceived)
+		})
+	}
+}
+
+// runInterceptHelpModifyAndForwardExamples runs each example against a
+// fresh proxy listener started with forward_as_received=forwardAsReceived.
+func runInterceptHelpModifyAndForwardExamples(t *testing.T, schema *toolSchema, examples []cliExample, forwardAsReceived bool) {
 	upstream := startRawRecordingUpstream(t)
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
 	defer h.Cleanup()
 
 	res := h.MustOK(t, "proxy_start", map[string]any{
-		"listen_addr": "127.0.0.1:0",
+		"listen_addr":         "127.0.0.1:0",
+		"forward_as_received": forwardAsReceived,
 		"intercept_rules": []map[string]any{{
 			"id":        "hold-all-requests",
 			"enabled":   true,
@@ -265,12 +288,16 @@ func TestE2E_ClientInterceptHelp_ModifyAndForwardExamples(t *testing.T) {
 					t.Errorf("upstream method = %q, want %q", got.method, v)
 				}
 			}
-			// The client sends an absolute-form target through the forward
-			// proxy. The HTTP/1.x Layer forwards it verbatim and splices a
-			// rewritten path / raw_query behind the wire "scheme://authority"
-			// prefix (RFC-001 §9.3, USK-1148), so the upstream must see
-			// exactly that target — the untouched original when the example
-			// changes neither field.
+			// The client sends an absolute-form target through the plain
+			// forward proxy. By default the HTTP/1.x Layer sends the
+			// upstream origin-form: a rewritten path / raw_query as written,
+			// an untouched target as the wire bytes after
+			// "scheme://authority" (GitHub PR 309). With forward_as_received
+			// the absolute-form target is kept and a rewritten path /
+			// raw_query is spliced behind the wire "scheme://authority"
+			// prefix (RFC-001 §9.3, USK-1148). Either way the upstream must
+			// see exactly the example's path / raw_query — the untouched
+			// original when the example changes neither field.
 			wantPath, wantQuery := interceptHelpOrigPath, interceptHelpOrigQuery
 			if v, ok := httpMod["path"].(string); ok {
 				checked++
@@ -280,7 +307,10 @@ func TestE2E_ClientInterceptHelp_ModifyAndForwardExamples(t *testing.T) {
 				checked++
 				wantQuery = v
 			}
-			wantTarget := targetPrefix + wantPath
+			wantTarget := wantPath
+			if forwardAsReceived {
+				wantTarget = targetPrefix + wantPath
+			}
 			if wantQuery != "" {
 				wantTarget += "?" + wantQuery
 			}
