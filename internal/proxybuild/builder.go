@@ -1089,6 +1089,9 @@ func runHTTP1ExchangeLoop(
 	// (server idle FIN / RST) and transparently redial. closeAll on
 	// CONNECT exit tears down every redial step (original + successors).
 	chain := newH1Chain(upstreamH1, connector.UpstreamTargetOf(stack, target), connector.UpstreamTLSShapeOf(stack), deps.BuildConfig, logger, deps.H1UpstreamMetrics)
+	// USK-1410: keep the stack's upstream topmost on the chain's live
+	// Layer, and route per request on a plain-HTTP forward stack.
+	chain.attachStack(stack)
 	defer chain.closeAll()
 	var wg sync.WaitGroup
 	for {
@@ -1161,7 +1164,9 @@ func runHTTP1Exchange(
 		// USK-1181: a request head the Layer itself closed (deadline,
 		// 414, 431) never became an envelope; record it here.
 		_ = clientCh.Close()
-		recordH1RequestHead(ctx, headRecorder, stack.ConnID, target, err)
+		// USK-1410: on a forward stack, name the upstream the connection
+		// is bound to now, which a switch may have moved off target.
+		recordH1RequestHead(ctx, headRecorder, stack.ConnID, chain.boundTarget(target), err)
 		if !errors.Is(err, context.Canceled) {
 			logger.Debug("proxybuild: http1 dispatch failed",
 				"target", target, "stream_id", clientCh.StreamID(), "error", err)
@@ -1176,9 +1181,19 @@ func runHTTP1Exchange(
 		// USK-998: probe the current upstream Layer for staleness (peer
 		// idle-FIN / RST during keep-alive) and transparently redial when
 		// stale. Returns the same Layer fast when alive.
-		upstreamH1, err := chain.EnsureFresh(dctx)
+		// USK-1410: on a plain-HTTP forward stack, a request naming
+		// another target (its TargetHost, stamped by the client Layer
+		// from the received request) switches the upstream first. Only a
+		// request the Pipeline let through gets here, so a dropped, held
+		// or answered request never dials its target.
+		var reqTarget string
+		if env != nil {
+			reqTarget = env.Context.TargetHost
+		}
+		upstreamH1, err := chain.Acquire(dctx, reqTarget)
 		if err != nil {
 			dialFailed.Store(true)
+			refuseForwardExchange(dctx, clientH1, sessOpts, env, err)
 			return nil, fmt.Errorf("dial: %w", err)
 		}
 		upCh := upstreamH1.OpenExchange()
@@ -1225,6 +1240,29 @@ func runHTTP1Exchange(
 		// rather than leave the client waiting until its own timeout. The
 		// close unblocks the exchange loop, which tears the stack down.
 		_ = clientH1.Close()
+	}
+}
+
+// refuseForwardExchange answers the request of a forward-proxy exchange
+// whose upstream switch was refused (err wraps *connector.ForwardRefusal,
+// USK-1410) the way the forward handler's first-request gate answers a
+// refused connection: the refusal's response (403 / 429 / 400 / 502,
+// Connection: close) is written and the client connection closed. A
+// policy refusal (target_scope / rate_limit) is recorded on the request's
+// Stream through the session's OnPipelineDrop recorder — State=error with
+// blocked_by and the gate's audit tags — which also keeps the session's
+// OnComplete from overwriting it. A 502 / 400 is left to OnComplete,
+// which records State=error from the dial error. Any other err (a
+// same-target redial failure) is not answered: unchanged behavior, the
+// client connection is closed without a response.
+func refuseForwardExchange(ctx context.Context, clientH1 *http1.Layer, opts session.SessionOptions, env *envelope.Envelope, err error) {
+	var refusal *connector.ForwardRefusal
+	if !errors.As(err, &refusal) {
+		return
+	}
+	clientH1.RefuseExchange(refusal.Response)
+	if refusal.BlockedBy != "" && opts.OnPipelineDrop != nil && env != nil {
+		opts.OnPipelineDrop(withStreamRecordedBeforeDrop(pipeline.WithBlockAnnotations(ctx, refusal.Tags)), env, refusal.BlockedBy)
 	}
 }
 
@@ -2687,7 +2725,7 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		// not abort the audit record.
 		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if uerr := writeDropStream(recordCtx, store, st, dropRetagProtocol(env.Protocol)); uerr != nil {
+		if uerr := writeDropStream(recordCtx, store, st, dropRetagProtocol(env.Protocol), streamRecordedBeforeDrop(ctx)); uerr != nil {
 			if logger != nil {
 				logger.Error("proxybuild: pipeline-drop stream save failed",
 					"listener", streamListenerName,
@@ -2701,11 +2739,33 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 	}
 }
 
+// streamRecordedKey marks a drop-recorder context whose envelope's Stream
+// row RecordStep already wrote (withStreamRecordedBeforeDrop).
+type streamRecordedKey struct{}
+
+// withStreamRecordedBeforeDrop returns ctx marked so the drop recorder
+// stamps the existing Stream row instead of attempting an INSERT first
+// (see writeDropStream's recorded parameter).
+func withStreamRecordedBeforeDrop(ctx context.Context) context.Context {
+	return context.WithValue(ctx, streamRecordedKey{}, true)
+}
+
+// streamRecordedBeforeDrop reports whether ctx carries that mark.
+func streamRecordedBeforeDrop(ctx context.Context) bool {
+	v, _ := ctx.Value(streamRecordedKey{}).(bool)
+	return v
+}
+
 // writeDropStream persists the drop recorder's audit Stream st (State,
 // BlockedBy and Tags already set) and returns the error of the final
 // write. retagProtocol is the Protocol written when an existing row is
 // updated (dropRetagProtocol).
-func writeDropStream(ctx context.Context, store flow.Writer, st *flow.Stream, retagProtocol string) error {
+//
+// recorded reports that the caller knows RecordStep already wrote the
+// Stream row (a refused forward retarget, USK-1410: the request passed the
+// whole Pipeline before the upstream switch was refused), so the row is
+// stamped directly like a plugin DROP's.
+func writeDropStream(ctx context.Context, store flow.Writer, st *flow.Stream, retagProtocol string, recorded bool) error {
 	// A plugin DROP was recorded by RecordStep inside RunDetailed before
 	// the recorder runs (USK-1393), so its Stream row normally exists
 	// already: stamp it directly. Attempting the INSERT first would fail
@@ -2713,7 +2773,7 @@ func writeDropStream(ctx context.Context, store flow.Writer, st *flow.Stream, re
 	// WARN for every plugin DROP. When the row is missing (no RecordStep
 	// wrote one) the SaveStream path below still creates it — Stream rows
 	// bypass capture_scope.
-	skipSave := st.BlockedBy == pipeline.BlockedByPlugin && streamRowExists(ctx, store, st.ID)
+	skipSave := (recorded || st.BlockedBy == pipeline.BlockedByPlugin) && streamRowExists(ctx, store, st.ID)
 	// Otherwise try SaveStream first. The common path (first Send dropped
 	// by HostScope/HTTPScope/Safety) has no prior Stream row, so this
 	// succeeds. For mid-stream Drops on streaming protocols (gRPC / WS

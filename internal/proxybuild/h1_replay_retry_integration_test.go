@@ -253,8 +253,8 @@ func TestHTTP1_StaleConn_GET_RetryPath(t *testing.T) {
 	if got := s.gotReqs.Load(); got < 1 {
 		t.Errorf("upstream gotReqs = %d, want >= 1", got)
 	}
-	if got := len(chain.layers); got != 2 {
-		t.Errorf("chain.layers = %d, want 2 (original + redial)", got)
+	if got := chain.generation; got != 1 {
+		t.Errorf("chain.generation = %d, want 1 (original + redial)", got)
 	}
 }
 
@@ -336,8 +336,8 @@ func TestHTTP1_StaleConn_POST_NoRetry(t *testing.T) {
 	if stale.ReplaySafe {
 		t.Error("POST StaleUpstreamError ReplaySafe = true, want false")
 	}
-	if got := len(chain.layers); got != 1 {
-		t.Errorf("chain.layers = %d, want 1 (POST should not redial)", got)
+	if got := chain.generation; got != 0 {
+		t.Errorf("chain.generation = %d, want 0 (POST should not redial)", got)
 	}
 }
 
@@ -369,8 +369,8 @@ func TestHTTP1_StaleConn_PUT_WithBuffer_Retry(t *testing.T) {
 	if got := s.gotReqs.Load(); got < 1 {
 		t.Errorf("upstream gotReqs = %d, want >= 1", got)
 	}
-	if got := len(chain.layers); got != 2 {
-		t.Errorf("chain.layers = %d, want 2 (original + redial)", got)
+	if got := chain.generation; got != 1 {
+		t.Errorf("chain.generation = %d, want 1 (original + redial)", got)
 	}
 }
 
@@ -517,9 +517,9 @@ func TestHTTP1_StaleConn_RetryBudgetOneShot(t *testing.T) {
 		t.Error("wrapper.retried = false after successful retry, want true (budget consumed)")
 	}
 
-	// Snapshot the chain length AFTER the first retry so a stray
+	// Snapshot the chain generation AFTER the first retry so a stray
 	// second redial would be observable.
-	layersAfterFirst := len(chain.layers)
+	genAfterFirst := chain.generation
 
 	// Swap the inner to a stub that returns ReplaySafe=true stale; the
 	// wrapper MUST surface this verbatim because the one-shot budget is
@@ -542,8 +542,8 @@ func TestHTTP1_StaleConn_RetryBudgetOneShot(t *testing.T) {
 	if !errors.As(err, &stale2) {
 		t.Fatalf("Send 2nd: err = %v (%T), want *StaleUpstreamError verbatim", err, err)
 	}
-	if got := len(chain.layers); got != layersAfterFirst {
-		t.Errorf("chain.layers = %d after second Send; want %d (no second redial)", got, layersAfterFirst)
+	if got := chain.generation; got != genAfterFirst {
+		t.Errorf("chain.generation = %d after second Send; want %d (no second redial)", got, genAfterFirst)
 	}
 }
 

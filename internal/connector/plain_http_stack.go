@@ -14,6 +14,7 @@ type PlainHTTPStackOption func(*plainHTTPStackOptions)
 
 type plainHTTPStackOptions struct {
 	forwardOriginForm bool
+	forwardRouter     *ForwardRouter
 }
 
 // WithForwardProxyOriginForm makes the stack's client-side http1 Layer the
@@ -24,6 +25,20 @@ type plainHTTPStackOptions struct {
 // (dispatchInnerHTTP1) is relayed in the form the client chose.
 func WithForwardProxyOriginForm() PlainHTTPStackOption {
 	return func(o *plainHTTPStackOptions) { o.forwardOriginForm = true }
+}
+
+// WithForwardRouting routes every request of the stack to the upstream it
+// names (USK-1410): the client-side http1 Layer resolves each request's
+// target (resolveForwardTarget, the rule the first request was dialed by)
+// and stamps it as the request's TargetHost, and router is attached to the
+// stack (ConnectionStack.ForwardRouter) so the session's upstream dial
+// switches the connection's upstream when a request names another host.
+// Only the forward handler passes it, independent of
+// WithForwardProxyOriginForm. Plaintext inside a CONNECT / SOCKS5 tunnel,
+// transparent mode and tcp_forwards never do: their connection is pinned
+// to the target the client tunnelled to or the listener names.
+func WithForwardRouting(router *ForwardRouter) PlainHTTPStackOption {
+	return func(o *plainHTTPStackOptions) { o.forwardRouter = router }
 }
 
 // BuildPlainHTTPStack constructs a ConnectionStack for a plain HTTP/1.x
@@ -98,12 +113,29 @@ func BuildPlainHTTPStack(
 	if o.forwardOriginForm {
 		clientOpts = append(clientOpts, http1.WithForwardProxyOriginForm())
 	}
+	if o.forwardRouter != nil {
+		clientOpts = append(clientOpts, http1.WithForwardTargetResolver(resolveForwardTarget, forwardTargetRefusal()))
+		stack.setForwardRouter(o.forwardRouter)
+	}
 	clientLayer := http1.New(clientConn, connID+"/client", envelope.Send, clientOpts...)
 	stack.PushClient(clientLayer)
 
-	upstreamLayer := http1.New(upstreamConn, connID+"/upstream", envelope.Receive,
-		http1.WithScheme("http"),
-		http1.WithEnvelopeContext(upstreamEnvCtx),
+	stack.PushUpstream(newUpstreamH1Layer(upstreamConn, connID+"/upstream", "http", upstreamEnvCtx, cfg))
+
+	return stack, nil
+}
+
+// newUpstreamH1Layer constructs an upstream (Receive-direction) HTTP/1.x
+// Layer over conn: label is its stream-ID label, scheme its scheme and
+// envCtx its envelope context template. It is the single option set of
+// every upstream http1 Layer the plain-HTTP stack and its successors use —
+// BuildPlainHTTPStack, RedialUpstreamH1 (stale / write-EPIPE redial) and
+// ForwardRouter.Retarget (USK-1410) — so a per-Layer option added for the
+// upstream side is added once.
+func newUpstreamH1Layer(conn net.Conn, label, scheme string, envCtx envelope.EnvelopeContext, cfg *BuildConfig) *http1.Layer {
+	return http1.New(conn, label, envelope.Receive,
+		http1.WithScheme(scheme),
+		http1.WithEnvelopeContext(envCtx),
 		http1.WithBodySpillDir(cfg.BodySpillDir),
 		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http1.WithMaxBodySize(cfg.MaxBodySize),
@@ -118,7 +150,4 @@ func BuildPlainHTTPStack(
 		// USK-1409: stream response bodies no rule / plugin needs whole.
 		http1.WithResponseBodyMode(cfg.ResponseBodyMode),
 	)
-	stack.PushUpstream(upstreamLayer)
-
-	return stack, nil
 }

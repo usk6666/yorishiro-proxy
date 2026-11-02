@@ -1153,6 +1153,16 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
+	// USK-1410: on the plain-HTTP forward proxy each request is routed to
+	// the host it names. Resolved before the body is read so an
+	// unroutable request is refused without buffering it.
+	if resolve := c.layer.opts.forwardTarget; resolve != nil {
+		target, rerr := resolve(rawReq.Method, rawReq.RequestURI, rawReq.Headers)
+		if rerr != nil {
+			return nil, c.refuseForwardTarget(rawReq, rerr)
+		}
+		c.ctxTmpl.TargetHost = target
+	}
 
 	// Mint per-exchange identity. currentStreamID is written under termMu
 	// because Layer.Close may read it concurrently via releaseStreamState

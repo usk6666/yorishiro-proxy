@@ -144,6 +144,12 @@ type options struct {
 	// WithForwardProxyOriginForm.
 	forwardOriginForm bool
 
+	// forwardTarget / forwardTargetRefusal route every request this
+	// (client-facing) Layer parses on the plain-HTTP forward proxy. See
+	// WithForwardTargetResolver.
+	forwardTarget        ForwardTargetResolver
+	forwardTargetRefusal []byte
+
 	// stateReleaser is the optional pluginv2 hook invoked when a Channel
 	// reaches its terminal state. Drives ReleaseTransaction(ConnID, FlowID)
 	// for every envelope the Channel emitted via Next. nil = no-op.

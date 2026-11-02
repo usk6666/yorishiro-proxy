@@ -70,6 +70,32 @@ type ConnectionStack struct {
 	// was dialed, so an h1 redial can dial the same way. Zero value
 	// (UpstreamTLSProfiled) unless a builder set it.
 	upstreamTLSShape UpstreamTLSShape
+
+	// forwardRouter is set only on explicit plain-HTTP forward-proxy
+	// stacks (BuildPlainHTTPStack + WithForwardRouting, USK-1410). Its
+	// presence is the opt-in: the session's HTTP/1 upstream dial switches
+	// the connection's upstream to the host each request names. Nil on
+	// every other stack (CONNECT / SOCKS5, transparent, tcp_forwards),
+	// which stay pinned to their target.
+	forwardRouter *ForwardRouter
+}
+
+// ForwardRouter returns the per-request upstream router of an explicit
+// plain-HTTP forward-proxy stack, or nil for any other stack (USK-1410).
+func (s *ConnectionStack) ForwardRouter() *ForwardRouter {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.forwardRouter
+}
+
+// setForwardRouter attaches r. Intended for BuildPlainHTTPStack only.
+func (s *ConnectionStack) setForwardRouter(r *ForwardRouter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forwardRouter = r
 }
 
 // UpstreamTLSShape is how a stack's upstream TLS ClientHello was built — a
