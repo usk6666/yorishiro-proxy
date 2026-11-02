@@ -2005,6 +2005,8 @@ func buildStackFromRoute(
 			// USK-1162: bound the client request head (request_timeout_ms).
 			http1.WithRequestHeaderTimeout(cfg.ClientRequestHeadDeadline),
 			http1.WithKeepAliveIdleTimeout(cfg.ClientIdleDeadline),
+			// USK-1414: stream request bodies no rule / plugin needs whole.
+			http1.WithRequestBodyMode(cfg.RequestBodyMode),
 		)
 		stack.PushClient(clientLayer)
 

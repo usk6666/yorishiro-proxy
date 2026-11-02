@@ -52,28 +52,46 @@ type streamedResponse struct {
 // holds what was read (probe.ended when the body fit); the caller then
 // assembles the buffered envelope from it.
 func (c *channel) maybeStreamResponse(rawResp *parser.RawResponse) (probe *probedBody, streamed *streamedResponse, err error) {
-	mode := c.responseBodyMode(rawResp)
+	declared := int64(-1)
+	if n, ok := declaredContentLength(rawResp); ok {
+		declared = n
+	}
+	probe, src, err := c.applyBodyMode(c.responseBodyMode(rawResp), rawResp.Body, declared)
+	if err != nil {
+		return nil, nil, err
+	}
+	if src == nil {
+		return probe, nil, nil
+	}
+	return nil, c.streamResponse(rawResp, src), nil
+}
+
+// applyBodyMode applies a body-mode decision to a parsed message whose
+// body reader is body; declared is its Content-Length (-1 when not
+// Content-Length framed). It returns src != nil when the body is streamed.
+// For layer.BodyBufferUpTo, probe holds what the probe read when the body
+// is buffered (probe.ended when it fit; otherwise the probe's raw capture
+// was cut and the body cannot stream verbatim, so it keeps buffering — the
+// pre-USK-1409 path, bounded by max_body_size).
+func (c *channel) applyBodyMode(mode layer.BodyMode, body io.Reader, declared int64) (probe *probedBody, src *h1BodySource, err error) {
 	switch mode.Kind {
 	case layer.BodyStream:
-		return nil, c.streamResponse(rawResp, nil), nil
+		return nil, c.newBodySource(body, nil), nil
 	case layer.BodyBufferUpTo:
 		limit := c.probeLimit(mode.Limit)
-		if n, ok := declaredContentLength(rawResp); ok && n > limit {
-			return nil, c.streamResponse(rawResp, nil), nil
+		if declared >= 0 && declared > limit {
+			return nil, c.newBodySource(body, nil), nil
 		}
-		probe, perr := c.probeBody(rawResp, limit)
-		if perr != nil {
-			return nil, nil, perr
+		probe, err := c.probeBody(body, declared, limit)
+		if err != nil {
+			return nil, nil, err
 		}
 		if probe.ended {
 			return probe, nil, nil
 		}
-		if s := c.streamResponse(rawResp, probe); s != nil {
-			return nil, s, nil
+		if src := c.newBodySource(body, probe); src != nil {
+			return nil, src, nil
 		}
-		// The probe's raw capture was cut: the wire bytes already read
-		// cannot be forwarded verbatim, so keep buffering (the pre-USK-1409
-		// path, bounded by max_body_size).
 		return probe, nil, nil
 	default:
 		return nil, nil, nil
@@ -233,14 +251,14 @@ func (p *probedBody) release() {
 // bounded by max_body_size — as readBodyWithThreshold does for a buffered
 // body. Raw-body spill is configured first, as for a buffered body, so the
 // wire bytes of the probed prefix are captured whatever its size.
-func (c *channel) probeBody(rawResp *parser.RawResponse, limit int64) (probe *probedBody, err error) {
+func (c *channel) probeBody(body io.Reader, declared, limit int64) (probe *probedBody, err error) {
 	// The raw capture holds the probed prefix's wire bytes, which a streamed
 	// body forwards first; if it is cut, the body cannot stream. Its cap
 	// leaves headroom over the semantic bound (limit < max_body_size) for
 	// chunk framing (USK-1409 review F-6).
 	rawOpts := c.bodyOpts
 	rawOpts.maxBody = probeRawCaptureCap(c.maxBodySize())
-	configureRawBodySpill(rawResp.Body, rawOpts)
+	configureRawBodySpill(body, rawOpts)
 	if limit < 0 {
 		limit = 0
 	}
@@ -251,8 +269,8 @@ func (c *channel) probeBody(rawResp *parser.RawResponse, limit int64) (probe *pr
 	maxBody := c.maxBodySize()
 	memCap := min(limit, threshold) + 1
 	hint := int64(streamCopyBufSize)
-	if n, ok := declaredContentLength(rawResp); ok {
-		hint = n + 1
+	if declared >= 0 {
+		hint = declared + 1
 	}
 	probe = &probedBody{}
 	// The error path releases through pb, not the named result: a
@@ -263,12 +281,12 @@ func (c *channel) probeBody(rawResp *parser.RawResponse, limit int64) (probe *pr
 		if err != nil {
 			pb.release()
 			probe = nil
-			releaseOrphanRawBodyBuffer(rawResp.Body)
+			releaseOrphanRawBodyBuffer(body)
 		}
 	}()
 
 	var rerr error
-	probe.body, rerr = readUpTo(rawResp.Body, memCap, hint)
+	probe.body, rerr = readUpTo(body, memCap, hint)
 	if rerr != nil {
 		if isBodyEnd(rerr) {
 			probe.ended = true
@@ -277,7 +295,7 @@ func (c *channel) probeBody(rawResp *parser.RawResponse, limit int64) (probe *pr
 			}
 			return probe, nil
 		}
-		return nil, fmt.Errorf("http1: read response body: %w", rerr)
+		return nil, fmt.Errorf("http1: read body: %w", rerr)
 	}
 	if memCap > limit {
 		// limit+1 bytes read: the body does not fit.
@@ -295,7 +313,7 @@ func (c *channel) probeBody(rawResp *parser.RawResponse, limit int64) (probe *pr
 	if _, werr := bb.Write(head); werr != nil {
 		return nil, bodyWriteErr(werr)
 	}
-	_, cerr := io.CopyN(bb, rawResp.Body, limit+1-int64(len(head)))
+	_, cerr := io.CopyN(bb, body, limit+1-int64(len(head)))
 	switch {
 	case cerr == nil:
 		return probe, nil
@@ -346,20 +364,21 @@ func bodyWriteErr(err error) error {
 	return fmt.Errorf("http1: read body: %w", err)
 }
 
-// streamResponse builds the streamed-body Envelope for rawResp. probe
-// holds body bytes a probe already read (nil when none); their wire bytes
-// are still in the parser's raw capture and are forwarded first. Returns
-// nil when that capture was cut (the prefix cannot be forwarded verbatim)
-// or a spilled probe cannot be reopened; probe is then left to the caller.
-// Otherwise the stream owns the probe's spilled copy.
-func (c *channel) streamResponse(rawResp *parser.RawResponse, probe *probedBody) *streamedResponse {
+// newBodySource builds the streamed body over the parser body reader body,
+// which must implement parser.RawTapSetter. probe holds body bytes a probe
+// already read (nil when none); their wire bytes are still in the parser's
+// raw capture and are forwarded first. Returns nil when that capture was
+// cut (the prefix cannot be forwarded verbatim) or a spilled probe cannot
+// be reopened; probe is then left to the caller. Otherwise the stream owns
+// the probe's spilled copy, and the Channel's bodyStream is set.
+func (c *channel) newBodySource(body io.Reader, probe *probedBody) *h1BodySource {
 	src := &h1BodySource{
 		ch:   c,
-		body: rawResp.Body,
+		body: body,
 		done: make(chan struct{}),
 	}
 	if probe != nil {
-		rp, ok := rawResp.Body.(parser.RawBodyProvider)
+		rp, ok := body.(parser.RawBodyProvider)
 		if !ok || rp.RawBodyTruncated() {
 			return nil
 		}
@@ -376,12 +395,17 @@ func (c *channel) streamResponse(rawResp *parser.RawResponse, probe *probedBody)
 		src.rawPrefix = rp.RawBody()
 		src.rawPrefixBuf = rp.RawBodyBuffer()
 	}
-	bs := envelope.NewBodyStream(src)
-	src.bs = bs
-	rawResp.Body.(parser.RawTapSetter).SetRawTap(src.onRaw)
+	src.bs = envelope.NewBodyStream(src)
+	body.(parser.RawTapSetter).SetRawTap(src.onRaw)
+	c.bodyStream.Store(src.bs)
+	return src
+}
 
+// streamResponse builds the streamed-body Envelope for rawResp, whose body
+// is src.
+func (c *channel) streamResponse(rawResp *parser.RawResponse, src *h1BodySource) *streamedResponse {
 	env, msg := c.responseHeadEnvelope(rawResp)
-	msg.BodyStream = bs
+	msg.BodyStream = src.bs
 	env.Context.ReceivedAt = time.Now()
 
 	emitSeq, _ := c.advanceResponseSequence(rawResp.StatusCode)
@@ -402,7 +426,6 @@ func (c *channel) streamResponse(rawResp *parser.RawResponse, probe *probedBody)
 	env.Raw = rawResp.RawBytes
 	env.Opaque = opaque
 
-	c.bodyStream.Store(bs)
 	c.recordEmittedFlowID(env.FlowID)
 	return &streamedResponse{env: env, src: src}
 }
@@ -560,11 +583,17 @@ func (s *h1BodySource) flushForward() error {
 // reader state: it marks the Layer dead and arms an immediate read
 // deadline so an in-flight read returns. done is closed last, releasing
 // the receive loop.
+//
+// A request body (the producer is a client-facing Channel, USK-1414) ends
+// through finishRequest instead.
 func (s *h1BodySource) Finish(cause error) envelope.BodyResult {
 	defer close(s.done)
 	s.releaseSemPrefix()
 	if s.prefixState.CompareAndSwap(prefixPending, prefixReleased) && s.rawPrefixBuf != nil {
 		_ = s.rawPrefixBuf.Release()
+	}
+	if s.ch.direction == envelope.Send {
+		return s.finishRequest(cause)
 	}
 	l := s.ch.layer
 	var res envelope.BodyResult

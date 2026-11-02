@@ -309,10 +309,11 @@ type bodyBufRegistry struct {
 	mu   sync.Mutex
 	bufs []*bodybuf.BodyBuffer
 
-	// streams are the streamed bodies (HTTPMessage.BodyStream, USK-1409)
-	// of envelopes read from the upstream. The Channel that forwards one
-	// owns and closes it; closeBodyStreams ends any that never reached a
-	// Send (Pipeline Drop / Respond, an early error). Close is idempotent.
+	// streams are the streamed bodies (HTTPMessage.BodyStream) of
+	// envelopes read from the upstream (responses, USK-1409) or the client
+	// (requests, USK-1414). The Channel that forwards one owns and closes
+	// it; closeBodyStreams ends any that never reached a Send (Pipeline
+	// Drop / Respond, a dial failure, an early error). Close is idempotent.
 	streams []*envelope.BodyStream
 }
 
@@ -3117,6 +3118,10 @@ func clientToUpstream(
 			return fmt.Errorf("client.Next: %w", nerr)
 		}
 		sc.set(env.StreamID)
+		// USK-1414 R7: the upstream Send owns a streamed request body once
+		// it starts reading it; until then — and for a Respond / Drop or a
+		// dial failure, which never read it — the session does.
+		reg.trackBodyStream(env)
 
 		env, action, resp, blockedBy, blockTags := runPipelineTracked(pctx, p, env, reg)
 		// USK-782 / USK-829: surface the BlockedBy attribution to the

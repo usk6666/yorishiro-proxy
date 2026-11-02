@@ -106,6 +106,14 @@ func (e *SafetyEngine) CheckInputAll(ctx context.Context, msg *envelope.HTTPMess
 
 func (e *SafetyEngine) checkRule(ctx context.Context, rule *common.CompiledRule, msg *envelope.HTTPMessage) *Violation {
 	for _, target := range rule.Targets {
+		if target == common.TargetBody && msg.BodyStream != nil {
+			// USK-1414 R16: the body is streamed — a body-target rule was
+			// added after the head was parsed, when the body-mode predicate
+			// still chose to stream. The engine cannot see the body, and
+			// streaming never exempts a request from the Input Filter
+			// (RFC-001 §3.7): fail closed. The stream is not read here.
+			return &Violation{RuleID: rule.ID, RuleName: rule.Name, Target: "body"}
+		}
 		data, targetName := e.extractTarget(ctx, target, msg)
 		if v := matchRuleData(rule, data, targetName); v != nil {
 			return v

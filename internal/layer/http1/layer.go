@@ -502,10 +502,10 @@ func (l *Layer) runInitialSend(initial *channel) {
 	//   - isDetached: upgrade transferred conn ownership
 	//   - parseFailed: parseRequest error left the bufio in a bad state;
 	//     another parse would just compound the failure
-	if initial.connClosed || l.isDetached() || initial.parseFailed {
-		return
-	}
-	if l.endAfterUnanswered(initial) {
+	//   - an unfinished streamed request body (USK-1414 R8): its remaining
+	//     bytes must never be parsed as a request
+	//   - an exchange left unanswered (USK-1229)
+	if initial.parseFailed || !l.mayParseNext(initial) {
 		return
 	}
 	l.spawnLoopSend()
@@ -562,7 +562,7 @@ func (l *Layer) newChannelLocked() *channel {
 		ctxTmpl:         l.envCtx,
 		bodyOpts:        bodyOpts{spillDir: l.opts.bodySpillDir, spillThreshold: l.opts.bodySpillThreshold, maxBody: l.opts.maxBody, maxRawCapture: l.opts.maxRawCapture},
 		streamingDetect: l.opts.streamingDetect,
-		bodyMode:        l.opts.responseBodyMode,
+		bodyMode:        l.bodyModeFunc(),
 		stateReleaser:   l.opts.stateReleaser,
 		termDone:        make(chan struct{}),
 		responseReady:   make(chan responseDelivery, 4),
@@ -572,6 +572,16 @@ func (l *Layer) newChannelLocked() *channel {
 	l.active = ch
 	l.activeMu.Unlock()
 	return ch
+}
+
+// bodyModeFunc is the body-mode predicate of the messages this Layer
+// parses: requests on a Send-direction Layer (USK-1414), responses on a
+// Receive-direction one (USK-1409).
+func (l *Layer) bodyModeFunc() layer.BodyModeFunc {
+	if l.direction == envelope.Send {
+		return l.opts.requestBodyMode
+	}
+	return l.opts.responseBodyMode
 }
 
 // appendPending registers ch as awaiting its response and wakes the parser
@@ -758,22 +768,32 @@ func (l *Layer) spawnLoopSend() {
 			return
 		}
 
-		// USK-655: if the just-completed exchange triggered an Upgrade
-		// (DetachStream → markDetached), the bufio.Reader / conn are now
-		// owned by the successor Layer; we must not parse another
-		// request.
-		if l.isDetached() {
-			return
-		}
-		// connection-close honored from the parsed request: stop spawning
-		// because the peer will close the wire after this response.
-		if ch.connClosed {
-			return
-		}
-		if l.endAfterUnanswered(ch) {
+		if !l.mayParseNext(ch) {
 			return
 		}
 	}
+}
+
+// mayParseNext reports, after ch's exchange is over (termDone), whether the
+// Send-direction Layer may parse another request on the connection.
+func (l *Layer) mayParseNext(ch *channel) bool {
+	// USK-655: if the just-completed exchange triggered an Upgrade
+	// (DetachStream → markDetached), the bufio.Reader / conn are now owned
+	// by the successor Layer; we must not parse another request.
+	if l.isDetached() {
+		return false
+	}
+	// USK-1414 R8: parse again only after a streamed request body ended
+	// cleanly; its unread remainder is never a request.
+	if !l.requestBodyEnded(ch) {
+		return false
+	}
+	// connection-close honored from the parsed request: stop spawning
+	// because the peer will close the wire after this response.
+	if ch.connClosed {
+		return false
+	}
+	return !l.endAfterUnanswered(ch)
 }
 
 // endAfterUnanswered reports whether the Send-direction connection must end
@@ -1022,6 +1042,11 @@ func (l *Layer) Close() error {
 		l.activeMu.RUnlock()
 		if active != nil {
 			active.markTerminated(io.EOF)
+			if l.direction == envelope.Send {
+				// USK-1414: end a streamed request body still pending on
+				// the closed conn so its consumer and recorder see the end.
+				active.closeBodyStream()
+			}
 		}
 	})
 	return err

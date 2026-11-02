@@ -461,13 +461,22 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	// Layer consults per response — stream the body unless a live rule
 	// engine or plugin hook needs it whole. A caller-provided predicate
 	// (tests) is kept.
-	if deps.BuildConfig.ResponseBodyMode == nil {
-		deps.BuildConfig.ResponseBodyMode = NewHTTPBodyModeFunc(HTTPBodyModeEngines{
+	// USK-1414: the same predicate decides per request on every
+	// client-facing HTTP/1.x Layer (it branches on the Envelope's
+	// Direction).
+	if deps.BuildConfig.ResponseBodyMode == nil || deps.BuildConfig.RequestBodyMode == nil {
+		bodyMode := NewHTTPBodyModeFunc(HTTPBodyModeEngines{
 			Safety:    deps.HTTPSafetyEngine,
 			Intercept: deps.HTTPInterceptEngine,
 			Transform: deps.HTTPTransformEngine,
 			Plugin:    deps.PluginV2Engine,
 		})
+		if deps.BuildConfig.ResponseBodyMode == nil {
+			deps.BuildConfig.ResponseBodyMode = bodyMode
+		}
+		if deps.BuildConfig.RequestBodyMode == nil {
+			deps.BuildConfig.RequestBodyMode = bodyMode
+		}
 	}
 
 	// Select / construct the per-route WireEncoderRegistries. Defaults

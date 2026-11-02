@@ -2,7 +2,6 @@ package http1
 
 import (
 	"bytes"
-	"io"
 	"log/slog"
 	"strconv"
 	"time"
@@ -93,13 +92,9 @@ func (l *Layer) rejectRequestHead(resp []byte) (written []byte, ok bool) {
 	_ = l.conn.SetWriteDeadline(time.Now().Add(rejectWriteTimeout))
 	if _, err := l.conn.Write(resp); err == nil {
 		ok = true
-		if cw, isCW := l.conn.(closeWriter); isCW {
-			_ = cw.CloseWrite()
-		}
-		_ = l.conn.SetReadDeadline(time.Now().Add(rejectLingerTimeout))
 		// Drain the rest of the rejected request so Close sends FIN, not
 		// RST. Pinned by TestLayer_Send_RequestLineTooLong_DrainsBeforeClose.
-		_, _ = io.CopyN(io.Discard, l.conn, rejectLingerMaxBytes)
+		l.halfCloseAndLinger()
 	}
 	_ = l.conn.Close()
 	return append([]byte(nil), resp...), ok
