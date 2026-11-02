@@ -714,14 +714,24 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	}
 
 	// Record Flow for every Envelope (Send or Receive).
+	s.recordEnvelopeFlows(ctx, env)
+	return Result{}
+}
+
+// recordEnvelopeFlows saves env's Flow row(s): both variants when a Step
+// modified it, one row otherwise. A message whose body is still being
+// forwarded (USK-1409 BodyStream) is saved once the body ended.
+func (s *RecordStep) recordEnvelopeFlows(ctx context.Context, env *envelope.Envelope) {
 	snap := SnapshotFromContext(ctx)
+	if m, ok := env.Message.(*envelope.HTTPMessage); ok && m.BodyStream != nil {
+		s.recordStreamedHTTP(ctx, snap, env, m.BodyStream)
+		return
+	}
 	if snap != nil && envelopeModified(snap, env) {
 		s.recordVariantFlows(ctx, snap, env)
 	} else {
 		s.recordFlow(ctx, env)
 	}
-
-	return Result{}
 }
 
 // allowFlowRecord reports whether env passes the per-Stream record cap

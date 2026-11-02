@@ -876,8 +876,13 @@ func (ir *identityBodyReader) EnableRawBodySpill(dir, prefix string, threshold, 
 	})
 }
 
-// SetRawTap implements RawTapSetter. Not implemented yet (USK-1409 scaffolding).
-func (ir *identityBodyReader) SetRawTap(fn func([]byte)) {}
+// SetRawTap implements RawTapSetter (USK-1409).
+func (ir *identityBodyReader) SetRawTap(fn func([]byte)) {
+	if ir == nil {
+		return
+	}
+	ir.rawCapture.setTap(fn)
+}
 
 // Read implements io.Reader.
 func (ir *identityBodyReader) Read(p []byte) (int, error) {

@@ -3,6 +3,8 @@ package envelope
 import (
 	"errors"
 	"io"
+	"sync"
+	"sync/atomic"
 )
 
 // ErrBodyStreamClosed is the cause a [BodyStreamSource] receives from
@@ -62,7 +64,18 @@ type BodyStreamSource interface {
 type BodyStream struct {
 	src BodyStreamSource
 
-	done chan struct{}
+	mu        sync.Mutex
+	semObs    []func([]byte)
+	rawObs    []func([]byte)
+	onDone    []func(BodyResult)
+	completed bool
+	result    BodyResult
+
+	semBytes atomic.Int64
+	rawBytes atomic.Int64
+
+	finishOnce sync.Once
+	done       chan struct{}
 }
 
 // NewBodyStream returns a BodyStream reading from src.
@@ -70,26 +83,132 @@ func NewBodyStream(src BodyStreamSource) *BodyStream {
 	return &BodyStream{src: src, done: make(chan struct{})}
 }
 
-// Source returns the producer.
+// Source returns the producer. A consumer of the same protocol may use it
+// to reach a producer-specific capability (HTTP/1.x raw forwarding).
 func (s *BodyStream) Source() BodyStreamSource { return s.src }
 
-// Read is not implemented yet (USK-1409 scaffolding).
-func (s *BodyStream) Read(p []byte) (int, error) { return 0, io.EOF }
+// Read reads semantic body bytes. After the body ended it returns io.EOF
+// for a clean end and the BodyResult error otherwise.
+func (s *BodyStream) Read(p []byte) (int, error) {
+	select {
+	case <-s.done:
+		return 0, s.endErr()
+	default:
+	}
+	n, err := s.src.Read(p)
+	if n > 0 {
+		s.semBytes.Add(int64(n))
+		s.emit(p[:n], false)
+	}
+	if err != nil {
+		s.finish(err)
+		return n, s.endErr()
+	}
+	return n, nil
+}
 
-// EmitRaw is not implemented yet (USK-1409 scaffolding).
-func (s *BodyStream) EmitRaw(p []byte) {}
+// EmitRaw reports wire bytes the producer consumed for this body. Called by
+// the producer only, on the reading goroutine. p is delivered to the raw
+// observers and must not be retained by them.
+func (s *BodyStream) EmitRaw(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	s.rawBytes.Add(int64(len(p)))
+	s.emit(p, true)
+}
 
-// Observe is not implemented yet (USK-1409 scaffolding).
-func (s *BodyStream) Observe(onSemantic, onRaw func([]byte)) {}
+func (s *BodyStream) emit(p []byte, raw bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.completed {
+		return
+	}
+	obs := s.semObs
+	if raw {
+		obs = s.rawObs
+	}
+	for _, fn := range obs {
+		fn(p)
+	}
+}
 
-// OnComplete is not implemented yet (USK-1409 scaffolding).
-func (s *BodyStream) OnComplete(fn func(BodyResult)) {}
+// Observe registers observers for the semantic and raw body bytes. Either
+// may be nil. Bytes read before the call are not replayed; register before
+// the body is read.
+func (s *BodyStream) Observe(onSemantic, onRaw func([]byte)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.completed {
+		return
+	}
+	if onSemantic != nil {
+		s.semObs = append(s.semObs, onSemantic)
+	}
+	if onRaw != nil {
+		s.rawObs = append(s.rawObs, onRaw)
+	}
+}
 
-// Close is not implemented yet (USK-1409 scaffolding).
-func (s *BodyStream) Close() error { return nil }
+// OnComplete registers fn to run once the body ended. When the body has
+// already ended, fn runs immediately.
+func (s *BodyStream) OnComplete(fn func(BodyResult)) {
+	if fn == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.completed {
+		res := s.result
+		s.mu.Unlock()
+		fn(res)
+		return
+	}
+	s.onDone = append(s.onDone, fn)
+	s.mu.Unlock()
+}
+
+// Close ends the body. Closing a body that was not read to its end reports
+// ErrBodyStreamClosed to the producer. Idempotent; always returns nil.
+func (s *BodyStream) Close() error {
+	s.finish(ErrBodyStreamClosed)
+	return nil
+}
 
 // Done is closed once the body ended.
 func (s *BodyStream) Done() <-chan struct{} { return s.done }
 
-// Result is not implemented yet (USK-1409 scaffolding).
-func (s *BodyStream) Result() (BodyResult, bool) { return BodyResult{}, false }
+// Result returns the BodyResult and true once the body ended.
+func (s *BodyStream) Result() (BodyResult, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.result, s.completed
+}
+
+func (s *BodyStream) endErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.result.Err != nil {
+		return s.result.Err
+	}
+	return io.EOF
+}
+
+// finish runs the producer's Finish and the completion callbacks exactly
+// once.
+func (s *BodyStream) finish(cause error) {
+	s.finishOnce.Do(func() {
+		res := s.src.Finish(cause)
+		res.SemanticBytes = s.semBytes.Load()
+		res.RawBytes = s.rawBytes.Load()
+		s.mu.Lock()
+		s.result = res
+		s.completed = true
+		cbs := s.onDone
+		s.onDone, s.semObs, s.rawObs = nil, nil, nil
+		s.mu.Unlock()
+		close(s.done)
+		for _, fn := range cbs {
+			fn(res)
+		}
+	})
+}

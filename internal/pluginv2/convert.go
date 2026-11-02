@@ -289,6 +289,12 @@ func materializeHTTPBody(m *envelope.HTTPMessage, maxBody int64) ([]byte, error)
 	if maxBody <= 0 {
 		maxBody = defaultMaxPluginBodySize
 	}
+	if m.BodyStream != nil {
+		// USK-1409: a streamed body is forwarded while it is read; the
+		// hook cannot see it whole. Report it like an over-cap body so the
+		// hook is skipped instead of being handed an empty body.
+		return nil, fmt.Errorf("%w: streamed body", ErrBodyTooLarge)
+	}
 	if m.Body != nil {
 		if int64(len(m.Body)) > maxBody {
 			return nil, fmt.Errorf("%w: %d > %d", ErrBodyTooLarge, len(m.Body), maxBody)

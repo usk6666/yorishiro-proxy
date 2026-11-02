@@ -811,7 +811,7 @@ func (l *Layer) receiveOne(head *channel) bool {
 		return false
 	}
 
-	env, isInformational, truncated, perr := head.parseResponse()
+	env, isInformational, truncated, stream, perr := head.parseResponse()
 	if perr != nil {
 		if errors.Is(perr, io.EOF) && head.requestSent.Load() {
 			// USK-1229: the upstream closed after a request was written
@@ -856,6 +856,9 @@ func (l *Layer) receiveOne(head *channel) bool {
 		// request.
 		l.retire()
 	}
+	if stream != nil {
+		return l.receiveStreamed(head, env, stream)
+	}
 	head.deliverResponse(env, nil)
 	if isInformational {
 		return true
@@ -864,6 +867,40 @@ func (l *Layer) receiveOne(head *channel) bool {
 	if head.connClosed || l.isDetached() || l.retired.Load() {
 		// Peer signalled connection-close (or the Layer was retired);
 		// remaining pendings are futile.
+		l.failPending(io.EOF)
+		return false
+	}
+	return true
+}
+
+// receiveStreamed delivers a final response whose body is streamed
+// (USK-1409) and waits until that body ended before the receive loop may
+// parse anything else from the conn: the body is read from the shared
+// bufio.Reader by the consumer's goroutine (the Channel that forwards it),
+// so the loop must stay off the reader meanwhile. head stays in pendingQ
+// until then, which also keeps HealthCheck from probing the conn mid-body.
+// An abnormal end (upstream cut, framing error, body closed unread) marked
+// the Layer dead; every exchange pipelined behind head then fails.
+func (l *Layer) receiveStreamed(head *channel, env *envelope.Envelope, stream *h1BodySource) bool {
+	if !head.deliverResponse(env, nil) {
+		// Nobody will read the body: the exchange was closed first.
+		_ = stream.bs.Close()
+	}
+	select {
+	case <-stream.done:
+	case <-l.closed:
+		return false
+	}
+	_ = l.popPending()
+	if l.dead.Load() {
+		var err error = errUpstreamDead
+		if se := head.postFinalErr.Load(); se != nil {
+			err = se
+		}
+		l.failPending(err)
+		return false
+	}
+	if l.isDetached() || l.retired.Load() {
 		l.failPending(io.EOF)
 		return false
 	}
@@ -945,6 +982,9 @@ func (l *Layer) Close() error {
 			// .Close) does not turn into a "send on closed channel" panic.
 			ch.markTerminated(io.EOF)
 			ch.closeResponseReady()
+			// USK-1409: end a streamed body still pending on the closed
+			// conn so its consumer and recorder see the end.
+			ch.closeBodyStream()
 		}
 		l.activeMu.RLock()
 		active := l.active

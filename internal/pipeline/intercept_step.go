@@ -201,6 +201,13 @@ func (s *InterceptStep) processHTTP(ctx context.Context, env *envelope.Envelope,
 	if s.http == nil || s.queue == nil {
 		return Result{}
 	}
+	// USK-1409 R16: a message whose body is streamed is never held — its
+	// body is being forwarded as it is read, and a hold needs the whole
+	// message. The body-mode predicate buffers anything a rule matched when
+	// the head arrived; a rule added since applies from the next message.
+	if msg.BodyStream != nil {
+		return Result{}
+	}
 
 	var matchedRules []string
 	switch env.Direction {

@@ -115,6 +115,8 @@ func RedialUpstreamH1(
 		// body to sse.Wrap without blocking on a never-ending drain.
 		// Matches the option set used in buildStackFromRoute "http1".
 		http1.WithStreamingResponseDetect(http1.IsSSEResponse),
+		// USK-1409: stream response bodies no rule / plugin needs whole.
+		http1.WithResponseBodyMode(cfg.ResponseBodyMode),
 	)
 	return fresh, nil
 }

@@ -308,6 +308,42 @@ func (s *streamCapture) get() string {
 type bodyBufRegistry struct {
 	mu   sync.Mutex
 	bufs []*bodybuf.BodyBuffer
+
+	// streams are the streamed bodies (HTTPMessage.BodyStream, USK-1409)
+	// of envelopes read from the upstream. The Channel that forwards one
+	// owns and closes it; closeBodyStreams ends any that never reached a
+	// Send (Pipeline Drop / Respond, an early error). Close is idempotent.
+	streams []*envelope.BodyStream
+}
+
+// trackBodyStream registers env's streamed body, if any, for
+// closeBodyStreams.
+func (r *bodyBufRegistry) trackBodyStream(env *envelope.Envelope) {
+	if env == nil {
+		return
+	}
+	m, ok := env.Message.(*envelope.HTTPMessage)
+	if !ok || m == nil || m.BodyStream == nil {
+		return
+	}
+	r.mu.Lock()
+	r.streams = append(r.streams, m.BodyStream)
+	r.mu.Unlock()
+}
+
+// closeBodyStreams closes every tracked streamed body (USK-1409 R11). It
+// runs after both session goroutines ended and BEFORE OnComplete, so a
+// body that never reached a Send still completes — and RecordStep saves
+// its Flow — before the Stream's final state is written. Safe to call more
+// than once.
+func (r *bodyBufRegistry) closeBodyStreams() {
+	r.mu.Lock()
+	streams := r.streams
+	r.streams = nil
+	r.mu.Unlock()
+	for _, bs := range streams {
+		_ = bs.Close()
+	}
 }
 
 // track records a BodyBuffer pointer for terminal Release. A nil pointer is a
@@ -353,6 +389,7 @@ func (r *bodyBufRegistry) trackEnvelope(env *envelope.Envelope) {
 // drain releases all tracked buffers and clears the backing slice. Safe to
 // call multiple times; subsequent calls are no-ops.
 func (r *bodyBufRegistry) drain() {
+	r.closeBodyStreams()
 	r.mu.Lock()
 	bufs := r.bufs
 	r.bufs = nil
@@ -770,6 +807,10 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 			notice.attachUpstream(uh.ch)
 		}
 	}
+
+	// USK-1409 R11: end streamed bodies that never reached a Send before
+	// the Stream's final state is written.
+	reg.closeBodyStreams()
 
 	if opt.OnComplete != nil {
 		opt.OnComplete(context.WithoutCancel(origCtx), sc.get(), result)
@@ -3299,6 +3340,9 @@ func upstreamToClient(
 		if err != nil || env == nil {
 			return upstreamToClientFinish(ctx, opt, uh, client, clientID, err, relayed)
 		}
+		// USK-1409: client.Send owns a streamed body once it is called;
+		// until then the session does.
+		reg.trackBodyStream(env)
 
 		if clientID != "" {
 			env.StreamID = clientID

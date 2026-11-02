@@ -304,8 +304,13 @@ func (dr *dechunkedReader) EnableRawBodySpill(dir, prefix string, threshold, max
 	})
 }
 
-// SetRawTap implements RawTapSetter. Not implemented yet (USK-1409 scaffolding).
-func (dr *dechunkedReader) SetRawTap(fn func([]byte)) {}
+// SetRawTap implements RawTapSetter (USK-1409).
+func (dr *dechunkedReader) SetRawTap(fn func([]byte)) {
+	if dr == nil {
+		return
+	}
+	dr.rawCapture.setTap(fn)
+}
 
 // Trailers returns the parsed chunked trailers in wire order. Call after the
 // reader has returned io.EOF; before that the result is nil/empty.

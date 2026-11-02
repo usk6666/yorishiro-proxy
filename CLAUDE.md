@@ -36,7 +36,7 @@ Each connection is an explicit stack of `Layer`s (RFC-001 §3.3); each Layer yie
 
 | Protocol | L7 Structured View | L4 raw bytes | Notes |
 |----------|-------------------|--------------|-------|
-| HTTP/1.x | YES | YES | Custom parser; `net/http` not used in data path. Forward: supported (USK-911~917). Plain-HTTP forward proxy: upstream gets origin-form without `Proxy-Connection` / `Proxy-Authorization`, recording stays as received; opt-out `forward_as_received` (USK-1117). |
+| HTTP/1.x | YES | YES | Custom parser; `net/http` not used in data path. Forward: supported (USK-911~917). Plain-HTTP forward proxy: upstream gets origin-form without `Proxy-Connection` / `Proxy-Authorization`, recording stays as received; opt-out `forward_as_received` (USK-1117). Response bodies are streamed — head emitted first, body wire bytes forwarded verbatim as read, flow recorded at body end — unless an intercept / `replace_body` rule or a plugin hook needs them whole (`layer.BodyModeFunc` from `proxybuild.NewHTTPBodyModeFunc`; USK-1409, RFC-001 §3.2.1 "HTTP body streaming"). Requests stay buffered. |
 | HTTP/2 | YES | YES | Custom frame engine; event-granular Channel + per-stream BodyBuffer. Forward: supported (USK-911~917). |
 | gRPC | YES | YES (via HTTP/2) | Native LPM reassembly; GRPCStart/Data/End envelope events. Forward: supported (USK-911~917). |
 | gRPC-Web | YES | YES (via HTTP/1.x or HTTP/2) | Binary + base64 wire formats |

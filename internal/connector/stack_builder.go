@@ -2013,6 +2013,8 @@ func buildStackFromRoute(
 			// orchestrator (session.runUpgradeSSE) can hand the still-open
 			// body to sse.Wrap without blocking on a never-ending drain.
 			http1.WithStreamingResponseDetect(http1.IsSSEResponse),
+			// USK-1409: stream response bodies no rule / plugin needs whole.
+			http1.WithResponseBodyMode(cfg.ResponseBodyMode),
 		)
 		stack.PushUpstream(upstreamLayer)
 
