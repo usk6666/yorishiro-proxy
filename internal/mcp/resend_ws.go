@@ -90,7 +90,7 @@ type resendWSResult struct {
 
 // registerResendWS wires the resend_ws tool into the MCP server.
 func (s *Server) registerResendWS() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "resend_ws",
 		Description: "Resend a single WebSocket frame on a freshly dialled upstream connection. " +
 			"With flow_id, the upgrade handshake (URL, request headers, negotiated permessage-deflate) " +

@@ -71,7 +71,7 @@ Cap each per-side body — and each per-side decoded body, independently — to 
 
 The same cap applies to the per-message `raw_bytes` of a bodyless message (see [messages](#messages)); `raw_bytes_size` then still reports the stored length.
 
-When the cap fires, the response sets `*_body_truncated_by_query=true` and reports the pre-truncation byte length under `*_body_original_size` (wire-form side) and / or `*_body_decoded_original_size` (decoded side). Headers / metadata are unaffected. Distinct from the record-time `*_body_truncated` flag, which reflects the storage-time `MaxBodySize` cap from the pipeline `RecordStep`.
+When the cap fires, the response sets `*_body_truncated_by_query=true` and reports the pre-truncation byte length under `*_body_original_size` (wire-form side) and / or `*_body_decoded_original_size` (decoded side). Headers / metadata are unaffected. Distinct from the record-time `*_body_truncated` flag, which reflects the record-time `max_record_body_size` cap.
 
 The `messages` resource also exposes the same fields (`body_truncated`, `body_truncated_by_query`, `body_original_size`, `body_decoded_original_size`) per message entry. The `body_truncated` field carries the record-time `Flow.BodyTruncated` value regardless of the query-time params.
 
@@ -148,7 +148,7 @@ Returns: `messages[]` (id, sequence, direction, method, url, status_code, header
 - **body_encoding**: `"text"` for UTF-8 safe bodies, `"base64"` for binary content.
 - **raw_bytes** / **raw_bytes_encoding** / **raw_bytes_size**: Present only on a message that has no body but has recorded wire bytes. `raw_bytes` is the recorded wire bytes, always base64 (`raw_bytes_encoding="base64"`) — e.g. the HTTP/1.x request head, or the HPACK-encoded HEADERS block for HTTP/2 / gRPC. `raw_bytes_size` is the recorded length. Wire-level overlay rows (`filter.wire_level` = `h2-frame` / `h1-chunk` / `grpc-lpm-frame` / `grpcweb-base64`) carry their frame bytes here, not in `body`. Body-bearing messages do not repeat their wire bytes. `include_bodies=false` omits `raw_bytes` (keeps `raw_bytes_size`); `body_max_bytes` caps it and sets `body_truncated_by_query=true`. Output Filter masking applies (call `docs(topic="security")`). The same fields appear on `flow`'s `message_preview` entries.
 - **metadata**: Protocol-specific fields (e.g. WebSocket `opcode`, gRPC `service`/`method`/`grpc_status`). `synthetic: "true"` marks a message the proxy generated rather than observed on the wire — today, a plugin RESPOND's response.
-- **body_truncated**: Record-time truncation flag mirrored from `Flow.BodyTruncated` — set when the storage-time `MaxBodySize` cap fired.
+- **body_truncated**: Record-time truncation flag mirrored from `Flow.BodyTruncated` — set when the record-time `max_record_body_size` cap fired (see "Body limits" under `config`).
 - **body_truncated_by_query**: Response-time truncation flag set when `include_bodies=false` or `body_max_bytes=N` capped the bytes returned to the caller. Distinct from `body_truncated`.
 
 ### status
@@ -159,9 +159,23 @@ Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, u
 ### config
 Get current configuration including upstream proxy, TLS passthrough, TCP forwards, and runtime knobs. No additional parameters.
 
-Returns: upstream_proxy, tls_passthrough (patterns, count), tcp_forwards (port->target map), socks5_enabled, client_cert, safety_filter (enabled, input_rules, output_rules), max_connections, peek_timeout_ms, request_timeout_ms, client_idle_timeout_ms (both `0` when disabled), tls_fingerprint, capture_scope (includes, excludes), export_dir (the directory `manage` export_flows / import_flows file paths are confined to).
+Returns: upstream_proxy, tls_passthrough (patterns, count), tcp_forwards (port->target map), socks5_enabled, client_cert, safety_filter (enabled, input_rules, output_rules), max_connections, peek_timeout_ms, request_timeout_ms, client_idle_timeout_ms (both `0` when disabled), tls_fingerprint, capture_scope (includes, excludes), export_dir (the directory `manage` export_flows / import_flows file paths are confined to), and the resolved body limits `max_body_size`, `max_record_body_size`, `plugin_max_body_size` (see "Body limits" below), alongside the other per-protocol caps (`max_raw_capture_size`, `body_spill_threshold`, `body_spill_dir`, `ws_max_frame_size`, `grpc_max_message_size`, `sse_max_event_size`, `grpc_max_messages_per_stream`, `sse_max_events_per_stream`).
 
 > Note: `target_scope` (transmission gate) is intentionally NOT echoed here — it is owned by the `security` MCP tool and queried via `security` with `action: "get_target_scope"`. `capture_scope` (recording-only filter, USK-776) IS echoed here.
+
+#### Body limits
+Three config-file keys (top level of the `-config` JSON) bound HTTP message bodies. Each is in bytes; `0` or omitted selects the default; a negative value or one above 1 GiB (1073741824) is rejected at startup.
+
+| Key | Default | What it limits |
+|-----|---------|----------------|
+| `max_body_size` | 254 MiB | The largest body the proxy accepts and forwards (HTTP/1.x, HTTP/2, gRPC). |
+| `max_record_body_size` | 254 MiB | The most body bytes recorded per message. Recording only — never what is forwarded. |
+| `plugin_max_body_size` | 1 MiB | The largest HTTP body handed to a plugin hook. Applies to every plugin. |
+
+- **`max_body_size`**: at present the proxy reads a whole body before forwarding it (in memory up to `body_spill_threshold`, then in a temp file under `body_spill_dir`). A body larger than `max_body_size` is not forwarded: that request or response fails and its flow ends in `state: "error"`.
+- **`max_record_body_size`**: a body within `max_body_size` is forwarded in full even when it is larger than this limit; only the recorded copy is cut. The recording keeps the leading bytes, the message carries `body_truncated: true`, and when the recorded raw bytes are cut too, `metadata.http_anomaly_raw_body_truncated` is set. It applies to traffic through the proxy listeners; the copies `resend_*` / `fuzz_*` record keep the 254 MiB default.
+- **`plugin_max_body_size`**: a hook is not called for a message whose body is larger than this; the message continues unchanged, and the skip is counted in `plugin_introspect`'s fail-open stats. A plugin never sees a truncated body.
+- **`http_anomaly_raw_body_truncated`** marks any cut in the recorded raw bytes: the record limit above, or the HTTP/1.x raw capture limit (the wire bytes of a body, chunk framing included, can exceed `max_body_size` even when the decoded body does not). In every case the leading bytes are kept.
 
 ### ca_cert
 Get the CA certificate PEM, metadata, and persistence state. No additional parameters.

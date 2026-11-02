@@ -158,7 +158,7 @@ type fuzzWSVariantRow struct {
 
 // registerFuzzWS wires the fuzz_ws tool into the MCP server.
 func (s *Server) registerFuzzWS() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "fuzz_ws",
 		Description: "Synchronously fuzz a WebSocket frame. Schema mirrors resend_ws plus a positions[] list — " +
 			"each position is a typed path (payload | close_reason) with payloads[]. The cartesian product " +

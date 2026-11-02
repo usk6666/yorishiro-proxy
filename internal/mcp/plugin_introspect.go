@@ -95,7 +95,7 @@ const failOpenReasonTruncatedMargin = 128
 
 // registerPluginIntrospect registers the plugin_introspect MCP tool.
 func (s *Server) registerPluginIntrospect() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "plugin_introspect",
 		Description: "List loaded plugins with their (protocol, event, phase) hook registrations and " +
 			"the redacted PluginConfig.Vars map. fail_open_count counts hook outcomes the engine refused or could not " +

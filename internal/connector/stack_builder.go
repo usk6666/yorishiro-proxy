@@ -176,6 +176,15 @@ type BuildConfig struct {
 	// layer's internal default (config.MaxBodySize, 254 MiB).
 	MaxBodySize int64
 
+	// RecordMaxBodySize is the record-only body cap (max_record_body_size,
+	// USK-1408): the live RecordStep persists at most this many body /
+	// raw bytes per flow and marks the cut. It never bounds forwarding.
+	// Resolved via config.ResolveMaxRecordBodySize; zero means the
+	// RecordStep default (config.MaxBodySize, 254 MiB). Like
+	// GRPCMaxMessagesPerStream it lives here so one resolved value drives
+	// every listener's RecordStep and the query config echo.
+	RecordMaxBodySize int64
+
 	// MaxRawCaptureSize caps per-message HTTP/1.x raw-bytes capture in
 	// memory mode (header section + RawBody when body spill is not active).
 	// Zero means the layer's internal default

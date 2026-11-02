@@ -20,7 +20,7 @@ func sandboxBootEnv(t *testing.T) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	for _, k := range []string{"YP_DB", "YP_CA_CERT", "YP_CA_KEY", "YP_CA_EPHEMERAL", "YP_LOG_FILE", "YP_EXPORT_DIR", "YP_STDIO_MCP", "YP_NO_HTTP_MCP", "YP_MCP_HTTP_ADDR", "YP_CONFIG", "YP_TARGET_POLICY_FILE"} {
+	for _, k := range []string{"YP_DB", "YP_CA_CERT", "YP_CA_KEY", "YP_CA_EPHEMERAL", "YP_LOG_FILE", "YP_EXPORT_DIR", "YP_STDIO_MCP", "YP_NO_HTTP_MCP", "YP_MCP_HTTP_ADDR", "YP_CONFIG", "YP_TARGET_POLICY_FILE", "YP_MCP_TOOLS"} {
 		t.Setenv(k, "")
 	}
 	return home

@@ -225,7 +225,7 @@ const docsToolDescription = "Self-service documentation, reference and help manu
 
 // registerDocs registers the docs MCP tool.
 func (s *Server) registerDocs() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name:        "docs",
 		Description: docsToolDescription,
 	}, s.handleDocs)

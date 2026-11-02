@@ -123,10 +123,12 @@ register_hook("http", "on_request", on_req)
 	}
 }
 
-// TestPluginRequestLine_HTTP1_AbsoluteForm covers Test Plan #2: on the
-// plaintext forward-proxy path the request-target is absolute-form; a
-// path rewrite keeps the wire "http://host:port" prefix and a method-only
-// rewrite keeps the request-target byte-for-byte.
+// TestPluginRequestLine_HTTP1_AbsoluteForm covers Test Plan #2: an
+// absolute-form request-target inside a plaintext CONNECT tunnel keeps
+// the wire "http://host:port" prefix on a path rewrite and stays
+// byte-for-byte on a method-only rewrite. On the plain-HTTP forward proxy
+// the same rewrites go out in origin-form (USK-1117): the changed path is
+// never spliced behind the prefix.
 func TestPluginRequestLine_HTTP1_AbsoluteForm(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -152,26 +154,32 @@ register_hook("http", "on_request", on_req)
 			wantLine: func(prefix string) string { return "PUT " + prefix + "/orig?a=1 HTTP/1.1\r\n" },
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+	for _, mode := range []string{"connect", "forward"} {
+		for _, tc := range cases {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
 
-			up := startRawCaptureUpstream(t, true, nil)
-			_, proxyAddr := startRawWinsMITM(t, ctx, tc.script)
-			c, br, prefix := openPlaintextProxyConn(t, "forward", proxyAddr, up.Addr())
+				up := startRawCaptureUpstream(t, true, nil)
+				_, proxyAddr := startRawWinsMITM(t, ctx, tc.script)
+				c, br, _ := openPlaintextProxyConn(t, mode, proxyAddr, up.Addr())
+				prefix := "http://" + up.Addr()
 
-			if _, err := c.Write([]byte("GET " + prefix + "/orig?a=1 HTTP/1.1\r\nHost: " + up.Addr() + "\r\n\r\n")); err != nil {
-				t.Fatalf("write: %v", err)
-			}
-			if _, _, err := readOneResponse(br); err != nil {
-				t.Fatalf("read response: %v", err)
-			}
-			want := tc.wantLine(prefix)
-			if got := string(up.waitBytes(1, len(want))); !strings.HasPrefix(got, want) {
-				t.Errorf("upstream received %q, want request line %q", got, want)
-			}
-		})
+				if _, err := c.Write([]byte("GET " + prefix + "/orig?a=1 HTTP/1.1\r\nHost: " + up.Addr() + "\r\n\r\n")); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				if _, _, err := readOneResponse(br); err != nil {
+					t.Fatalf("read response: %v", err)
+				}
+				want := tc.wantLine(prefix)
+				if mode == "forward" {
+					want = tc.wantLine("")
+				}
+				if got := string(up.waitBytes(1, len(want))); !strings.HasPrefix(got, want) {
+					t.Errorf("upstream received %q, want request line %q", got, want)
+				}
+			})
+		}
 	}
 }
 

@@ -89,7 +89,7 @@ type resendHTTPResult struct {
 
 // registerResendHTTP wires the resend_http tool into the MCP server.
 func (s *Server) registerResendHTTP() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "resend_http",
 		Description: "Resend or construct an HTTP request through the proxy stack. " +
 			"With flow_id, omitted fields inherit from the recorded send; otherwise " +

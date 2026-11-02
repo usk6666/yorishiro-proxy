@@ -53,7 +53,7 @@ const (
 	// the 1 MiB TCP chunk cap (ErrChunkTooLarge).
 	FailOpenChunkTooLarge FailOpenKind = "chunk_too_large"
 
-	// FailOpenBodyTooLarge — the message body exceeded the 1 MiB plugin
+	// FailOpenBodyTooLarge — the message body exceeded the plugin_max_body_size
 	// view cap (ErrBodyTooLarge), so the hook was not run at all.
 	FailOpenBodyTooLarge FailOpenKind = "body_too_large"
 

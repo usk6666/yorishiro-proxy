@@ -518,7 +518,7 @@ func validateFuzzResultFilters(input queryInput) error {
 
 // registerQuery registers the query MCP tool.
 func (s *Server) registerQuery() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "query",
 		Description: "Unified read-only query: flows, flow detail, messages, status, config, ca_cert, " +
 			"intercept_queue, macros, macro, fuzz_jobs, fuzz_results. " +
@@ -2554,6 +2554,14 @@ type queryConfigResult struct {
 	// Config.MaxBodySize (USK-799 / USK-807). Zero / omitted means the
 	// layer default (config.MaxBodySize, 254 MiB) is in effect.
 	MaxBodySize int64 `json:"max_body_size,omitempty"`
+	// MaxRecordBodySize echoes the resolved record-only body cap
+	// (max_record_body_size, USK-1408): the most body / raw bytes the live
+	// recorder persists per message. Omitted when no manager is bound.
+	MaxRecordBodySize int64 `json:"max_record_body_size,omitempty"`
+	// PluginMaxBodySize echoes the resolved plugin body cap
+	// (plugin_max_body_size, USK-1408): a hook is skipped for an HTTP body
+	// larger than this. Omitted when no plugin engine is bound.
+	PluginMaxBodySize int64 `json:"plugin_max_body_size,omitempty"`
 	// BodySpillThreshold echoes the body memory→disk spill threshold
 	// configured via Config.BodySpillThreshold (USK-807). Zero / omitted
 	// means the layer default (config.DefaultBodySpillThreshold, 10 MiB)
@@ -2691,6 +2699,7 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		result.PeekTimeoutMs = s.connector.manager.PeekTimeout().Milliseconds()
 		result.MaxRawCaptureSize = s.connector.manager.MaxRawCaptureSize()
 		result.MaxBodySize = s.connector.manager.MaxBodySize()
+		result.MaxRecordBodySize = s.connector.manager.RecordMaxBodySize()
 		result.BodySpillThreshold = s.connector.manager.BodySpillThreshold()
 		result.BodySpillDir = s.connector.manager.BodySpillDir()
 		result.WSMaxFrameSize = s.connector.manager.WSMaxFrameSize()
@@ -2699,6 +2708,7 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		result.GRPCMaxMessagesPerStream = s.connector.manager.GRPCMaxMessagesPerStream()
 		result.SSEMaxEventsPerStream = s.connector.manager.SSEMaxEventsPerStream()
 	}
+	result.PluginMaxBodySize = s.pluginEngine.maxBodySize()
 
 	// Client-side timeouts (0 = disabled, USK-1185).
 	result.RequestTimeoutMs = s.currentRequestTimeoutMs()

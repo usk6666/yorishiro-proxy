@@ -66,7 +66,7 @@ var availableInterceptActions = []string{"release", "modify_and_forward", "drop"
 
 // registerIntercept registers the intercept MCP tool.
 func (s *Server) registerIntercept() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "intercept",
 		Description: "Act on a held envelope (intercept_id required). " +
 			"Actions: 'release' forwards as-is; 'modify_and_forward' applies a typed payload " +

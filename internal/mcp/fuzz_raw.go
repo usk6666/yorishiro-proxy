@@ -158,7 +158,7 @@ type fuzzRawVariantRow struct {
 
 // registerFuzzRaw wires the fuzz_raw tool into the MCP server.
 func (s *Server) registerFuzzRaw() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "fuzz_raw",
 		Description: "Synchronously fuzz a raw byte payload — the central HTTP smuggling fuzzing surface. " +
 			"Schema mirrors resend_raw plus a positions[] list (typed path: payload | patches[N].data) with payloads[]. " +

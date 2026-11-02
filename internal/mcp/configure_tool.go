@@ -448,7 +448,7 @@ type configureInterceptResult struct {
 
 // registerConfigure registers the configure MCP tool.
 func (s *Server) registerConfigure() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "configure",
 		Description: "Update runtime proxy settings on a running listener (upstream proxy, TLS passthrough, " +
 			"intercept rules + queue, auto-transform, SOCKS5 auth, TLS fingerprint, connection/timeout limits). " +

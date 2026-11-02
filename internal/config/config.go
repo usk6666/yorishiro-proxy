@@ -57,6 +57,9 @@ func (c *Config) Validate() error {
 	if err := c.validateExportDir(); err != nil {
 		return err
 	}
+	if err := c.validateMCPTools(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -262,6 +265,16 @@ type Config struct {
 	// not reachable from any MCP tool. Excluded from JSON serialization.
 	// CLI flag: -export-dir, env: YP_EXPORT_DIR.
 	ExportDir string `json:"-"`
+
+	// MCPTools is the allowlist of MCP tools the server exposes (USK-1120).
+	// nil (the default) exposes every tool. When set, only the named tools
+	// are registered: the rest are absent from tools/list and a tools/call
+	// to one fails as an unknown tool, on stdio and HTTP alike. Validate
+	// checks the shape (no empty element); the MCP server checks at boot
+	// that every name is a real tool. Startup-only: no MCP tool changes it.
+	// Excluded from JSON serialization.
+	// CLI flag: -mcp-tools (comma-separated), env: YP_MCP_TOOLS.
+	MCPTools []string `json:"-"`
 
 	// SafetyFilterEnabled controls whether the SafetyFilter engine is active.
 	// This can be set via CLI flag (-safety-filter) or environment variable
@@ -872,6 +885,15 @@ type ProxyConfig struct {
 	// as server-first (passthrough). Zero = DefaultTransparentPeekTimeoutMs.
 	TransparentPeekTimeoutMs int `json:"transparent_peek_timeout_ms,omitempty"`
 
+	// ForwardAsReceived is the proxy_start forward_as_received default
+	// (USK-1117). false (omitted) makes the plain-HTTP forward proxy send
+	// the upstream an origin-form request without Proxy-Connection /
+	// Proxy-Authorization; true relays the request exactly as received
+	// (absolute-form, Proxy-* included). The recording is the received
+	// bytes either way. Applies per listener; a no-op on transparent
+	// listeners and on plaintext inside CONNECT / SOCKS5 tunnels.
+	ForwardAsReceived bool `json:"forward_as_received,omitempty"`
+
 	// RequestTimeoutMs is the boot value of request_timeout_ms (USK-1186):
 	// the client-side request-head receive deadline. Nil keeps the default
 	// (60s); 0 disables it; otherwise MinClientTimeoutMs..MaxClientTimeoutMs.
@@ -935,6 +957,25 @@ type ProxyConfig struct {
 	// cap; the in-memory footprint is bounded by BodySpillThreshold via
 	// the bodybuf memory-then-spill BodyBuffer.
 	MaxBodySize int64 `json:"max_body_size,omitempty"`
+
+	// MaxRecordBodySize caps the body bytes the live RecordStep persists
+	// on a single flow (and the projected Flow.RawBytes BLOB). It is a
+	// record-only limit: traffic within MaxBodySize is still forwarded in
+	// full; only the recorded copy is cut, keeping its leading bytes and
+	// marking the flow (Flow.BodyTruncated for the L7 body, metadata
+	// http_anomaly_raw_body_truncated for the raw bytes). Zero (or
+	// omitted) selects MaxBodySize (254 MiB). Validation rejects negative
+	// values and values above MaxBodySizeUpperBound (1 GiB). USK-1408.
+	MaxRecordBodySize int64 `json:"max_record_body_size,omitempty"`
+
+	// PluginMaxBodySize caps the HTTP body size a pluginv2 hook may
+	// observe through msg["body"]. A message whose body is larger is not
+	// handed to the plugin at all (the hook is skipped and the message
+	// continues unchanged) — the plugin never sees a truncated body.
+	// Applies to every loaded plugin. Zero (or omitted) selects
+	// DefaultPluginMaxBodySize (1 MiB). Validation rejects negative values
+	// and values above MaxBodySizeUpperBound (1 GiB). USK-1408.
+	PluginMaxBodySize int64 `json:"plugin_max_body_size,omitempty"`
 
 	// RawPassthroughHosts is a list of "host:port" targets that bypass L7
 	// parsing. Traffic to these hosts is relayed as raw bytes through the

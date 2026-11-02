@@ -90,7 +90,7 @@ type resendRawTypedResult struct {
 
 // registerResendRaw wires the resend_raw tool into the MCP server.
 func (s *Server) registerResendRaw() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "resend_raw",
 		Description: "Resend a recorded raw byte payload on a freshly dialled TCP/TLS upstream. " +
 			"flow_id is REQUIRED — use fuzz_raw for ad-hoc injection. override_bytes replaces the payload " +
