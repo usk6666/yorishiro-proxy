@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -119,8 +120,9 @@ func (c *channel) streamRequest(rawReq *parser.RawRequest, env *envelope.Envelop
 // the connection once the exchange is over (Layer.requestBodyEnded): a
 // body closed unread (possibly concurrent with a Read; no reader state is
 // touched) also arms an immediate read deadline so an in-flight read
-// returns; a client that closed mid-body yields AnomalyTruncatedBody and an
-// aborted error; a framing or read error a protocol error.
+// returns; a client that closed mid-body — a FIN, or a reset (ECONNRESET)
+// — yields AnomalyTruncatedBody and an aborted error; a framing or other
+// read error (a read deadline included) a protocol error.
 func (s *h1BodySource) finishRequest(cause error) envelope.BodyResult {
 	c := s.ch
 	var res envelope.BodyResult
@@ -131,7 +133,16 @@ func (s *h1BodySource) finishRequest(cause error) envelope.BodyResult {
 		return res
 	}
 	res.Trailers, res.Anomalies = extractTrailers(s.body)
-	if a, ok := bodyTruncationAnomaly(s.body); ok {
+	a, ok := bodyTruncationAnomaly(s.body)
+	if !ok && errors.Is(cause, syscall.ECONNRESET) {
+		// The parser flags a cut only at EOF; a reset ends the body the
+		// same way (USK-1414 U1).
+		a, ok = envelope.Anomaly{
+			Type:   envelope.AnomalyTruncatedBody,
+			Detail: "connection reset by the client before the end of the body",
+		}, true
+	}
+	if ok {
 		res.Anomalies = append(res.Anomalies, a)
 		res.Truncated = true
 		res.Err = &layer.StreamError{
@@ -213,9 +224,11 @@ func (l *Layer) halfCloseAndLinger() {
 // sends the same one-shot body (R11). From the first body read on, Send owns
 // the stream and closes it on every exit; a write failure then is a
 // body-stage error, never replay-safe. ctx cancellation closes the stream,
-// which unblocks a read waiting on an idle client.
+// which unblocks a read waiting on an idle client. Every body-stage error
+// marks the upstream Layer dead: its connection is mid-request.
 //
-// A client that closed mid-body (U1) ends the body, not the Send: the bytes
+// A client that closed mid-body (U1; a FIN or a reset) ends the body, not
+// the Send: the bytes
 // received were written, the upstream's write side is half-closed so it
 // sees the same end of the request, and the response keeps flowing. The
 // upstream connection carries no further exchange.
@@ -244,6 +257,19 @@ func (c *channel) sendRequestStreamed(ctx context.Context, msg *envelope.HTTPMes
 	stop := context.AfterFunc(ctx, func() { _ = bs.Close() })
 	defer stop()
 	src.forwardTo(bw)
+	err = c.forwardRequestBody(bs, src, msg, opaque)
+	if err != nil {
+		// Part of the body may be on the upstream wire: the connection is
+		// mid-request and must never carry another exchange.
+		c.layer.markDead("streamed request body failed mid-send", err)
+	}
+	return err
+}
+
+// forwardRequestBody is the body stage of sendRequestStreamed: it reads bs
+// to its end, forwarding the client's body wire bytes upstream (src's
+// forward writer is set).
+func (c *channel) forwardRequestBody(bs *envelope.BodyStream, src *h1BodySource, msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
 	buf := make([]byte, streamCopyBufSize)
 	for {
 		_, rerr := bs.Read(buf)
