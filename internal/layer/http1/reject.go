@@ -105,6 +105,23 @@ func (l *Layer) rejectRequestHead(resp []byte) (written []byte, ok bool) {
 	return append([]byte(nil), resp...), ok
 }
 
+// RefuseExchange answers the request in flight on this client-facing
+// Layer with resp — a complete proxy-generated response that carries
+// Connection: close — and closes the connection, with the same bounded
+// write, half-close and linger as the 414 / 431 path. It reports whether
+// every byte was written.
+//
+// The caller must own the exchange's response slot: the request was
+// yielded through a Channel and nothing has been written for it yet. The
+// plain-HTTP forward proxy uses it when switching a keep-alive
+// connection to the upstream a later request names fails at the gate —
+// scope, rate limit or dial (USK-1410) — answering exactly as the
+// first-request gate does.
+func (l *Layer) RefuseExchange(resp []byte) bool {
+	_, ok := l.rejectRequestHead(resp)
+	return ok
+}
+
 // statusLineOf returns resp's first line without its terminator.
 func statusLineOf(resp []byte) string {
 	if i := bytes.IndexByte(resp, '\r'); i >= 0 {

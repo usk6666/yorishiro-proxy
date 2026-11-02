@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
 // HTTP1ForwardHandlerConfig holds dependencies for the plain-HTTP forward-proxy
@@ -84,13 +85,15 @@ type HTTP1ForwardHandlerConfig struct {
 }
 
 // plainHTTPStackOptions returns the BuildPlainHTTPStack options the
-// forward handler builds every stack with: the forward-proxy egress form
-// (USK-1117) unless ForwardAsReceived.
-func (cfg HTTP1ForwardHandlerConfig) plainHTTPStackOptions() []PlainHTTPStackOption {
-	if cfg.ForwardAsReceived {
-		return nil
+// forward handler builds every stack with: per-request routing through
+// router (USK-1410) always, and the forward-proxy egress form (USK-1117)
+// unless ForwardAsReceived.
+func (cfg HTTP1ForwardHandlerConfig) plainHTTPStackOptions(router *ForwardRouter) []PlainHTTPStackOption {
+	opts := []PlainHTTPStackOption{WithForwardRouting(router)}
+	if !cfg.ForwardAsReceived {
+		opts = append(opts, WithForwardProxyOriginForm())
 	}
-	return []PlainHTTPStackOption{WithForwardProxyOriginForm()}
+	return opts
 }
 
 // dialTimeoutPlainHTTP bounds the per-request upstream TCP dial. Aligned with
@@ -153,12 +156,15 @@ const peekHeaderSize = 4000
 // scope/rate-limit check → dial upstream plain TCP → BuildPlainHTTPStack →
 // invoke OnStack callback.
 //
-// First-iteration limitation (USK-710): the handler serves exactly ONE
-// request per accepted client connection. After OnStack returns the
-// connection is closed (via FullListener's deferred Close on PeekConn). HTTP
-// keep-alive across multiple requests on the same client conn is deferred
-// to a follow-up issue; clients that want to send multiple requests will
-// re-dial the proxy, which is the common browser behavior anyway.
+// Keep-alive (USK-1410): the session serves every request of the client
+// connection, each routed to the upstream it names. The first request's
+// target is the one dialed here; a later request naming another target
+// (resolved by the same rule, resolveForwardTarget) switches the
+// connection's upstream through the stack's ForwardRouter, which runs this
+// gate again for the new target. A browser with HTTP_PROXY set reuses one
+// proxy connection across origins, so this is the common case, not an
+// edge. A switch replaces the upstream connection (the previous one is
+// closed); there is no per-destination pool.
 //
 // On any failure (peek error, scope/rate-limit denial, upstream dial
 // failure, stack-build failure) the handler writes a minimal HTTP/1.1 502
@@ -170,6 +176,7 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	router := newForwardRouter(cfg, logger)
 
 	return func(ctx context.Context, pc *PeekConn) error {
 		connLogger := LoggerFromContext(ctx, logger)
@@ -223,11 +230,11 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 
 		// USK-1160: track the admitted connection. One entry per accepted
 		// client connection, keyed on target — the upstream this handler
-		// dials and to which the connection's upstream leg stays bound for
-		// its whole life (later keep-alive requests reuse it whatever their
-		// Host header says; HostScopeStep re-checks each of them). A policy
-		// change that no longer admits target cancels ctx, which the dial
-		// and the OnStack session watch.
+		// dials. When a later keep-alive request switches the upstream
+		// (ForwardRouter.Retarget, USK-1410) the entry is re-keyed on the
+		// new target, so it always names the upstream currently connected.
+		// A policy change that no longer admits it cancels ctx, which the
+		// dial and the OnStack session watch.
 		ctx, release, err := trackAdmitted(ctx, cfg.LiveConns, "http1-forward", target, func() (bool, string) {
 			allowed, reason, _ := forwardScopeCheck(cfg.Scope, target)
 			return allowed, reason
@@ -288,7 +295,7 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 		// Step 5: Build the per-connection stack. After this point the
 		// stack owns both conns; failures must close upstreamConn explicitly
 		// (which BuildPlainHTTPStack does NOT do — it only constructs).
-		stack, berr := BuildPlainHTTPStack(ctx, pc, upstreamConn, target, cfg.BuildCfg, cfg.plainHTTPStackOptions()...)
+		stack, berr := BuildPlainHTTPStack(ctx, pc, upstreamConn, target, cfg.BuildCfg, cfg.plainHTTPStackOptions(router)...)
 		if berr != nil {
 			upstreamConn.Close()
 			connLogger.Warn("plain HTTP stack build failed", "error", berr)
@@ -324,8 +331,10 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 // Every request on the connection reaches the Pipeline (HostScopeStep and
 // HTTPScopeStep, which path-checks it), so a path-scoped allow admits the
 // host provisionally (USK-1130, see gateScopeCheck). The first request's
-// path is known here but deliberately not used: later keep-alive requests
-// reuse the same upstream leg and are checked per request anyway.
+// path is known here but deliberately not used: every request, the first
+// included, is path-checked per request anyway. ForwardRouter.Retarget
+// runs this same check for the target of a later request that switches
+// the connection's upstream (USK-1410).
 func forwardScopeCheck(scope *TargetScope, target string) (allowed bool, reason string, err error) {
 	if scope == nil || !scope.HasRules() {
 		return true, "", nil
@@ -392,14 +401,15 @@ func peekForwardTarget(pc *PeekConn) (string, error) {
 	// appear well before the cap, and the http1 Layer is the authoritative
 	// parser anyway.
 
-	// Split into request line + headers.
-	lines := bytes.Split(buf, []byte("\r\n"))
-	if len(lines) == 0 {
-		return "", fmt.Errorf("connector: empty request")
-	}
+	// Split off the request line; the header lines after it are parsed
+	// with the HTTP/1 parser's own loop (parser.ParseHeaderSection) so the
+	// peek and the client Layer — which routes every later request by the
+	// same rule (resolveForwardTarget, USK-1410) — agree on the Host
+	// header (obs-fold, "Host :" and OWS included).
+	line, section, _ := bytes.Cut(buf, []byte("\r\n"))
 
 	// Parse request line: METHOD SP REQUEST-URI SP HTTP-VERSION.
-	parts := bytes.SplitN(lines[0], []byte(" "), 3)
+	parts := bytes.SplitN(line, []byte(" "), 3)
 	if len(parts) < 2 {
 		return "", fmt.Errorf("connector: malformed request line")
 	}
@@ -407,31 +417,21 @@ func peekForwardTarget(pc *PeekConn) (string, error) {
 	requestURI := string(parts[1])
 
 	// Defensive: CONNECT should not reach this handler; OnCONNECT owns
-	// CONNECT-method detection. If a client somehow speaks CONNECT against
-	// the OnHTTP1 slot, refuse.
+	// CONNECT-method detection. resolveForwardTarget refuses it as well;
+	// returning here skips parsing the headers of a refused request.
 	if strings.EqualFold(method, "CONNECT") {
 		return "", fmt.Errorf("connector: CONNECT method routed to plain-HTTP handler")
 	}
 
-	// Absolute-form URI takes precedence (RFC 9112 §3.2.2).
-	if strings.HasPrefix(strings.ToLower(requestURI), "http://") {
-		u, perr := url.Parse(requestURI)
-		if perr != nil {
-			return "", fmt.Errorf("connector: parse absolute URI: %w", perr)
-		}
-		host := u.Host
-		if host == "" {
-			return "", fmt.Errorf("connector: absolute URI missing authority")
-		}
-		return validForwardTarget(JoinDefaultPort(host, "80"))
+	// buf stops before the empty line that ends the header section (or at
+	// the peek cap); terminate it so the parser sees a complete section.
+	terminated := make([]byte, 0, len(section)+4)
+	terminated = append(append(terminated, section...), "\r\n\r\n"...)
+	headers, err := parser.ParseHeaderSection(terminated)
+	if err != nil {
+		return "", fmt.Errorf("connector: parse request headers: %w", err)
 	}
-
-	// Origin-form: Host header is mandatory in HTTP/1.1.
-	host := findHostHeader(lines[1:])
-	if host == "" {
-		return "", fmt.Errorf("connector: missing Host header in origin-form request")
-	}
-	return validForwardTarget(JoinDefaultPort(host, "80"))
+	return resolveForwardTarget(method, requestURI, headers)
 }
 
 // validForwardTarget returns target when joinErr (from JoinDefaultPort) is
@@ -522,24 +522,6 @@ func peekUntilHeadersEnd(pc *PeekConn, max int) ([]byte, error) {
 		// Loop — Step 0 of the next iteration will re-check the now-
 		// expanded buffer.
 	}
-}
-
-// findHostHeader scans header lines (the lines AFTER the request line) for
-// the first Host header (case-insensitive) and returns its trimmed value.
-// Returns empty string if no Host header is present.
-func findHostHeader(headers [][]byte) string {
-	for _, line := range headers {
-		colon := bytes.IndexByte(line, ':')
-		if colon < 0 {
-			continue
-		}
-		name := bytes.TrimSpace(line[:colon])
-		if !bytes.EqualFold(name, []byte("Host")) {
-			continue
-		}
-		return string(bytes.TrimSpace(line[colon+1:]))
-	}
-	return ""
 }
 
 // writeForwardErrorResponse writes a minimal HTTP/1.1 error response to the

@@ -26,6 +26,11 @@ const (
 	// while the connector was reading a CONNECT request, after at least
 	// one byte of it arrived (USK-1189).
 	RequestHeadCONNECTTimeout RequestHeadReason = "connect_request_timeout"
+	// RequestHeadForwardTargetInvalid: on the plain-HTTP forward proxy a
+	// complete request head named no routable target (origin-form without
+	// Host, an unusable port, ...) and the Layer answered 400 Bad Request
+	// (USK-1410, WithForwardTargetResolver).
+	RequestHeadForwardTargetInvalid RequestHeadReason = "forward_target_invalid"
 )
 
 // Request-head phases reported in RequestHeadError.Phase.
@@ -78,7 +83,8 @@ type RequestHeadError struct {
 	// Timeout is the request-head deadline that was armed, zero when none.
 	Timeout time.Duration
 	// Status is the status code of the proxy-generated response (414 /
-	// 431), zero when none is sent.
+	// 431, or 400 for RequestHeadForwardTargetInvalid), zero when none is
+	// sent.
 	Status int
 	// Response holds the exact bytes of the proxy-generated response.
 	Response []byte

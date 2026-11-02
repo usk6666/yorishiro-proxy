@@ -128,8 +128,9 @@ func TestE2E_AbsoluteFormScope_TunnelDeniedAuthority(t *testing.T) {
 
 // T2: plain forward proxy, one keep-alive connection. The first request's
 // absolute-form target is the dial target and is relayed; the second names
-// a denied authority behind the same allowed Host and is refused before it
-// reaches the upstream the connection is bound to.
+// a denied authority behind the same allowed Host. It is routed to the
+// host it names (USK-1410), so it is judged as a request to that denied
+// host and refused before any upstream — the first one included — sees it.
 func TestE2E_AbsoluteFormScope_ForwardKeepAliveSecondRequest(t *testing.T) {
 	up := startURIRecordingUpstream(t, false)
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: hostScopePolicyConfig})

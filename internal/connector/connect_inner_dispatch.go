@@ -313,6 +313,10 @@ func cfgPluginEngine(cfg *BuildConfig) *pluginv2.Engine {
 	return cfg.PluginV2Engine
 }
 
+// errUpstreamProxyRotation marks a dialPlainUpstream failure that happened
+// before any dial: the upstream proxy rotation resolver failed.
+var errUpstreamProxyRotation = errors.New("upstream proxy rotation")
+
 // dialPlainUpstream dials upstream plain TCP for inner-protocol branches that
 // do not perform a TLS handshake (plain HTTP/1.x, h2c, bytechunk). The
 // upstream proxy URL (cfg.EffectiveUpstreamProxy) is honored when configured.
@@ -323,6 +327,9 @@ func cfgPluginEngine(cfg *BuildConfig) *pluginv2.Engine {
 // target is stamped on ctx as the dial target, so per_target_host rotation
 // is keyed on the address dialled even when the caller's ctx carries none
 // (the plaintext CONNECT / SOCKS5 inner first dial; USK-1382).
+//
+// A rotation resolver failure (fail-closed, no dial) wraps
+// errUpstreamProxyRotation.
 func dialPlainUpstream(ctx context.Context, target string, cfg *BuildConfig) (net.Conn, error) {
 	ctx = ContextWithDialTarget(ctx, target)
 	var dialOpts DialRawOpts
@@ -330,7 +337,7 @@ func dialPlainUpstream(ctx context.Context, target string, cfg *BuildConfig) (ne
 		u, err := cfg.EffectiveUpstreamProxyForCtxErr(ctx)
 		if err != nil {
 			// USK-959: fail-closed on rotation resolver error.
-			return nil, fmt.Errorf("connector: plain upstream dial for %s: upstream proxy rotation: %w", target, err)
+			return nil, fmt.Errorf("connector: plain upstream dial for %s: %w: %w", target, errUpstreamProxyRotation, err)
 		}
 		dialOpts.UpstreamProxy = u
 	}

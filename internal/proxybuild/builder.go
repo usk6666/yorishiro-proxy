@@ -1076,6 +1076,9 @@ func runHTTP1ExchangeLoop(
 	// (server idle FIN / RST) and transparently redial. closeAll on
 	// CONNECT exit tears down every redial step (original + successors).
 	chain := newH1Chain(upstreamH1, connector.UpstreamTargetOf(stack, target), connector.UpstreamTLSShapeOf(stack), deps.BuildConfig, logger, deps.H1UpstreamMetrics)
+	// USK-1410: keep the stack's upstream topmost on the chain's live
+	// Layer, and route per request on a plain-HTTP forward stack.
+	chain.attachStack(stack)
 	defer chain.closeAll()
 	var wg sync.WaitGroup
 	for {
@@ -1163,9 +1166,19 @@ func runHTTP1Exchange(
 		// USK-998: probe the current upstream Layer for staleness (peer
 		// idle-FIN / RST during keep-alive) and transparently redial when
 		// stale. Returns the same Layer fast when alive.
-		upstreamH1, err := chain.EnsureFresh(dctx)
+		// USK-1410: on a plain-HTTP forward stack, a request naming
+		// another target (its TargetHost, stamped by the client Layer
+		// from the received request) switches the upstream first. Only a
+		// request the Pipeline let through gets here, so a dropped, held
+		// or answered request never dials its target.
+		var reqTarget string
+		if env != nil {
+			reqTarget = env.Context.TargetHost
+		}
+		upstreamH1, err := chain.Acquire(dctx, reqTarget)
 		if err != nil {
 			dialFailed.Store(true)
+			refuseForwardExchange(dctx, clientH1, sessOpts, env, err)
 			return nil, fmt.Errorf("dial: %w", err)
 		}
 		upCh := upstreamH1.OpenExchange()
@@ -1212,6 +1225,29 @@ func runHTTP1Exchange(
 		// rather than leave the client waiting until its own timeout. The
 		// close unblocks the exchange loop, which tears the stack down.
 		_ = clientH1.Close()
+	}
+}
+
+// refuseForwardExchange answers the request of a forward-proxy exchange
+// whose upstream switch was refused (err wraps *connector.ForwardRefusal,
+// USK-1410) the way the forward handler's first-request gate answers a
+// refused connection: the refusal's response (403 / 429 / 400 / 502,
+// Connection: close) is written and the client connection closed. A
+// policy refusal (target_scope / rate_limit) is recorded on the request's
+// Stream through the session's OnPipelineDrop recorder — State=error with
+// blocked_by and the gate's audit tags — which also keeps the session's
+// OnComplete from overwriting it. A 502 / 400 is left to OnComplete,
+// which records State=error from the dial error. Any other err (a
+// same-target redial failure) is not answered: unchanged behavior, the
+// client connection is closed without a response.
+func refuseForwardExchange(ctx context.Context, clientH1 *http1.Layer, opts session.SessionOptions, env *envelope.Envelope, err error) {
+	var refusal *connector.ForwardRefusal
+	if !errors.As(err, &refusal) {
+		return
+	}
+	clientH1.RefuseExchange(refusal.Response)
+	if refusal.BlockedBy != "" && opts.OnPipelineDrop != nil && env != nil {
+		opts.OnPipelineDrop(pipeline.WithBlockAnnotations(ctx, refusal.Tags), env, refusal.BlockedBy)
 	}
 }
 

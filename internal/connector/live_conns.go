@@ -122,7 +122,10 @@ type LiveConn struct {
 }
 
 type liveConnEntry struct {
-	info   LiveConn
+	// info is the registration. Replaced (never mutated) by
+	// LiveConnHandle.Retarget under LiveConns.mu (USK-1410); read without
+	// the lock by the predicates Reconcile / Settle evaluate and by logs.
+	info   atomic.Pointer[LiveConn]
 	cancel context.CancelCauseFunc
 	// cut is set (under LiveConns.mu) once the entry was cancelled, so a
 	// later Reconcile does not count or log it again before the handler
@@ -155,10 +158,11 @@ type liveConnEntry struct {
 // bytes (and the gate registered one), its Admit otherwise. Nil means the
 // connection is never cut.
 func (e *liveConnEntry) admitFunc() LiveConnAdmitFunc {
-	if e.opaque.Load() && e.info.AdmitOpaque != nil {
-		return e.info.AdmitOpaque
+	info := e.info.Load()
+	if e.opaque.Load() && info.AdmitOpaque != nil {
+		return info.AdmitOpaque
 	}
-	return e.info.Admit
+	return info.Admit
 }
 
 // LiveConns is the process-wide registry of admitted live connections. The
@@ -201,7 +205,8 @@ func (r *LiveConns) Register(ctx context.Context, c LiveConn) (context.Context, 
 		return ctx, func() {}, nil
 	}
 	cctx, cancel := context.WithCancelCause(ctx)
-	e := &liveConnEntry{info: c, cancel: cancel}
+	e := &liveConnEntry{cancel: cancel}
+	e.info.Store(&c)
 
 	r.mu.Lock()
 	r.nextID++
@@ -284,7 +289,7 @@ func (r *LiveConns) ReconcileWithDeferred(trigger string) (revoked, deferred int
 	r.mu.Lock()
 	snapshot := make([]*liveConnEntry, 0, len(r.conns))
 	for _, e := range r.conns {
-		if !e.cut.Load() && e.info.Admit != nil {
+		if !e.cut.Load() && e.info.Load().Admit != nil {
 			snapshot = append(snapshot, e)
 		}
 	}
@@ -295,7 +300,11 @@ func (r *LiveConns) ReconcileWithDeferred(trigger string) (revoked, deferred int
 	// admitFunc picks the strict check for a connection a raw relay
 	// resolved (USK-1283); it is non-nil whenever Admit is.
 	for _, e := range snapshot {
-		allowed, reason := e.admitFunc()()
+		admit := e.admitFunc()
+		if admit == nil {
+			continue // retargeted to a never-cut registration meanwhile
+		}
+		allowed, reason := admit()
 		r.mu.Lock()
 		if e.cut.Load() {
 			r.mu.Unlock()
@@ -346,11 +355,12 @@ func (r *LiveConns) ReconcileWithDeferred(trigger string) (revoked, deferred int
 
 // logAttrs returns the per-connection log attributes followed by extra.
 func (r *LiveConns) logAttrs(e *liveConnEntry, extra ...any) []any {
+	info := e.info.Load()
 	return append([]any{
-		"conn_id", e.info.ConnID,
-		"listener", e.info.Listener,
-		"via", e.info.Via,
-		"target", e.info.Target,
+		"conn_id", info.ConnID,
+		"listener", info.Listener,
+		"via", info.Via,
+		"target", info.Target,
 	}, extra...)
 }
 
@@ -559,8 +569,48 @@ func (h *LiveConnHandle) Settle() {
 		r.logAttrs(e, "reason", reason, "trigger", trigger, "deferred", true)...)
 }
 
-// Retarget moves the live connection's registration to target (USK-1410).
+// Retarget moves the live connection's registration to a new target
+// (USK-1410): the plain-HTTP forward proxy switches a keep-alive
+// connection's upstream when a later request names another host, and from
+// then on the connection survives a policy change iff an identical new
+// connection to target would be admitted. admit / admitOpaque are the
+// gate's checks for target (LiveConn.Admit / AdmitOpaque).
+//
+// Race semantics mirror Register: the registration is swapped first and
+// admit is then re-run once, so a policy change that lands concurrently
+// is seen either by Reconcile (judging target) or by this re-check. When
+// the re-check fails the previous registration is restored — unless a
+// concurrent Retarget replaced it — and a *ScopeAdmissionError wrapping
+// ErrTargetScopeRevoked is returned; the caller must refuse the request.
+// A connection already cut cannot be retargeted (an error wrapping
+// ErrTargetScopeRevoked). A nil handle allows every retarget.
 func (h *LiveConnHandle) Retarget(target string, admit, admitOpaque LiveConnAdmitFunc) error {
+	if h == nil {
+		return nil
+	}
+	r, e := h.reg, h.e
+	r.mu.Lock()
+	if e.cut.Load() {
+		r.mu.Unlock()
+		return fmt.Errorf("%w: connection already closed", ErrTargetScopeRevoked)
+	}
+	prev := e.info.Load()
+	next := *prev
+	next.Target = target
+	next.Admit = admit
+	next.AdmitOpaque = admitOpaque
+	e.info.Store(&next)
+	r.mu.Unlock()
+
+	if admit == nil {
+		return nil
+	}
+	if allowed, reason := admit(); !allowed {
+		r.mu.Lock()
+		e.info.CompareAndSwap(&next, prev)
+		r.mu.Unlock()
+		return &ScopeAdmissionError{Reason: reason}
+	}
 	return nil
 }
 

@@ -523,6 +523,17 @@ func parseHeaders(r *bufio.Reader, cw *captureWriter) (RawHeaders, []Anomaly, er
 	return parseHeaderLines(r, cw, maxHeaderSize)
 }
 
+// ParseHeaderSection parses section — the header lines after a start line,
+// through the empty line that ends them — with the same loop ParseRequest
+// runs (obs-fold, OWS trimming, name taken as the bytes before the first
+// colon, header limits). Anomalies are discarded. A connector that peeks a
+// request head before the Layer parses it uses this so both readers agree
+// on every header (USK-1410).
+func ParseHeaderSection(section []byte) (RawHeaders, error) {
+	headers, _, err := parseHeaderLines(bufio.NewReader(bytes.NewReader(section)), nil, maxHeaderSize)
+	return headers, err
+}
+
 // parseHeaderLines implements the shared line-by-line header/trailer parser.
 // Used by parseHeaders for initial header sections (with cw capturing RawBytes)
 // and by dechunkedReader.consumeTrailers for chunked trailer sections (with

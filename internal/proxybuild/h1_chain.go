@@ -42,7 +42,7 @@ type h1Chain struct {
 	mu      sync.Mutex
 	current *http1.Layer
 	layers  []*http1.Layer
-	target  string // dial target (upstream.Dial), for logs
+	target  string // current dial target (upstream.Dial); Acquire compares against it
 	cfg     *connector.BuildConfig
 
 	// upstream is the stack's dial target / TLS authority split
@@ -73,6 +73,81 @@ type h1Chain struct {
 	// recomputing from len(c.layers) at close time) keeps the counter
 	// stable if future evolutions change how layers are accounted.
 	liveGen int64
+
+	// stack is the connection stack whose upstream topmost Layer the
+	// chain owns. Every swap of current (stale redial, write-EPIPE
+	// redial, forward retarget) installs the fresh Layer as the stack's
+	// upstream topmost, so a WebSocket / SSE upgrade — which detaches
+	// stack.UpstreamTopmost() — takes the live Layer. Nil in tests that
+	// build a chain without a stack. Lock order: c.mu, then the stack's.
+	stack *connector.ConnectionStack
+
+	// router is the stack's forward router (explicit plain-HTTP forward
+	// proxy only, USK-1410). When set, Acquire switches the upstream to
+	// the target each request names; nil keeps the chain pinned.
+	router *connector.ForwardRouter
+}
+
+// attachStack binds the chain to the stack its initial Layer came from
+// (see the stack / router fields).
+func (c *h1Chain) attachStack(stack *connector.ConnectionStack) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stack = stack
+	c.router = stack.ForwardRouter()
+}
+
+// swapLocked makes fresh the chain's current Layer: the previous one is
+// closed (sync.Once-guarded inside the Layer), fresh is appended so
+// closeAll tears it down, and it becomes the stack's upstream topmost.
+// Caller holds c.mu.
+func (c *h1Chain) swapLocked(fresh *http1.Layer) {
+	_ = c.current.Close()
+	c.current = fresh
+	c.layers = append(c.layers, fresh)
+	c.bumpGenerationLocked()
+	if c.stack != nil {
+		c.stack.ReplaceUpstreamTop(fresh)
+	}
+}
+
+// Acquire returns the Layer the exchange whose request names target must
+// be sent on. On a forward-routing chain (router set, USK-1410) a target
+// other than the current one switches the upstream: the router re-runs
+// the forward gate for target and dials it (Retarget); the result is a
+// *connector.ForwardRefusal when the switch is refused or fails. The same
+// target — and every request on a chain without a router — gets
+// EnsureFresh's Layer. Comparison is connector.SameForwardTarget (exact
+// host:port, host case-insensitive).
+func (c *h1Chain) Acquire(ctx context.Context, target string) (*http1.Layer, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.router != nil && !connector.SameForwardTarget(target, c.target) {
+		return c.retargetLocked(ctx, target)
+	}
+	return c.ensureFreshLocked(ctx)
+}
+
+// retargetLocked switches the chain to target through c.router. Caller
+// holds c.mu. Later stale redials and replay retries dial target.
+func (c *h1Chain) retargetLocked(ctx context.Context, target string) (*http1.Layer, error) {
+	from := c.target
+	fresh, err := c.router.Retarget(ctx, c.current, target, len(c.layers))
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Debug("proxybuild: http1 forward retarget refused",
+				"from", from, "target", target, "trigger", "retarget", "error", err)
+		}
+		return nil, err
+	}
+	c.swapLocked(fresh)
+	c.target = target
+	c.upstream = connector.SameUpstreamTarget(target)
+	if c.logger != nil {
+		c.logger.Debug("proxybuild: http1 upstream retargeted",
+			"from", from, "target", target, "trigger", "retarget", "generation", len(c.layers)-1)
+	}
+	return fresh, nil
 }
 
 // newH1Chain wraps the initial upstream Layer (the one constructed at
@@ -119,6 +194,11 @@ func newH1Chain(
 func (c *h1Chain) EnsureFresh(ctx context.Context) (*http1.Layer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.ensureFreshLocked(ctx)
+}
+
+// ensureFreshLocked is EnsureFresh with c.mu held.
+func (c *h1Chain) ensureFreshLocked(ctx context.Context) (*http1.Layer, error) {
 	if err := c.current.HealthCheck(); err == nil {
 		return c.current, nil
 	}
@@ -141,10 +221,7 @@ func (c *h1Chain) EnsureFresh(ctx context.Context) (*http1.Layer, error) {
 	// HealthCheck's contract requires an empty pendingQ on call, so by
 	// construction there is no in-flight Channel reader to disrupt. Close
 	// is sync.Once-guarded inside the Layer.
-	_ = c.current.Close()
-	c.current = fresh
-	c.layers = append(c.layers, fresh)
-	c.bumpGenerationLocked()
+	c.swapLocked(fresh)
 	c.metrics.incRedialHealthcheck()
 	return fresh, nil
 }
@@ -188,10 +265,7 @@ func (c *h1Chain) Redial(ctx context.Context) (*http1.Layer, error) {
 	// only path to Redial, and it holds an exclusive one-shot budget
 	// per exchange — there is no in-flight reader on c.current to
 	// disrupt. Close is sync.Once-guarded inside the Layer.
-	_ = c.current.Close()
-	c.current = fresh
-	c.layers = append(c.layers, fresh)
-	c.bumpGenerationLocked()
+	c.swapLocked(fresh)
 	c.metrics.incRedialWriteEpipe()
 	if c.logger != nil {
 		c.logger.Debug("proxybuild: http1 redialed after write EPIPE",

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 )
 
@@ -102,21 +101,7 @@ func RedialUpstreamH1(
 	envCtx := WithUpstreamPeer(stale.EnvelopeContextTemplate(), upstreamConn)
 	connID := redialConnIDLabel(envCtx.ConnID, generation)
 
-	fresh := http1.New(upstreamConn, connID, envelope.Receive,
-		http1.WithScheme(stale.Scheme()),
-		http1.WithEnvelopeContext(envCtx),
-		http1.WithBodySpillDir(cfg.BodySpillDir),
-		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
-		http1.WithMaxBodySize(cfg.MaxBodySize),
-		http1.WithMaxRawCaptureSize(cfg.MaxRawCaptureSize),
-		http1.WithStateReleaser(cfg.PluginV2Engine),
-		// USK-655: bypass body draining for SSE responses so the swap
-		// orchestrator (session.runUpgradeSSE) can hand the still-open
-		// body to sse.Wrap without blocking on a never-ending drain.
-		// Matches the option set used in buildStackFromRoute "http1".
-		http1.WithStreamingResponseDetect(http1.IsSSEResponse),
-	)
-	return fresh, nil
+	return newUpstreamH1Layer(upstreamConn, connID, stale.Scheme(), envCtx, cfg), nil
 }
 
 // redialUpstreamH1Conn dials the replacement upstream conn over the same

@@ -2,7 +2,10 @@ package http1
 
 import (
 	"bytes"
+	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
@@ -40,6 +43,58 @@ import (
 // fuzz) are unaffected. Ignored on Receive-direction Layers.
 func WithForwardProxyOriginForm() Option {
 	return func(o *options) { o.forwardOriginForm = true }
+}
+
+// ForwardTargetResolver returns the upstream host:port a parsed request
+// names, or an error when it names none the proxy can route.
+type ForwardTargetResolver func(method, requestURI string, headers parser.RawHeaders) (target string, err error)
+
+// WithForwardTargetResolver makes a Send-direction (client-facing) Layer
+// route each request it parses on the explicit plain-HTTP forward proxy
+// (USK-1410): resolve's target is stamped as the request's
+// EnvelopeContext.TargetHost — on the request envelope and on its
+// Channel's context template — so the scope Steps, the rule engines and
+// the upstream dial all see the host the request names rather than the
+// connection's first. A request resolve rejects is answered with refusal
+// (the forward gate's 400, Connection: close), the connection is closed
+// and Next returns a *RequestHeadError (RequestHeadForwardTargetInvalid);
+// no envelope is built, so the request reaches no upstream. TargetHost is
+// never left empty on such a Layer. Independent of
+// WithForwardProxyOriginForm (forward_as_received routes per request
+// too). Ignored on Receive-direction Layers.
+func WithForwardTargetResolver(resolve ForwardTargetResolver, refusal []byte) Option {
+	return func(o *options) {
+		o.forwardTarget = resolve
+		o.forwardTargetRefusal = append([]byte(nil), refusal...)
+	}
+}
+
+// refuseForwardTarget answers a parsed request whose forward target could
+// not be resolved with the Layer's forwardTargetRefusal and closes the
+// connection (rejectRequestHead: bounded write, half-close, linger), then
+// returns the *RequestHeadError describing it so the consumer records the
+// request (USK-1410). Raw is the captured header section; the body, if
+// any, is never read into an envelope.
+func (c *channel) refuseForwardTarget(rawReq *parser.RawRequest, cause error) error {
+	head := &RequestHeadError{
+		Reason:        RequestHeadForwardTargetInvalid,
+		Phase:         RequestHeadPhaseHeaders,
+		Scheme:        c.scheme,
+		Raw:           rawReq.RawBytes,
+		RawTruncated:  rawReq.Truncated,
+		Method:        rawReq.Method,
+		RequestTarget: rawReq.RequestURI,
+		Proto:         rawReq.Proto,
+		Headers:       rawReq.Headers,
+		Status:        400,
+		Started:       time.Now(),
+		Err:           fmt.Errorf("http1: forward target: %w", cause),
+	}
+	head.Path, head.RawQuery, head.Authority = parseRequestURI(rawReq.RequestURI, rawReq.Headers)
+	slog.Debug("http1: forward request names no routable target; answering 400 and closing",
+		"conn_id", c.ctxTmpl.ConnID, "error", cause)
+	head.Response, head.ResponseWritten = c.layer.rejectRequestHead(c.layer.opts.forwardTargetRefusal)
+	return head
 }
 
 // setForwardOriginForm records the forward-proxy egress decision on a
