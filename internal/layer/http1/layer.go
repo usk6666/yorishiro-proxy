@@ -139,6 +139,11 @@ type options struct {
 	// WithResponseBodyMode.
 	responseBodyMode layer.BodyModeFunc
 
+	// requestBodyMode decides, per request, whether its body is buffered
+	// or streamed (USK-1414). nil buffers every body. See
+	// WithRequestBodyMode.
+	requestBodyMode layer.BodyModeFunc
+
 	// forwardOriginForm enables the plain-HTTP forward-proxy egress form
 	// on requests this (client-facing) Layer parses. See
 	// WithForwardProxyOriginForm.
@@ -305,6 +310,26 @@ func WithStreamingResponseDetect(predicate StreamingResponsePredicate) Option {
 // Send-direction Layers.
 func WithResponseBodyMode(fn layer.BodyModeFunc) Option {
 	return func(o *options) { o.responseBodyMode = fn }
+}
+
+// WithRequestBodyMode installs the body-mode predicate a Send-direction
+// (client-facing) Layer consults for every request whose head framed body
+// bytes (chunked, or Content-Length > 0), after the head was parsed and
+// before any body byte is read (USK-1414, RFC-001 §3.2.1 "HTTP body
+// streaming"). It is not consulted — the body is buffered — for a request
+// without body bytes and for gRPC-Web (Content-Type application/grpc-web*).
+//
+// For layer.BodyStream the request Envelope is emitted after the header
+// section with HTTPMessage.BodyStream set; the body is read while the
+// upstream HTTP/1.x Channel forwards it, writing the client's body wire
+// bytes verbatim. The next request on the connection is parsed only after
+// that body ended cleanly; a body that ended any other way (closed unread,
+// client cut, framing error) ends the connection. For
+// layer.BodyBufferUpTo the body is buffered when it is at most Limit bytes
+// and streamed otherwise. A nil fn (the default) buffers every body.
+// Ignored on Receive-direction Layers.
+func WithRequestBodyMode(fn layer.BodyModeFunc) Option {
+	return func(o *options) { o.requestBodyMode = fn }
 }
 
 // IsSSEResponse is the canonical predicate for [WithStreamingResponseDetect].

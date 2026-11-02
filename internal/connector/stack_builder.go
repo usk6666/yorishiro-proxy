@@ -194,6 +194,13 @@ type BuildConfig struct {
 	// (proxybuild.NewHTTPBodyModeFunc). nil buffers every body.
 	ResponseBodyMode layer.BodyModeFunc
 
+	// RequestBodyMode is the body-mode predicate threaded into every
+	// client-facing HTTP/1.x Layer via http1.WithRequestBodyMode
+	// (USK-1414): it decides per request whether the body is buffered or
+	// forwarded upstream while it is read. proxybuild sets it to the same
+	// predicate as ResponseBodyMode. nil buffers every request body.
+	RequestBodyMode layer.BodyModeFunc
+
 	// MaxRawCaptureSize caps per-message HTTP/1.x raw-bytes capture in
 	// memory mode (header section + RawBody when body spill is not active).
 	// Zero means the layer's internal default

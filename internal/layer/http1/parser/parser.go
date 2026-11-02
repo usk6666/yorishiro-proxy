@@ -766,30 +766,62 @@ func shouldClose(headers RawHeaders, proto string) bool {
 // default (MaxRawCaptureSize); spill-mode capture honors the spill MaxSize
 // instead (USK-769 / USK-772).
 func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string, memoryCap int64) io.Reader {
-	// chunked Transfer-Encoding: decode the chunked body to plain data.
-	// HTTP/1.0 does not use chunked TE.
-	// Check ALL TE header values to avoid smuggling via multiple TE headers.
+	f := RequestFraming(headers, proto)
+	switch {
+	case f.Chunked:
+		// Decode the chunked body to plain data.
+		return newDechunkedReaderWithCap(r, memoryCap)
+	case f.ContentLength >= 0:
+		// Content-Length present: read exactly that many bytes.
+		return newContentLengthBodyReaderWithCap(r, f.ContentLength, memoryCap)
+	default:
+		// Invalid Content-Length, or neither Content-Length nor chunked TE:
+		// for requests no body is assumed (unlike responses, which use EOF).
+		return newIdentityBodyReaderWithCap(io.LimitReader(r, 0), memoryCap)
+	}
+}
+
+// BodyFraming is how a request frames its body on the wire (RFC 9112
+// §6.3), as resolveRequestBody reads it.
+type BodyFraming struct {
+	// Chunked reports a Transfer-Encoding header carrying the chunked
+	// token (any TE header; never on HTTP/1.0).
+	Chunked bool
+	// ContentLength is the parsed Content-Length when not chunked, or -1
+	// when the header is absent or does not parse (an invalid
+	// Content-Length frames an empty body).
+	ContentLength int64
+}
+
+// HasBody reports whether the framing can carry body bytes: chunked, or a
+// valid Content-Length greater than zero.
+func (f BodyFraming) HasBody() bool {
+	return f.Chunked || f.ContentLength > 0
+}
+
+// RequestFraming returns how a request with headers and proto frames its
+// body. It is the decision resolveRequestBody makes, exported so a caller
+// that must know whether a request carries a body (USK-1414 request body
+// streaming) reads the same rule instead of re-deriving it from headers.
+func RequestFraming(headers RawHeaders, proto string) BodyFraming {
+	// HTTP/1.0 does not use chunked TE. Check ALL TE header values to
+	// avoid smuggling via multiple TE headers.
 	if proto != "HTTP/1.0" {
 		for _, te := range headers.Values("Transfer-Encoding") {
 			if hasChunkedTE(te) {
-				return newDechunkedReaderWithCap(r, memoryCap)
+				return BodyFraming{Chunked: true, ContentLength: -1}
 			}
 		}
 	}
-
-	// Content-Length present: read exactly that many bytes.
-	if cl := headers.Get("Content-Length"); cl != "" {
-		n, err := strconv.ParseInt(strings.TrimSpace(cl), 10, 64)
-		if err != nil || n < 0 {
-			// Invalid Content-Length: return empty body.
-			return newIdentityBodyReaderWithCap(io.LimitReader(r, 0), memoryCap)
-		}
-		return newContentLengthBodyReaderWithCap(r, n, memoryCap)
+	cl := headers.Get("Content-Length")
+	if cl == "" {
+		return BodyFraming{ContentLength: -1}
 	}
-
-	// No Content-Length, no chunked TE.
-	// For requests, no body is assumed (unlike responses which use EOF).
-	return newIdentityBodyReaderWithCap(io.LimitReader(r, 0), memoryCap)
+	n, err := strconv.ParseInt(strings.TrimSpace(cl), 10, 64)
+	if err != nil || n < 0 {
+		return BodyFraming{ContentLength: -1}
+	}
+	return BodyFraming{ContentLength: n}
 }
 
 // resolveResponseBody creates an appropriate body reader for a response.
