@@ -596,6 +596,8 @@ func buildTargetOverrideHTTPStack(
 		http1.WithRequestHeaderTimeout(cfg.ClientRequestHeadDeadline),
 		// USK-1185: keep-alive wait for the next request (client_idle_timeout_ms).
 		http1.WithKeepAliveIdleTimeout(cfg.ClientIdleDeadline),
+		// USK-1414: stream request bodies no rule / plugin needs whole.
+		http1.WithRequestBodyMode(cfg.RequestBodyMode),
 	)
 	stack.PushClient(clientLayer)
 

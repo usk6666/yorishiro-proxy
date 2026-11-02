@@ -346,6 +346,9 @@ type proxyOpts struct {
 	// streaming tests pass the production predicate
 	// (proxybuild.NewHTTPBodyModeFunc) built from the harness engines.
 	responseBodyMode layer.BodyModeFunc
+	// requestBodyMode is threaded into BuildConfig.RequestBodyMode
+	// (USK-1414). nil keeps every request body buffered.
+	requestBodyMode layer.BodyModeFunc
 }
 
 // startHTTPMITMProxy starts a FullListener configured for HTTP MITM (not
@@ -380,6 +383,7 @@ func startHTTPMITMProxy(
 		BodySpillThreshold: opts.bodySpillThreshold,
 		MaxBodySize:        opts.maxBodySize,
 		ResponseBodyMode:   opts.responseBodyMode,
+		RequestBodyMode:    opts.requestBodyMode,
 	}
 
 	onStack := func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {

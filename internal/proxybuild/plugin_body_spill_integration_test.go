@@ -299,7 +299,15 @@ register_hook("http", "on_response", h, phase="post_pipeline")
 				case <-time.After(10 * time.Second):
 					t.Fatal("upstream never received the request")
 				}
-				if !up.sawSpill.Load() {
+				// USK-1414: an HTTP/1.x request body is buffered (and spills
+				// above the threshold) only when something needs it whole —
+				// here an http on_request hook. Without one it is streamed to
+				// the upstream and never spills.
+				requestStreamed := proto == "h1" && !strings.Contains(r.script, `"on_request"`)
+				switch {
+				case requestStreamed && up.sawSpill.Load():
+					t.Fatalf("a spill file existed while the %d-byte request was forwarded; with no on_request hook an HTTP/1.x request body is streamed, never spilled", len(pluginSpillBody))
+				case !requestStreamed && !up.sawSpill.Load():
 					t.Fatalf("no spill file existed while the %d-byte request was forwarded; the body must spill above %d", len(pluginSpillBody), pluginSpillThreshold)
 				}
 

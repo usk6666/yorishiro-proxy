@@ -109,6 +109,8 @@ func BuildPlainHTTPStack(
 		http1.WithRequestHeaderTimeout(cfg.ClientRequestHeadDeadline),
 		// USK-1185: keep-alive wait for the next request (client_idle_timeout_ms).
 		http1.WithKeepAliveIdleTimeout(cfg.ClientIdleDeadline),
+		// USK-1414: stream request bodies no rule / plugin needs whole.
+		http1.WithRequestBodyMode(cfg.RequestBodyMode),
 	}
 	if o.forwardOriginForm {
 		clientOpts = append(clientOpts, http1.WithForwardProxyOriginForm())
