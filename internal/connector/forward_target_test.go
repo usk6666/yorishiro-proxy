@@ -33,7 +33,11 @@ var forwardTargetCases = []struct {
 	{name: "origin-form without Host refused", raw: "GET / HTTP/1.0\r\nUser-Agent: x\r\n\r\n", wantErr: true},
 	{name: "CONNECT refused", raw: "CONNECT b.example:443 HTTP/1.1\r\nHost: b.example:443\r\n\r\n", wantErr: true},
 	{name: "whitespace before colon is not Host", raw: "GET / HTTP/1.1\r\nHost : b.example\r\n\r\n", wantErr: true},
-	{name: "obs-fold Host refused", raw: "GET / HTTP/1.1\r\nHost: b.example\r\n c.example\r\n\r\n", wantErr: true},
+	// The parser folds the continuation into the value; the peek must see
+	// the same value (it used to stop at the first line). The folded name
+	// passes SplitTargetHostPort, as any unresolvable name does; the dial
+	// then fails.
+	{name: "obs-fold Host folded like the parser", raw: "GET / HTTP/1.1\r\nHost: b.example\r\n c.example\r\n\r\n", want: "b.example c.example:80"},
 }
 
 // parsedTargetOf runs raw through the HTTP/1 parser the client Layer uses
