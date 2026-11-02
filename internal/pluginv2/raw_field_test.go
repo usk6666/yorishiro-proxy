@@ -16,7 +16,7 @@ import (
 // dict (so callers can inspect mutation flags) and any error.
 func runHook(t *testing.T, env *envelope.Envelope, src string) (*MessageDict, error) {
 	t.Helper()
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +222,7 @@ def hook(msg):
 
 func TestFrozenDict_RejectsAllSetKey(t *testing.T) {
 	env := &envelope.Envelope{Message: &envelope.HTTPMessage{Method: "GET"}}
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}

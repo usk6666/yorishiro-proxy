@@ -25,7 +25,7 @@ func TestWSDict_AnomaliesReadOnlyAndKeptOnRebuild(t *testing.T) {
 	}
 	env := &envelope.Envelope{Message: m, Raw: []byte("WS")}
 
-	d, err := convertMessageToDict(env)
+	d, err := convertMessageToDict(env, defaultMaxPluginBodySize)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}

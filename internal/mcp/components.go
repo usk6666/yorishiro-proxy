@@ -222,6 +222,10 @@ type proxyManager interface {
 	// from non-Live BuildConfig paths that did not run the resolver.
 	// Boot-time only; no setter.
 	MaxBodySize() int64
+	// RecordMaxBodySize surfaces the record-only body cap
+	// (max_record_body_size, USK-1408), resolver-normalised on the Live
+	// wiring path. Boot-time only; no setter.
+	RecordMaxBodySize() int64
 	// BodySpillThreshold surfaces the body memory→disk spill threshold
 	// (USK-807). On the Live wiring path the returned value is
 	// resolver-normalised via config.ResolveBodySpillThreshold
@@ -527,6 +531,15 @@ type PluginEngine struct {
 // case plugin_introspect returns an empty list.
 func NewPluginEngine(pluginv2Engine *pluginv2.Engine) *PluginEngine {
 	return &PluginEngine{pluginv2: pluginv2Engine}
+}
+
+// maxBodySize returns the engine's plugin body cap (plugin_max_body_size,
+// USK-1408), or zero when no engine is bound.
+func (p *PluginEngine) maxBodySize() int64 {
+	if p == nil || p.pluginv2 == nil {
+		return 0
+	}
+	return p.pluginv2.MaxBodySize()
 }
 
 // Misc holds cross-cutting dependencies that do not fit a single domain

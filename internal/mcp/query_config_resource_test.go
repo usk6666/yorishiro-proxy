@@ -10,6 +10,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
@@ -237,6 +238,63 @@ func TestQuery_Config_ProtocolCaps_OmittedWhenZero(t *testing.T) {
 	} {
 		if _, present := raw[key]; present {
 			t.Errorf("expected JSON key %q to be OMITTED for zero value, raw[%q]=%v", key, key, raw[key])
+		}
+	}
+}
+
+// TestQuery_Config_BodyLimits_Populated pins the USK-1408 echo: query
+// config reports the resolved max_record_body_size (from the bound
+// BuildConfig) and plugin_max_body_size (from the pluginv2 Engine).
+func TestQuery_Config_BodyLimits_Populated(t *testing.T) {
+	t.Parallel()
+
+	const wantRecord int64 = 1024
+	const wantPlugin int64 = 2048
+
+	buildCfg := &connector.BuildConfig{RecordMaxBodySize: wantRecord}
+	manager := newTestProxybuildManagerWithBuildConfig(t, buildCfg)
+	eng := pluginv2.NewEngine(nil)
+	eng.SetMaxBodySize(wantPlugin)
+
+	ctx := context.Background()
+	s := newServer(ctx, newTestCA(t), newTestStore(t), manager, WithPluginv2Engine(eng))
+
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "test", Version: "v0.0.1"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	result := callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	textPart, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(textPart.Text), &raw); err != nil {
+		t.Fatalf("unmarshal raw JSON: %v", err)
+	}
+	for key, want := range map[string]int64{
+		"max_record_body_size": wantRecord,
+		"plugin_max_body_size": wantPlugin,
+	} {
+		got, ok := raw[key].(float64)
+		if !ok {
+			t.Errorf("JSON key %q missing or not a number, raw=%v", key, raw)
+			continue
+		}
+		if int64(got) != want {
+			t.Errorf("%s = %d, want %d", key, int64(got), want)
 		}
 	}
 }

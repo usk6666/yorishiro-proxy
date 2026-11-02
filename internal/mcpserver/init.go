@@ -434,6 +434,8 @@ func initCAAutoPersist(cfg *config.Config, logger *slog.Logger) (*cert.CA, error
 // tolerated without aborting the proxy).
 func InitPluginV2Engine(ctx context.Context, store *flow.SQLiteStore, proxyCfg *config.ProxyConfig, logger *slog.Logger) (*pluginv2.Engine, error) {
 	eng := pluginv2.NewEngine(logger)
+	// USK-1408: plugin_max_body_size — the largest HTTP body any hook sees.
+	eng.SetMaxBodySize(config.ResolvePluginMaxBodySize(proxyCfg))
 	if err := eng.SetDB(ctx, store.DB()); err != nil {
 		eng.Close()
 		return nil, fmt.Errorf("init pluginv2 store: %w", err)
@@ -534,6 +536,9 @@ func NewLiveBuildConfig(
 	bc.GRPCMaxMessagesPerStream = config.ResolveGRPCMaxMessagesPerStream(proxyCfg.GRPC)
 	bc.SSEMaxEventsPerStream = config.ResolveSSEMaxEventsPerStream(proxyCfg.SSE)
 	bc.MaxBodySize = config.ResolveMaxBodySize(proxyCfg)
+	// USK-1408: record-only body cap, threaded to every listener's
+	// RecordStep via Deps.RecordMaxBodySize below.
+	bc.RecordMaxBodySize = config.ResolveMaxRecordBodySize(proxyCfg)
 	// USK-1013: default the upstream TLS fingerprint to firefox (camoufox
 	// coherence). Pass a nil cfg so the live-dial path keeps its proxyCfg-only
 	// contract (it has historically not consulted top-level cfg.TLSFingerprint,
@@ -681,6 +686,8 @@ func NewLiveManager(
 			// every listener built by this factory.
 			RecordGRPCMaxMessagesPerStream: buildCfg.GRPCMaxMessagesPerStream,
 			RecordSSEMaxEventsPerStream:    buildCfg.SSEMaxEventsPerStream,
+			// USK-1408: max_record_body_size.
+			RecordMaxBodySize: buildCfg.RecordMaxBodySize,
 			// USK-1000: shared HTTP/1.x upstream redial / replay counters.
 			H1UpstreamMetrics: h1Metrics,
 			// USK-1001: shared HTTP/2 upstream redial / refused-retry
