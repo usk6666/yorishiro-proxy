@@ -703,3 +703,47 @@ func TestProxybuild_ForwardRetarget_UnreachableTarget(t *testing.T) {
 	idB := sendStreamOf(t, store, "/two")
 	waitStreamUpdate(t, store, idB, "State=error", func(u flow.StreamUpdate) bool { return u.State == "error" })
 }
+
+// T16 after a switch (review F-2): A, then B, then an unresolvable
+// request. The 400 record names the upstream the connection was bound to
+// when the head failed — B, not the connection's first target A.
+func TestProxybuild_ForwardRetarget_UnresolvableAfterSwitchTagsCurrentTarget(t *testing.T) {
+	a := startRTUpstream(t, "A", 0)
+	b := startRTUpstream(t, "B", 0)
+	store, proxyAddr := startRetargetProxy(t, nil)
+	c, br := fwdDial(t, proxyAddr)
+
+	rtWrite(t, c, absGet(a.addr(), "/one"))
+	if r := readRTResponse(t, br); r.upstream != "A" {
+		t.Fatalf("first response = %+v, want A", r)
+	}
+	rtWrite(t, c, absGet(b.addr(), "/two"))
+	if r := readRTResponse(t, br); r.upstream != "B" {
+		t.Fatalf("second response = %+v, want B", r)
+	}
+	rtWrite(t, c, "GET /no-host HTTP/1.0\r\nUser-Agent: legacy\r\n\r\n")
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if r := readRTResponse(t, br); r.status != 400 {
+		t.Errorf("unresolvable request after a switch = %+v, want the proxy's 400", r)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var rec *flow.Stream
+		for _, st := range store.Streams() {
+			if st.State == "error" && st.FailureReason == "forward_target_invalid" {
+				rec = st
+			}
+		}
+		if rec != nil {
+			if got := rec.Tags["target"]; got != b.addr() {
+				t.Errorf("forward_target_invalid Stream tags.target = %q, want %q (current upstream B; A is %s)", got, b.addr(), a.addr())
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no Stream with State=error FailureReason=forward_target_invalid within 5s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
