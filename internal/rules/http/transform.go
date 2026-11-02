@@ -357,3 +357,9 @@ func CompileTransformRule(id string, priority int, direction RuleDirection, host
 
 	return rule, nil
 }
+
+// MatchesReplaceBody reports whether an enabled replace_body rule matches
+// env / msg in direction dir. Not implemented yet (USK-1409 scaffolding).
+func (e *TransformEngine) MatchesReplaceBody(env *envelope.Envelope, msg *envelope.HTTPMessage, dir envelope.Direction) bool {
+	return false
+}

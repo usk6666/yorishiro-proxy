@@ -16,6 +16,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
@@ -184,6 +185,14 @@ type BuildConfig struct {
 	// GRPCMaxMessagesPerStream it lives here so one resolved value drives
 	// every listener's RecordStep and the query config echo.
 	RecordMaxBodySize int64
+
+	// ResponseBodyMode is the body-mode predicate threaded into every
+	// upstream-facing HTTP/1.x Layer via http1.WithResponseBodyMode
+	// (USK-1409): it decides per final response whether the body is
+	// buffered (today's behaviour) or forwarded while it is read. proxybuild
+	// builds it from the live rule engines and the plugin engine
+	// (proxybuild.NewHTTPBodyModeFunc). nil buffers every body.
+	ResponseBodyMode layer.BodyModeFunc
 
 	// MaxRawCaptureSize caps per-message HTTP/1.x raw-bytes capture in
 	// memory mode (header section + RawBody when body spill is not active).

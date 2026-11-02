@@ -206,3 +206,7 @@ func (e *SafetyEngine) RuleCount() int {
 	defer e.mu.RUnlock()
 	return len(e.rules)
 }
+
+// HasBodyTarget reports whether any rule inspects the request body
+// (common.TargetBody). Not implemented yet (USK-1409 scaffolding).
+func (e *SafetyEngine) HasBodyTarget() bool { return false }

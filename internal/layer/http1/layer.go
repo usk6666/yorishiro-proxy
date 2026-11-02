@@ -134,6 +134,11 @@ type options struct {
 	maxRawCapture      int64
 	streamingDetect    StreamingResponsePredicate
 
+	// responseBodyMode decides, per final response, whether its body is
+	// buffered or streamed (USK-1409). nil buffers every body. See
+	// WithResponseBodyMode.
+	responseBodyMode layer.BodyModeFunc
+
 	// forwardOriginForm enables the plain-HTTP forward-proxy egress form
 	// on requests this (client-facing) Layer parses. See
 	// WithForwardProxyOriginForm.
@@ -271,6 +276,29 @@ func WithStateReleaser(r pluginv2.StateReleaser) Option {
 // CL-bounded drain would never return).
 func WithStreamingResponseDetect(predicate StreamingResponsePredicate) Option {
 	return func(o *options) { o.streamingDetect = predicate }
+}
+
+// WithResponseBodyMode installs the body-mode predicate a Receive-direction
+// (upstream-facing) Layer consults for every final response whose body it
+// would otherwise read whole (USK-1409, RFC-001 §3.2.1 "HTTP body
+// streaming"). It is consulted after the header section was parsed and
+// after the [WithStreamingResponseDetect] check (an SSE response never
+// reaches it). It is not consulted — the body is buffered — for 1xx / 101,
+// 204, 304, a response to HEAD, a response with no body bytes framed
+// (Content-Length: 0, or HTTP/1.1 without Content-Length / chunked /
+// Connection: close), and gRPC-Web (request or response Content-Type
+// application/grpc-web*).
+//
+// For layer.BodyStream the response Envelope is emitted with
+// HTTPMessage.BodyStream set and the body is read while the consumer
+// forwards it; an HTTP/1.x client Channel writes the upstream's body wire
+// bytes verbatim (chunk framing, extensions and trailers included). For
+// layer.BodyBufferUpTo the body is buffered when it is at most Limit bytes
+// and streamed otherwise. A nil fn (the default) buffers every body, which
+// is what MCP resend / fuzz and direct users of the Layer get. Ignored on
+// Send-direction Layers.
+func WithResponseBodyMode(fn layer.BodyModeFunc) Option {
+	return func(o *options) { o.responseBodyMode = fn }
 }
 
 // IsSSEResponse is the canonical predicate for [WithStreamingResponseDetect].
@@ -503,6 +531,7 @@ func (l *Layer) newChannelLocked() *channel {
 		ctxTmpl:         l.envCtx,
 		bodyOpts:        bodyOpts{spillDir: l.opts.bodySpillDir, spillThreshold: l.opts.bodySpillThreshold, maxBody: l.opts.maxBody, maxRawCapture: l.opts.maxRawCapture},
 		streamingDetect: l.opts.streamingDetect,
+		bodyMode:        l.opts.responseBodyMode,
 		stateReleaser:   l.opts.stateReleaser,
 		termDone:        make(chan struct{}),
 		responseReady:   make(chan responseDelivery, 4),

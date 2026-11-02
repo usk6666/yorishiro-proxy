@@ -401,6 +401,11 @@ type channel struct {
 	// [WithStreamingResponseDetect] / [Channel.DetachStreamingBody].
 	streamingDetect StreamingResponsePredicate
 
+	// bodyMode, when non-nil and direction == Receive, decides whether a
+	// final response's body is buffered or streamed (USK-1409). See
+	// [WithResponseBodyMode].
+	bodyMode layer.BodyModeFunc
+
 	// streamingBody holds the pending response body io.Reader after the
 	// predicate matched. detachStreamingBody claims it.
 	streamingBody io.Reader

@@ -160,6 +160,21 @@ type ChunkRecordSetter interface {
 	SetChunkRecordCallback(cb func(chunkRaw []byte), maxBytes int64)
 }
 
+// RawTapSetter is implemented by the parser's body readers (chunked and
+// identity). SetRawTap installs fn as a synchronous raw tap (USK-1409): from
+// then on every wire byte the reader consumes for the body — chunk-size
+// lines with their extensions, chunk data, CRLFs, the terminal chunk and the
+// trailer section, or the identity bytes — is passed to fn in wire order,
+// on the reading goroutine, before Read returns. The reader stops
+// accumulating its RawBody capture once a tap is installed; bytes captured
+// before the call stay available through RawBodyProvider.
+//
+// fn must not retain the slice. Unlike SetChunkRecordCallback the tap does
+// not buffer whole chunks, so it can forward a chunk before it ends.
+type RawTapSetter interface {
+	SetRawTap(fn func([]byte))
+}
+
 // Anomaly records a single protocol-level anomaly found during parsing.
 type Anomaly struct {
 	Type   AnomalyType
