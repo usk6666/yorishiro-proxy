@@ -237,6 +237,9 @@ func (l *Layer) handleWriteWindowUpdate(req *writeWindowUpdate) {
 		return
 	}
 	err := l.frameWriter.WriteWindowUpdate(req.streamID, req.increment)
+	if err == nil && l.opts.afterWindowUpdateWrite != nil {
+		l.opts.afterWindowUpdateWrite(req.streamID)
+	}
 	if err == nil && !req.skipLocalUpdate {
 		if req.streamID == 0 {
 			_ = l.conn.IncrementRecvWindow(req.increment)

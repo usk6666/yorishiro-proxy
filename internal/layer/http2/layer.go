@@ -89,6 +89,9 @@ type options struct {
 	// EventRecvHeaders transition. No production Option sets them.
 	beforeAcceptPeerStream  func(streamID uint32)
 	afterRegisterPeerStream func(streamID uint32)
+	// afterWindowUpdateWrite is a test seam run by the writer right after a
+	// WINDOW_UPDATE frame reached the socket. No production Option sets it.
+	afterWindowUpdateWrite func(streamID uint32)
 }
 
 // Option configures a Layer.

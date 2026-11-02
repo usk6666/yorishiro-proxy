@@ -164,6 +164,10 @@ func newChannel(l *Layer, h2Stream uint32) *channel {
 	return c
 }
 
+// queuedEvents reports how many received events are waiting for the
+// consumer. Test / diagnostic helper.
+func (c *channel) queuedEvents() int { return len(c.recv) }
+
 // Closed returns a channel closed when this Channel has reached its terminal
 // state. See layer.Channel for the contract.
 func (c *channel) Closed() <-chan struct{} { return c.termDone }
