@@ -256,7 +256,7 @@ type proxyStartResult struct {
 
 // registerProxyStart registers the proxy_start MCP tool.
 func (s *Server) registerProxyStart() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "proxy_start",
 		Description: "Start (or initialize) a proxy listener with HTTP/HTTPS/SOCKS5 MITM (default 127.0.0.1:8080; non-loopback binds such as 0.0.0.0 are allowed but expose an unauthenticated proxy). " +
 			"Intended for first-time startup / session initialization. " +

@@ -106,7 +106,7 @@ var availableGRPCSchemaActions = []string{"register", "list", "unregister", "cle
 
 // registerGRPCSchema wires the grpc_schema MCP tool.
 func (s *Server) registerGRPCSchema() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "grpc_schema",
 		Description: "Manage .proto schemas for schema-aware gRPC decode (query) and encode (resend_grpc). " +
 			"Actions: 'register' (upsert a service from either a precompiled FileDescriptorSet via " +

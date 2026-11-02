@@ -41,7 +41,7 @@ var availableMacroActions = []string{"define_macro", "run_macro", "delete_macro"
 
 // registerMacro registers the macro MCP tool.
 func (s *Server) registerMacro() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "macro",
 		Description: "Define and execute multi-step macro workflows for chained security testing. " +
 			"Actions: 'define_macro' (upsert, with steps, extraction rules, and guards), " +

@@ -151,7 +151,7 @@ type fuzzHTTPVariantRow struct {
 
 // registerFuzzHTTP wires the fuzz_http tool into the MCP server.
 func (s *Server) registerFuzzHTTP() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "fuzz_http",
 		Description: "Synchronously fuzz an HTTP request. Schema mirrors resend_http plus a positions[] list — " +
 			"each position is a typed path (method | scheme | authority | path | raw_query | body | " +

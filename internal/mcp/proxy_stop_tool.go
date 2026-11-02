@@ -27,7 +27,7 @@ type proxyStopResult struct {
 
 // registerProxyStop registers the proxy_stop MCP tool.
 func (s *Server) registerProxyStop() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "proxy_stop",
 		Description: "Stop a named proxy listener (or all running listeners when 'name' is omitted). " +
 			"Performs a graceful shutdown waiting for in-flight connections to complete. " +

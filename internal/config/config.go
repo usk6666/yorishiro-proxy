@@ -57,6 +57,9 @@ func (c *Config) Validate() error {
 	if err := c.validateExportDir(); err != nil {
 		return err
 	}
+	if err := c.validateMCPTools(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -262,6 +265,16 @@ type Config struct {
 	// not reachable from any MCP tool. Excluded from JSON serialization.
 	// CLI flag: -export-dir, env: YP_EXPORT_DIR.
 	ExportDir string `json:"-"`
+
+	// MCPTools is the allowlist of MCP tools the server exposes (USK-1120).
+	// nil (the default) exposes every tool. When set, only the named tools
+	// are registered: the rest are absent from tools/list and a tools/call
+	// to one fails as an unknown tool, on stdio and HTTP alike. Validate
+	// checks the shape (no empty element); the MCP server checks at boot
+	// that every name is a real tool. Startup-only: no MCP tool changes it.
+	// Excluded from JSON serialization.
+	// CLI flag: -mcp-tools (comma-separated), env: YP_MCP_TOOLS.
+	MCPTools []string `json:"-"`
 
 	// SafetyFilterEnabled controls whether the SafetyFilter engine is active.
 	// This can be set via CLI flag (-safety-filter) or environment variable

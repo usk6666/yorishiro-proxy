@@ -176,7 +176,7 @@ type fuzzGRPCVariantRow struct {
 
 // registerFuzzGRPC wires the fuzz_grpc tool into the MCP server.
 func (s *Server) registerFuzzGRPC() {
-	gomcp.AddTool(s.server, &gomcp.Tool{
+	addTool(s, &gomcp.Tool{
 		Name: "fuzz_grpc",
 		Description: "Synchronously fuzz a gRPC unary RPC. Schema mirrors resend_grpc plus a positions[] list — " +
 			"each position is a typed path (service | method | metadata[N].name | metadata[N].value | " +
