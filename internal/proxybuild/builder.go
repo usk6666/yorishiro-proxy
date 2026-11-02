@@ -457,6 +457,19 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	// configuration value owned by Deps.
 	deps.BuildConfig.PluginV2Engine = deps.PluginV2Engine
 
+	// USK-1409: the body-mode predicate every upstream-facing HTTP/1.x
+	// Layer consults per response — stream the body unless a live rule
+	// engine or plugin hook needs it whole. A caller-provided predicate
+	// (tests) is kept.
+	if deps.BuildConfig.ResponseBodyMode == nil {
+		deps.BuildConfig.ResponseBodyMode = NewHTTPBodyModeFunc(HTTPBodyModeEngines{
+			Safety:    deps.HTTPSafetyEngine,
+			Intercept: deps.HTTPInterceptEngine,
+			Transform: deps.HTTPTransformEngine,
+			Plugin:    deps.PluginV2Engine,
+		})
+	}
+
 	// Select / construct the per-route WireEncoderRegistries. Defaults
 	// register the 4 non-conflicting encoders (ws/grpc/grpc-web/sse) plus
 	// the route-appropriate HTTP encoder for envelope.ProtocolHTTP.

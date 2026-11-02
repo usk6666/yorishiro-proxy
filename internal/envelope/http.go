@@ -1,8 +1,6 @@
 package envelope
 
 import (
-	"io"
-
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 )
 
@@ -200,9 +198,13 @@ type HTTPMessage struct {
 	// Body is the message body. Nil when BodyStream is used instead.
 	Body []byte
 
-	// BodyStream is reserved for future streaming protocols (SSE, WebSocket).
-	// HTTP/1.x and HTTP/2 layers populate BodyBuffer instead.
-	BodyStream io.Reader
+	// BodyStream carries a body that is forwarded while it is read instead
+	// of being buffered first (RFC-001 §3.2.1 "HTTP body streaming"). When
+	// non-nil, Body and BodyBuffer are nil and the Envelope's Raw holds the
+	// header section only. Today only the HTTP/1.x Layer produces it, for
+	// responses its body-mode predicate decided to stream. It is a one-shot
+	// reader: the consumer that forwards the message owns it and Closes it.
+	BodyStream *BodyStream
 
 	// BodyBuffer holds the body when it exceeds BodySpillThreshold and is
 	// backed by a temp file (memory mode for smaller bodies is represented

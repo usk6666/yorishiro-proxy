@@ -206,3 +206,20 @@ func (e *SafetyEngine) RuleCount() int {
 	defer e.mu.RUnlock()
 	return len(e.rules)
 }
+
+// HasBodyTarget reports whether any rule inspects the request body
+// (common.TargetBody). The HTTP body-mode predicate keeps a request body
+// buffered while it is true, so streaming never exempts a request from the
+// Input Filter (USK-1409, RFC-001 §3.7).
+func (e *SafetyEngine) HasBodyTarget() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for i := range e.rules {
+		for _, t := range e.rules[i].Targets {
+			if t == common.TargetBody {
+				return true
+			}
+		}
+	}
+	return false
+}

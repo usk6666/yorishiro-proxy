@@ -47,6 +47,9 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 	}
 
 	opaque, _ := env.Opaque.(*opaqueHTTP1)
+	if msg.BodyStream != nil {
+		return encodeHeadOnly(env.Direction, msg, opaque)
+	}
 	switch env.Direction {
 	case envelope.Send:
 		if opaque != nil && opaque.rawReq != nil {
@@ -102,6 +105,31 @@ func encodeResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byt
 		return appendRawBody(head, opaque.rawResp.RawBody, opaque.rawResp.RawBodyBuffer)
 	}
 	return assembleWithBody(head, msg)
+}
+
+// encodeHeadOnly renders only the header section of a message whose body
+// is a BodyStream (USK-1409): the body is forwarded while it is read and is
+// not available here. Returns envelope.ErrPartialWireBytes with the head;
+// RecordStep appends the body's observed wire bytes once it ended.
+func encodeHeadOnly(dir envelope.Direction, msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte, error) {
+	var head []byte
+	var err error
+	switch {
+	case dir == envelope.Receive && opaque != nil && opaque.rawResp != nil:
+		h, _ := opaqueResponseHead(msg, opaque)
+		head = bytes.Clone(h)
+	case dir == envelope.Send && opaque != nil && opaque.rawReq != nil:
+		h, _ := opaqueRequestHead(msg, opaque)
+		head = bytes.Clone(h)
+	case dir == envelope.Receive:
+		head, err = encodeResponseSynthetic(msg)
+	default:
+		head, err = encodeRequestSynthetic(msg)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return head, envelope.ErrPartialWireBytes
 }
 
 // appendRawBody concatenates headerBytes and the wire body bytes. When

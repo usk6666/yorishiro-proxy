@@ -134,6 +134,11 @@ type options struct {
 	maxRawCapture      int64
 	streamingDetect    StreamingResponsePredicate
 
+	// responseBodyMode decides, per final response, whether its body is
+	// buffered or streamed (USK-1409). nil buffers every body. See
+	// WithResponseBodyMode.
+	responseBodyMode layer.BodyModeFunc
+
 	// forwardOriginForm enables the plain-HTTP forward-proxy egress form
 	// on requests this (client-facing) Layer parses. See
 	// WithForwardProxyOriginForm.
@@ -271,6 +276,29 @@ func WithStateReleaser(r pluginv2.StateReleaser) Option {
 // CL-bounded drain would never return).
 func WithStreamingResponseDetect(predicate StreamingResponsePredicate) Option {
 	return func(o *options) { o.streamingDetect = predicate }
+}
+
+// WithResponseBodyMode installs the body-mode predicate a Receive-direction
+// (upstream-facing) Layer consults for every final response whose body it
+// would otherwise read whole (USK-1409, RFC-001 §3.2.1 "HTTP body
+// streaming"). It is consulted after the header section was parsed and
+// after the [WithStreamingResponseDetect] check (an SSE response never
+// reaches it). It is not consulted — the body is buffered — for 1xx / 101,
+// 204, 304, a response to HEAD, a response with no body bytes framed
+// (Content-Length: 0, or HTTP/1.1 without Content-Length / chunked /
+// Connection: close), and gRPC-Web (request or response Content-Type
+// application/grpc-web*).
+//
+// For layer.BodyStream the response Envelope is emitted with
+// HTTPMessage.BodyStream set and the body is read while the consumer
+// forwards it; an HTTP/1.x client Channel writes the upstream's body wire
+// bytes verbatim (chunk framing, extensions and trailers included). For
+// layer.BodyBufferUpTo the body is buffered when it is at most Limit bytes
+// and streamed otherwise. A nil fn (the default) buffers every body, which
+// is what MCP resend / fuzz and direct users of the Layer get. Ignored on
+// Send-direction Layers.
+func WithResponseBodyMode(fn layer.BodyModeFunc) Option {
+	return func(o *options) { o.responseBodyMode = fn }
 }
 
 // IsSSEResponse is the canonical predicate for [WithStreamingResponseDetect].
@@ -503,6 +531,7 @@ func (l *Layer) newChannelLocked() *channel {
 		ctxTmpl:         l.envCtx,
 		bodyOpts:        bodyOpts{spillDir: l.opts.bodySpillDir, spillThreshold: l.opts.bodySpillThreshold, maxBody: l.opts.maxBody, maxRawCapture: l.opts.maxRawCapture},
 		streamingDetect: l.opts.streamingDetect,
+		bodyMode:        l.opts.responseBodyMode,
 		stateReleaser:   l.opts.stateReleaser,
 		termDone:        make(chan struct{}),
 		responseReady:   make(chan responseDelivery, 4),
@@ -782,7 +811,7 @@ func (l *Layer) receiveOne(head *channel) bool {
 		return false
 	}
 
-	env, isInformational, truncated, perr := head.parseResponse()
+	env, isInformational, truncated, stream, perr := head.parseResponse()
 	if perr != nil {
 		if errors.Is(perr, io.EOF) && head.requestSent.Load() {
 			// USK-1229: the upstream closed after a request was written
@@ -827,6 +856,9 @@ func (l *Layer) receiveOne(head *channel) bool {
 		// request.
 		l.retire()
 	}
+	if stream != nil {
+		return l.receiveStreamed(head, env, stream)
+	}
 	head.deliverResponse(env, nil)
 	if isInformational {
 		return true
@@ -835,6 +867,40 @@ func (l *Layer) receiveOne(head *channel) bool {
 	if head.connClosed || l.isDetached() || l.retired.Load() {
 		// Peer signalled connection-close (or the Layer was retired);
 		// remaining pendings are futile.
+		l.failPending(io.EOF)
+		return false
+	}
+	return true
+}
+
+// receiveStreamed delivers a final response whose body is streamed
+// (USK-1409) and waits until that body ended before the receive loop may
+// parse anything else from the conn: the body is read from the shared
+// bufio.Reader by the consumer's goroutine (the Channel that forwards it),
+// so the loop must stay off the reader meanwhile. head stays in pendingQ
+// until then, which also keeps HealthCheck from probing the conn mid-body.
+// An abnormal end (upstream cut, framing error, body closed unread) marked
+// the Layer dead; every exchange pipelined behind head then fails.
+func (l *Layer) receiveStreamed(head *channel, env *envelope.Envelope, stream *h1BodySource) bool {
+	if !head.deliverResponse(env, nil) {
+		// Nobody will read the body: the exchange was closed first.
+		_ = stream.bs.Close()
+	}
+	select {
+	case <-stream.done:
+	case <-l.closed:
+		return false
+	}
+	_ = l.popPending()
+	if l.dead.Load() {
+		var err error = errUpstreamDead
+		if se := head.postFinalErr.Load(); se != nil {
+			err = se
+		}
+		l.failPending(err)
+		return false
+	}
+	if l.isDetached() || l.retired.Load() {
 		l.failPending(io.EOF)
 		return false
 	}
@@ -916,6 +982,9 @@ func (l *Layer) Close() error {
 			// .Close) does not turn into a "send on closed channel" panic.
 			ch.markTerminated(io.EOF)
 			ch.closeResponseReady()
+			// USK-1409: end a streamed body still pending on the closed
+			// conn so its consumer and recorder see the end.
+			ch.closeBodyStream()
 		}
 		l.activeMu.RLock()
 		active := l.active

@@ -401,6 +401,11 @@ type channel struct {
 	// [WithStreamingResponseDetect] / [Channel.DetachStreamingBody].
 	streamingDetect StreamingResponsePredicate
 
+	// bodyMode, when non-nil and direction == Receive, decides whether a
+	// final response's body is buffered or streamed (USK-1409). See
+	// [WithResponseBodyMode].
+	bodyMode layer.BodyModeFunc
+
 	// streamingBody holds the pending response body io.Reader after the
 	// predicate matched. detachStreamingBody claims it.
 	streamingBody io.Reader
@@ -514,6 +519,16 @@ type channel struct {
 	// responses are bodyless). Atomic because the parse can start before
 	// the Send (Next-before-Send registration).
 	requestMethod atomic.Pointer[string]
+
+	// requestContentType is the Content-Type of the request sendRequest
+	// wrote; a gRPC-Web request keeps its response buffered (USK-1409).
+	requestContentType atomic.Pointer[string]
+
+	// bodyStream is the streamed body of this exchange's final response
+	// (USK-1409), set by the receive loop before the head is delivered.
+	// Close / Layer.Close end it so an unclaimed body never pins the
+	// receive loop.
+	bodyStream atomic.Pointer[envelope.BodyStream]
 
 	// USK-721: priorRespWasInformational tracks whether the previous response
 	// emitted on this Channel was 1xx, so the next response advances Sequence.
@@ -830,12 +845,15 @@ func (c *channel) nextReceive(ctx context.Context) (*envelope.Envelope, error) {
 // so any send-select blocked here observes termDone first, releases the
 // lock, and lets close proceed — no deadlock. Mirrors HTTP/2 deliverEnvelope
 // (USK-739/USK-740).
-func (c *channel) deliverResponse(env *envelope.Envelope, err error) {
+//
+// It reports whether env was handed to the Channel (false when the Channel
+// was already closed, or for an error delivery).
+func (c *channel) deliverResponse(env *envelope.Envelope, err error) bool {
 	if err != nil {
 		c.responseReadyMu.Lock()
 		if c.responseReadyClosed.Load() {
 			c.responseReadyMu.Unlock()
-			return
+			return false
 		}
 		select {
 		case c.responseReady <- responseDelivery{err: err}:
@@ -843,31 +861,32 @@ func (c *channel) deliverResponse(env *envelope.Envelope, err error) {
 		}
 		c.responseReadyMu.Unlock()
 		c.closeResponseReady()
-		return
+		return false
 	}
 	c.responseReadyMu.Lock()
 	// Re-check under the lock; Close() may have closed responseReady between
 	// the producer's entry and lock acquisition.
 	if c.responseReadyClosed.Load() {
 		c.responseReadyMu.Unlock()
-		return
+		return false
 	}
 	select {
 	case c.responseReady <- responseDelivery{env: env}:
 	case <-c.termDone:
 		c.responseReadyMu.Unlock()
-		return
+		return false
 	}
 	c.responseReadyMu.Unlock()
 	if env == nil {
 		c.closeResponseReady()
-		return
+		return true
 	}
 	if msg, ok := env.Message.(*envelope.HTTPMessage); ok {
 		if msg.Status < 100 || msg.Status >= 200 {
 			c.closeResponseReady()
 		}
 	}
+	return true
 }
 
 // closeResponseReady idempotently closes c.responseReady. Acquires
@@ -934,7 +953,17 @@ func (c *channel) Close() error {
 	c.markTerminated(io.EOF)
 	c.closeResponseReady()
 	c.tryReleaseIdleReader()
+	c.closeBodyStream()
 	return nil
+}
+
+// closeBodyStream ends this exchange's streamed response body, if any
+// (USK-1409). A body already read to its end is unaffected; an unread one
+// is abandoned and the Layer marked dead (its conn is mid-body).
+func (c *channel) closeBodyStream() {
+	if bs := c.bodyStream.Load(); bs != nil {
+		_ = bs.Close()
+	}
 }
 
 // Closed returns a channel closed when this Channel has reached its terminal
@@ -1262,7 +1291,11 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 // for the final response). truncated is true when the upstream closed the
 // connection before the response body was complete (USK-1229); the
 // envelope then carries the bytes received and AnomalyTruncatedBody.
-func (c *channel) parseResponse() (env *envelope.Envelope, isInformational, truncated bool, err error) {
+//
+// stream is non-nil when the body is streamed (USK-1409, [WithResponseBodyMode]):
+// env then carries HTTPMessage.BodyStream and the body is read by its
+// consumer; the caller must not parse the next response before stream.done.
+func (c *channel) parseResponse() (env *envelope.Envelope, isInformational, truncated bool, stream *h1BodySource, err error) {
 	rawResp, err := parser.ParseResponseWithOptions(c.layer.reader, parser.ParseOptions{
 		MaxRawCapture: c.bodyOpts.maxRawCapture,
 		// USK-1229 review F-1: the paired request's method makes a HEAD
@@ -1273,23 +1306,22 @@ func (c *channel) parseResponse() (env *envelope.Envelope, isInformational, trun
 	})
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil, false, false, io.EOF
+			return nil, false, false, nil, io.EOF
 		}
-		return nil, false, false, fmt.Errorf("http1: parse response: %w", err)
+		return nil, false, false, nil, fmt.Errorf("http1: parse response: %w", err)
 	}
 
-	// Streaming-body bypass (USK-655): when the configured predicate matches
-	// (e.g. text/event-stream), emit the response Envelope with empty body
-	// and stash the still-open body reader on the channel for the swap
-	// orchestrator to claim via detachStreamingBody. Streaming responses
-	// are by definition final.
-	if c.streamingDetect != nil && c.streamingDetect(rawResp) {
-		return c.buildStreamingResponseEnvelope(rawResp), false, false, nil
-	}
-
-	bb, body, anomalies, trailers, err := c.assembleResponseBody(rawResp)
+	unbuffered, prefix, err := c.unbufferedResponse(rawResp)
 	if err != nil {
-		return nil, false, false, err
+		return nil, false, false, nil, err
+	}
+	if unbuffered != nil {
+		return unbuffered.env, false, false, unbuffered.src, nil
+	}
+
+	bb, body, anomalies, trailers, err := c.assembleResponseBody(rawResp, prefix)
+	if err != nil {
+		return nil, false, false, nil, err
 	}
 	truncAnomaly, truncated := bodyTruncationAnomaly(rawResp.Body)
 	if truncated {
@@ -1360,7 +1392,25 @@ func (c *channel) parseResponse() (env *envelope.Envelope, isInformational, trun
 	}
 
 	c.recordEmittedFlowID(env.FlowID)
-	return env, isInformational, truncated, nil
+	return env, isInformational, truncated, nil, nil
+}
+
+// unbufferedResponse handles the responses whose body is not drained here:
+// the SSE bypass first (USK-655: when the configured predicate matches,
+// e.g. text/event-stream, the Envelope is emitted with an empty body and
+// the still-open body reader is stashed for the swap orchestrator to claim
+// via detachStreamingBody; such responses are by definition final), then
+// the USK-1409 body mode (src non-nil for a streamed body). prefix is the
+// body a BufferUpTo probe read when it fit; the caller buffers it.
+func (c *channel) unbufferedResponse(rawResp *parser.RawResponse) (out *streamedResponse, prefix *probedBody, err error) {
+	if c.streamingDetect != nil && c.streamingDetect(rawResp) {
+		return &streamedResponse{env: c.buildStreamingResponseEnvelope(rawResp)}, nil, nil
+	}
+	prefix, streamed, err := c.maybeStreamResponse(rawResp)
+	if err != nil {
+		return nil, nil, err
+	}
+	return streamed, prefix, nil
 }
 
 // buildStreamingResponseEnvelope assembles the response Envelope for the
@@ -1510,6 +1560,8 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	c.ctxTmpl.RequestMethod = msg.Method
 	method := msg.Method
 	c.requestMethod.Store(&method)
+	reqCT := headerKVValue(msg.Headers, "Content-Type")
+	c.requestContentType.Store(&reqCT)
 	c.ctxTmpl.RequestRawQuery = msg.RawQuery
 	c.ctxTmpl.RequestAuthority = msg.Authority
 
@@ -1561,6 +1613,9 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 }
 
 func (c *channel) sendResponse(msg *envelope.HTTPMessage, env *envelope.Envelope) error {
+	if msg.BodyStream != nil {
+		return c.sendResponseStreamed(msg, env)
+	}
 	opaque, _ := env.Opaque.(*opaqueHTTP1)
 
 	var err error
@@ -2368,6 +2423,28 @@ func concatWireBytes(headerBytes, bodyBytes []byte) []byte {
 	return out
 }
 
+// drainResponseBody reads the response body into memory or a spilled
+// BodyBuffer (readBodyWithThreshold), continuing behind a BufferUpTo probe
+// when there is one. On error a probe's spilled copy is released.
+func (c *channel) drainResponseBody(r io.Reader, probe *probedBody) (*bodybuf.BodyBuffer, []byte, error) {
+	switch {
+	case probe == nil:
+		return readBodyWithThreshold(r, c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
+	case probe.ended:
+		return probe.bb, probe.body, nil
+	case probe.bb != nil:
+		bb := probe.bb
+		if _, err := io.Copy(bb, r); err != nil {
+			_ = bb.Release()
+			return nil, nil, bodyWriteErr(err)
+		}
+		return bb, nil, nil
+	default:
+		return readBodyWithThreshold(io.MultiReader(bytes.NewReader(probe.body), r),
+			c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
+	}
+}
+
 // assembleResponseBody drains the body, configures USK-772 disk-spill, and
 // returns the dechunked-body BodyBuffer/bytes plus the anomalies and
 // trailers that the caller must merge into the resulting HTTPMessage.
@@ -2375,13 +2452,16 @@ func concatWireBytes(headerBytes, bodyBytes []byte) []byte {
 // Pulled out of parseResponse to keep that function under the
 // gocyclo threshold (15) — the body extraction + anomaly accumulation
 // is a single logical concern.
-func (c *channel) assembleResponseBody(rawResp *parser.RawResponse) (*bodybuf.BodyBuffer, []byte, []envelope.Anomaly, []envelope.KeyValue, error) {
+//
+// probe holds body bytes already read from rawResp.Body by a USK-1409
+// BufferUpTo probe (nil when none). When the probe reached the body's end
+// it is the body as is; otherwise the rest of the body is read behind it.
+func (c *channel) assembleResponseBody(rawResp *parser.RawResponse, probe *probedBody) (*bodybuf.BodyBuffer, []byte, []envelope.Anomaly, []envelope.KeyValue, error) {
 	// USK-772: configure raw-body disk-spill on the parser body reader before
 	// drain. See parseRequest for rationale.
 	configureRawBodySpill(rawResp.Body, c.bodyOpts)
 
-	bb, body, err := readBodyWithThreshold(rawResp.Body,
-		c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
+	bb, body, err := c.drainResponseBody(rawResp.Body, probe)
 	if err != nil {
 		// USK-772: same rationale as parseRequest — release any spilled
 		// raw-body temp file the parser sink had already promoted before
