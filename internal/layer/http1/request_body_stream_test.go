@@ -190,19 +190,19 @@ func TestRequestStream_HeadBeforeBody_ForwardedVerbatim(t *testing.T) {
 	peerWrite(t, peer, head+"hello")
 
 	ch := nextChannelWithin(t, cl)
-	before := time.Now()
 	env := nextRequestWithin(t, ch, 2*time.Second)
 	msg := streamedMsg(t, env)
 	if string(env.Raw) != head || env.RawBuffer != nil {
 		t.Errorf("Envelope.Raw = %q (RawBuffer %v), want the header section only", env.Raw, env.RawBuffer != nil)
 	}
-	if env.Context.ReceivedAt.IsZero() || env.Context.ReceivedAt.After(before) {
-		t.Errorf("ReceivedAt = %v, want the header-arrival time (<= %v)", env.Context.ReceivedAt, before)
-	}
 
 	done := sendAsync(up.OpenExchange(), env)
 	wire.waitLen(t, len(head)+5)
+	bodyEnd := time.Now()
 	peerWrite(t, peer, "world")
+	if env.Context.ReceivedAt.IsZero() || !env.Context.ReceivedAt.Before(bodyEnd) {
+		t.Errorf("ReceivedAt = %v, want the header-arrival time (before the body end at %v)", env.Context.ReceivedAt, bodyEnd)
+	}
 	if err := waitErr(t, done); err != nil {
 		t.Fatalf("upstream Send: %v", err)
 	}
@@ -272,6 +272,12 @@ func TestRequestStream_PipelinedRequestsAfterBodyEnd(t *testing.T) {
 	streamedMsg(t, env1)
 	if err := waitErr(t, sendAsync(up.OpenExchange(), env1)); err != nil {
 		t.Fatalf("Send request 1: %v", err)
+	}
+	// Answer the first request: an unanswered one ends the connection
+	// (USK-1229), whatever its body did.
+	resp := &envelope.Envelope{Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP, Message: &envelope.HTTPMessage{Status: 204}}
+	if err := ch1.Send(context.Background(), resp); err != nil {
+		t.Fatalf("Send response 1: %v", err)
 	}
 	_ = ch1.Close()
 
