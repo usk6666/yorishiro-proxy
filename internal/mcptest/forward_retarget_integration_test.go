@@ -107,6 +107,54 @@ func TestE2E_ForwardRetarget_PathScopedDenyOnSwitchedTarget(t *testing.T) {
 	waitBlockedHTTPStreams(t, h, 1)
 }
 
+// T15 through the production SQLite store: a switch refused by the rate
+// limit is answered 429 by the proxy, and the request's Stream — already
+// recorded by the Pipeline — is updated to State=error,
+// blocked_by=rate_limit with the gate's audit tags.
+func TestE2E_ForwardRetarget_RateLimitRefusalRecorded(t *testing.T) {
+	a := startURIRecordingUpstream(t, false)
+	b := startURIRecordingUpstream(t, false)
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{
+		ConfigJSON: `{"target_scope_policy":{"rate_limits":{"max_requests_per_second":0.01}}}`,
+	})
+	proxyAddr := startProxyWithPassthrough(t, h)
+	c, br := dialForwardProxy(t, proxyAddr)
+
+	if code, _ := writeRawRequest(t, c, br, "GET http://"+a.addr+"/one HTTP/1.1\r\nHost: "+a.addr+"\r\n\r\n"); code != http.StatusOK {
+		t.Fatalf("first request = %d, want 200", code)
+	}
+	code, server := writeRawRequest(t, c, br, "GET http://"+b.addr+"/two HTTP/1.1\r\nHost: "+b.addr+"\r\n\r\n")
+	if code != http.StatusTooManyRequests || server != "yorishiro-proxy" {
+		t.Errorf("switch under an exhausted rate limit = %d (Server %q), want the proxy's 429", code, server)
+	}
+	if a.hits.Load() != 1 || b.hits.Load() != 0 {
+		t.Errorf("upstream hits A=%d B=%d, want 1 and 0", a.hits.Load(), b.hits.Load())
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		flows := queryHTTPFlows(t, h, map[string]any{"blocked_by": "rate_limit"})
+		if len(flows) == 1 {
+			id, _ := flows[0]["id"].(string)
+			detail := h.MustOK(t, "query", map[string]any{"resource": "flow", "id": id}).Decoded
+			if u, _ := detail["url"].(string); !strings.HasSuffix(u, "/two") {
+				t.Errorf("rate_limit Stream url = %q, want the /two request", u)
+			}
+			if st, _ := detail["state"].(string); st != "error" {
+				t.Errorf("rate_limit Stream state = %q, want error", st)
+			}
+			if tags, _ := detail["tags"].(map[string]any); tags["rate_limit_type"] != "global" || tags["via"] != "http1-forward" {
+				t.Errorf("rate_limit Stream tags = %v, want the gate's audit tags (rate_limit_type=global, via=http1-forward)", tags)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d http Streams with blocked_by=rate_limit after 5s, want 1", len(flows))
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 // T7: a connection admitted by an IP-literal allow does not lend that
 // admission to a later request naming an unlisted host: the request is
 // judged as a request to that host and refused. Guard: a later request to

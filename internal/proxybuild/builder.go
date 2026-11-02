@@ -1247,7 +1247,7 @@ func refuseForwardExchange(ctx context.Context, clientH1 *http1.Layer, opts sess
 	}
 	clientH1.RefuseExchange(refusal.Response)
 	if refusal.BlockedBy != "" && opts.OnPipelineDrop != nil && env != nil {
-		opts.OnPipelineDrop(pipeline.WithBlockAnnotations(ctx, refusal.Tags), env, refusal.BlockedBy)
+		opts.OnPipelineDrop(withStreamRecordedBeforeDrop(pipeline.WithBlockAnnotations(ctx, refusal.Tags)), env, refusal.BlockedBy)
 	}
 }
 
@@ -2710,7 +2710,7 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		// not abort the audit record.
 		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if uerr := writeDropStream(recordCtx, store, st, dropRetagProtocol(env.Protocol)); uerr != nil {
+		if uerr := writeDropStream(recordCtx, store, st, dropRetagProtocol(env.Protocol), streamRecordedBeforeDrop(ctx)); uerr != nil {
 			if logger != nil {
 				logger.Error("proxybuild: pipeline-drop stream save failed",
 					"listener", streamListenerName,
@@ -2724,11 +2724,33 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 	}
 }
 
+// streamRecordedKey marks a drop-recorder context whose envelope's Stream
+// row RecordStep already wrote (withStreamRecordedBeforeDrop).
+type streamRecordedKey struct{}
+
+// withStreamRecordedBeforeDrop returns ctx marked so the drop recorder
+// stamps the existing Stream row instead of attempting an INSERT first
+// (see writeDropStream's recorded parameter).
+func withStreamRecordedBeforeDrop(ctx context.Context) context.Context {
+	return context.WithValue(ctx, streamRecordedKey{}, true)
+}
+
+// streamRecordedBeforeDrop reports whether ctx carries that mark.
+func streamRecordedBeforeDrop(ctx context.Context) bool {
+	v, _ := ctx.Value(streamRecordedKey{}).(bool)
+	return v
+}
+
 // writeDropStream persists the drop recorder's audit Stream st (State,
 // BlockedBy and Tags already set) and returns the error of the final
 // write. retagProtocol is the Protocol written when an existing row is
 // updated (dropRetagProtocol).
-func writeDropStream(ctx context.Context, store flow.Writer, st *flow.Stream, retagProtocol string) error {
+//
+// recorded reports that the caller knows RecordStep already wrote the
+// Stream row (a refused forward retarget, USK-1410: the request passed the
+// whole Pipeline before the upstream switch was refused), so the row is
+// stamped directly like a plugin DROP's.
+func writeDropStream(ctx context.Context, store flow.Writer, st *flow.Stream, retagProtocol string, recorded bool) error {
 	// A plugin DROP was recorded by RecordStep inside RunDetailed before
 	// the recorder runs (USK-1393), so its Stream row normally exists
 	// already: stamp it directly. Attempting the INSERT first would fail
@@ -2736,7 +2758,7 @@ func writeDropStream(ctx context.Context, store flow.Writer, st *flow.Stream, re
 	// WARN for every plugin DROP. When the row is missing (no RecordStep
 	// wrote one) the SaveStream path below still creates it — Stream rows
 	// bypass capture_scope.
-	skipSave := st.BlockedBy == pipeline.BlockedByPlugin && streamRowExists(ctx, store, st.ID)
+	skipSave := (recorded || st.BlockedBy == pipeline.BlockedByPlugin) && streamRowExists(ctx, store, st.ID)
 	// Otherwise try SaveStream first. The common path (first Send dropped
 	// by HostScope/HTTPScope/Safety) has no prior Stream row, so this
 	// succeeds. For mid-stream Drops on streaming protocols (gRPC / WS
