@@ -145,6 +145,63 @@ func TestResolveMaxBodySize(t *testing.T) {
 	}
 }
 
+func TestResolveMaxRecordBodySize(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *ProxyConfig
+		want int64
+	}{
+		{name: "nil config → default", in: nil, want: MaxBodySize},
+		{name: "zero → default", in: &ProxyConfig{MaxRecordBodySize: 0}, want: MaxBodySize},
+		{name: "positive → input", in: &ProxyConfig{MaxRecordBodySize: 1024}, want: 1024},
+		{name: "negative → default", in: &ProxyConfig{MaxRecordBodySize: -1}, want: MaxBodySize},
+		// max_body_size is the forward cap; it does not move the record default.
+		{name: "max_body_size alone leaves the default", in: &ProxyConfig{MaxBodySize: 5 << 20}, want: MaxBodySize},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveMaxRecordBodySize(tt.in); got != tt.want {
+				t.Errorf("ResolveMaxRecordBodySize(%+v) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolvePluginMaxBodySize(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *ProxyConfig
+		want int64
+	}{
+		{name: "nil config → default", in: nil, want: 1 << 20},
+		{name: "zero → default", in: &ProxyConfig{PluginMaxBodySize: 0}, want: 1 << 20},
+		{name: "positive → input", in: &ProxyConfig{PluginMaxBodySize: 2048}, want: 2048},
+		{name: "negative → default", in: &ProxyConfig{PluginMaxBodySize: -1}, want: 1 << 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolvePluginMaxBodySize(tt.in); got != tt.want {
+				t.Errorf("ResolvePluginMaxBodySize(%+v) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProxyConfig_BodyLimitJSONKeys pins the config-file key names: a JSON
+// tag typo would leave the knob silently dead on the load path.
+func TestProxyConfig_BodyLimitJSONKeys(t *testing.T) {
+	var pc ProxyConfig
+	if err := json.Unmarshal([]byte(`{"max_record_body_size": 1024, "plugin_max_body_size": 2048}`), &pc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pc.MaxRecordBodySize != 1024 {
+		t.Errorf("MaxRecordBodySize = %d, want 1024", pc.MaxRecordBodySize)
+	}
+	if pc.PluginMaxBodySize != 2048 {
+		t.Errorf("PluginMaxBodySize = %d, want 2048", pc.PluginMaxBodySize)
+	}
+}
+
 func TestResolveMaxReplayResponseSize(t *testing.T) {
 	tests := []struct {
 		name string
@@ -223,6 +280,15 @@ func TestValidateProtocolLimits(t *testing.T) {
 		{name: "negative max_body_size rejected", cfg: &ProxyConfig{MaxBodySize: -1}, wantErr: "max_body_size must be >= 0"},
 		{name: "max_body_size at upper bound OK", cfg: &ProxyConfig{MaxBodySize: MaxBodySizeUpperBound}},
 		{name: "max_body_size above upper bound rejected", cfg: &ProxyConfig{MaxBodySize: MaxBodySizeUpperBound + 1}, wantErr: "max_body_size must be <="},
+		// USK-1408: the record-only and plugin body caps share max_body_size's shape.
+		{name: "max_record_body_size positive OK", cfg: &ProxyConfig{MaxRecordBodySize: 1024}},
+		{name: "negative max_record_body_size rejected", cfg: &ProxyConfig{MaxRecordBodySize: -1}, wantErr: "max_record_body_size must be >= 0"},
+		{name: "max_record_body_size at upper bound OK", cfg: &ProxyConfig{MaxRecordBodySize: MaxBodySizeUpperBound}},
+		{name: "max_record_body_size above upper bound rejected", cfg: &ProxyConfig{MaxRecordBodySize: MaxBodySizeUpperBound + 1}, wantErr: "max_record_body_size must be <="},
+		{name: "plugin_max_body_size positive OK", cfg: &ProxyConfig{PluginMaxBodySize: 2048}},
+		{name: "negative plugin_max_body_size rejected", cfg: &ProxyConfig{PluginMaxBodySize: -1}, wantErr: "plugin_max_body_size must be >= 0"},
+		{name: "plugin_max_body_size at upper bound OK", cfg: &ProxyConfig{PluginMaxBodySize: MaxBodySizeUpperBound}},
+		{name: "plugin_max_body_size above upper bound rejected", cfg: &ProxyConfig{PluginMaxBodySize: MaxBodySizeUpperBound + 1}, wantErr: "plugin_max_body_size must be <="},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

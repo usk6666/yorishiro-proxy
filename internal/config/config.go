@@ -949,6 +949,25 @@ type ProxyConfig struct {
 	// the bodybuf memory-then-spill BodyBuffer.
 	MaxBodySize int64 `json:"max_body_size,omitempty"`
 
+	// MaxRecordBodySize caps the body bytes the live RecordStep persists
+	// on a single flow (and the projected Flow.RawBytes BLOB). It is a
+	// record-only limit: traffic within MaxBodySize is still forwarded in
+	// full; only the recorded copy is cut, keeping its leading bytes and
+	// marking the flow (Flow.BodyTruncated for the L7 body, metadata
+	// http_anomaly_raw_body_truncated for the raw bytes). Zero (or
+	// omitted) selects MaxBodySize (254 MiB). Validation rejects negative
+	// values and values above MaxBodySizeUpperBound (1 GiB). USK-1408.
+	MaxRecordBodySize int64 `json:"max_record_body_size,omitempty"`
+
+	// PluginMaxBodySize caps the HTTP body size a pluginv2 hook may
+	// observe through msg["body"]. A message whose body is larger is not
+	// handed to the plugin at all (the hook is skipped and the message
+	// continues unchanged) — the plugin never sees a truncated body.
+	// Applies to every loaded plugin. Zero (or omitted) selects
+	// DefaultPluginMaxBodySize (1 MiB). Validation rejects negative values
+	// and values above MaxBodySizeUpperBound (1 GiB). USK-1408.
+	PluginMaxBodySize int64 `json:"plugin_max_body_size,omitempty"`
+
 	// RawPassthroughHosts is a list of "host:port" targets that bypass L7
 	// parsing. Traffic to these hosts is relayed as raw bytes through the
 	// ByteChunk layer, enabling HTTP request-smuggling diagnosis.

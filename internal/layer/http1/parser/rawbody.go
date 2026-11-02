@@ -49,8 +49,9 @@ type rawBodySpillConfig struct {
 //     prefix of MaxRawCaptureSize.
 //   - In spill mode: truncated=true means the body exceeded spill.maxSize.
 //     The spill.maxSize cap applies to the FULL body (memory prefix + file
-//     contents). The bodybuf returns ErrMaxSizeExceeded which we translate
-//     into truncated=true.
+//     contents). The file keeps exactly the leading spill.maxSize bytes
+//     (USK-1408; see writeFileWithCap) — the buffer is still returned by
+//     buffer() and owned by the consumer.
 //
 // The sink is single-writer-by-contract: the dechunkedReader / identityBody
 // Reader is the only goroutine that calls write during drain.
@@ -98,14 +99,7 @@ func (s *bodyCaptureSink) write(p []byte) {
 
 	// File-backed branch.
 	if s.bb != nil {
-		// bodybuf enforces maxSize internally; capture truncation if it
-		// trips. A truncated capture cannot recover, so we tear down the
-		// file (bodybuf does this on ErrMaxSizeExceeded) and stop
-		// accumulating.
-		if _, err := s.bb.Write(p); err != nil {
-			s.truncated = true
-			s.bb = nil
-		}
+		s.writeFileWithCap(p)
 		return
 	}
 
@@ -114,10 +108,7 @@ func (s *bodyCaptureSink) write(p []byte) {
 		newSize := int64(len(s.memBuf)) + int64(len(p))
 		if newSize > s.spill.threshold {
 			if err := s.promoteToFile(); err == nil {
-				if _, werr := s.bb.Write(p); werr != nil {
-					s.truncated = true
-					s.bb = nil
-				}
+				s.writeFileWithCap(p)
 				return
 			}
 			// promote failed — fall through to memory write capped by
@@ -138,6 +129,29 @@ func (s *bodyCaptureSink) write(p []byte) {
 // been promoted (or a previous promotion failed).
 func (s *bodyCaptureSink) canSpill() bool {
 	return s.spill.prefix != "" && !s.failedToPromote
+}
+
+// writeFileWithCap appends p to the disk-backed buffer, observing
+// spill.maxSize. USK-1408: a write that would cross the cap stores only the
+// bytes that still fit and latches truncated, so the buffer keeps exactly
+// the leading maxSize wire bytes instead of being torn down (bodybuf.Write
+// rejects an over-cap write whole and discards the file). A write error
+// also latches truncated; the buffer then holds whatever prefix reached
+// it, and stays owned by the consumer (RawBodyBuffer), which releases it.
+func (s *bodyCaptureSink) writeFileWithCap(p []byte) {
+	if limit := s.spill.maxSize; limit > 0 {
+		remaining := limit - s.bb.Len()
+		if int64(len(p)) > remaining {
+			if remaining > 0 {
+				_, _ = s.bb.Write(p[:remaining])
+			}
+			s.truncated = true
+			return
+		}
+	}
+	if _, err := s.bb.Write(p); err != nil {
+		s.truncated = true
+	}
 }
 
 // writeMemoryWithCap appends p to memBuf, observing cap. If cap is zero the

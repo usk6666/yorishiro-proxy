@@ -81,7 +81,7 @@ register_hook("http", "on_request", hook)
 // T2: every Dispatch-side fail-open source increments the counter once
 // with its own kind.
 func TestFailOpen_DispatchSources_CountedByKind(t *testing.T) {
-	bigBody := bytes.Repeat([]byte("b"), maxPluginBodySize+1)
+	bigBody := bytes.Repeat([]byte("b"), defaultMaxPluginBodySize+1)
 	cases := []struct {
 		name            string
 		protocol, event string
@@ -408,7 +408,7 @@ func TestFailOpen_EngineReasons_CarryNoEnvelopeContent(t *testing.T) {
 			body: `return None`,
 			env: func(t *testing.T) *envelope.Envelope {
 				env := sentinelHTTP(t)
-				env.Message.(*envelope.HTTPMessage).Body = append([]byte(sentinel), bytes.Repeat([]byte("b"), maxPluginBodySize)...)
+				env.Message.(*envelope.HTTPMessage).Body = append([]byte(sentinel), bytes.Repeat([]byte("b"), defaultMaxPluginBodySize)...)
 				return env
 			}},
 		{name: "DROP on grpc.on_data", protocol: ProtoGRPC, event: EventOnData,
