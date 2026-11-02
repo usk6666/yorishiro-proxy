@@ -240,7 +240,14 @@ func TestStreamMode_UpstreamCutMidBody(t *testing.T) {
 	if b := readExactlyWithin(t, msg.BodyStream, 5); string(b) != "first" {
 		t.Fatalf("prefix = %q", b)
 	}
-	_ = peer.Close()
+	// Half-close (FIN) rather than Close: closing a socket whose receive
+	// buffer still holds the unread request sends RST, which the parser
+	// does not classify as a truncated body.
+	tcp, ok := peer.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("peer is %T, want *net.TCPConn", peer)
+	}
+	_ = tcp.CloseWrite()
 	rest, err := io.ReadAll(msg.BodyStream)
 	if err == nil {
 		t.Fatalf("ReadAll after the cut returned nil error (rest %q)", rest)
