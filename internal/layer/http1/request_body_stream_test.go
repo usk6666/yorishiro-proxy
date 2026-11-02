@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -179,6 +180,27 @@ func assertChannelsEnd(t *testing.T, l *Layer) {
 	}
 }
 
+// answerExchange writes a final 204 response on the client Channel ch.
+func answerExchange(t *testing.T, ch layer.Channel) {
+	t.Helper()
+	resp := &envelope.Envelope{Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP, Message: &envelope.HTTPMessage{Status: 204}}
+	if err := ch.Send(context.Background(), resp); err != nil {
+		t.Fatalf("Send response: %v", err)
+	}
+}
+
+// readToEOF reads the client side of the connection until the proxy ends
+// it (EOF), bounded by 5s.
+func readToEOF(t *testing.T, conn net.Conn) string {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	b, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("client read %q, then %v; want the connection ended (EOF) within 5s", b, err)
+	}
+	return string(b)
+}
+
 // TestRequestStream_HeadBeforeBody_ForwardedVerbatim: the request head is
 // delivered while the body is pending; Envelope.Raw is the header section
 // only; the upstream Send writes the head, then the body as the client
@@ -303,6 +325,10 @@ func TestRequestStream_ClosedUnreadEndsConnection(t *testing.T) {
 	ch := nextChannelWithin(t, cl)
 	env := nextRequestWithin(t, ch, 2*time.Second)
 	msg := streamedMsg(t, env)
+	// Answer the exchange (a Pipeline Respond), so that only the unfinished
+	// body can end the connection: an unanswered exchange ends it by itself
+	// (USK-1229).
+	answerExchange(t, ch)
 	_ = ch.Close()
 	select {
 	case <-msg.BodyStream.Done():
@@ -346,7 +372,13 @@ func TestRequestStream_ClientCutMidBody(t *testing.T) {
 	if !errors.As(res.Err, &se) || se.Code != layer.ErrorAborted {
 		t.Errorf("result err = %v, want an aborted StreamError", res.Err)
 	}
+	// Answer the exchange, so that only the cut body can end the
+	// connection: an unanswered exchange ends it by itself (USK-1229).
+	answerExchange(t, ch)
 	_ = ch.Close()
+	if got := readToEOF(t, peer); !strings.HasPrefix(got, "HTTP/1.1 204") {
+		t.Errorf("client read %q, want the 204 response before the connection ended", got)
+	}
 	assertChannelsEnd(t, cl)
 }
 
