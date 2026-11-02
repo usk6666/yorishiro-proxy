@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -755,5 +757,293 @@ func TestStreamWindow_CloseReleasesQueue(t *testing.T) {
 	})
 	if body := expectComplete(t, acceptChannel(t, l)); string(body) != "ok" {
 		t.Fatalf("stream B body = %q, want %q", body, "ok")
+	}
+}
+
+// informationalHeaders encodes a 1xx response header block carrying one
+// large header, so a few blocks exceed a small stream window in bytes while
+// staying far below the per-stream event cap.
+func (p *wfPeer) informationalHeaders(size int) []byte {
+	return p.encoder.Encode([]hpack.HeaderField{
+		{Name: ":status", Value: "103"},
+		{Name: "link", Value: string(bytes.Repeat([]byte{'l'}, size))},
+	})
+}
+
+// writeHeaderBlock writes block on streamID as HEADERS (no END_STREAM)
+// followed by as many CONTINUATION frames as the default maximum frame size
+// requires.
+func writeHeaderBlock(wr *frame.Writer, streamID uint32, block []byte) error {
+	const maxFrame = frame.DefaultMaxFrameSize
+	first := block
+	if len(first) > maxFrame {
+		first = first[:maxFrame]
+	}
+	rest := block[len(first):]
+	if err := wr.WriteHeaders(streamID, false, len(rest) == 0, first); err != nil {
+		return err
+	}
+	for len(rest) > 0 {
+		n := len(rest)
+		if n > maxFrame {
+			n = maxFrame
+		}
+		if err := wr.WriteContinuation(streamID, n == len(rest), rest[:n]); err != nil {
+			return err
+		}
+		rest = rest[n:]
+	}
+	return nil
+}
+
+// openGET opens a client stream and sends a bodyless GET on it.
+func openGET(ctx context.Context, t *testing.T, l *Layer, path string) layer.Channel {
+	t.Helper()
+	ch, err := l.OpenStream(ctx)
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	if err := ch.Send(ctx, &envelope.Envelope{Direction: envelope.Send, Protocol: envelope.ProtocolHTTP,
+		Message: &H2HeadersEvent{Method: "GET", Scheme: "https", Authority: "example.com", Path: path, EndStream: true}}); err != nil {
+		t.Fatalf("Send HEADERS: %v", err)
+	}
+	return ch
+}
+
+// TestStreamWindow_QueuedHeaderBlockBudgetResetsStream: header blocks carry
+// no flow-control credit, so the bytes of the header blocks one stream
+// queues unread (here 1xx responses, which a peer may send any number of)
+// are bounded by a budget equal to the advertised stream window. A breach
+// resets the stream with ENHANCE_YOUR_CALM long before the event cap; the
+// consumer gets the queued events, then the stream error; siblings are
+// unaffected.
+func TestStreamWindow_QueuedHeaderBlockBudgetResetsStream(t *testing.T) {
+	l, p := startWindowPeer(t, startClientLayer, smallWindow())
+	ctx, cancel := context.WithTimeout(context.Background(), wfTimeout)
+	defer cancel()
+	chA := openGET(ctx, t, l, "/a")
+	chB := openGET(ctx, t, l, "/b")
+	idA, idB := chA.(*channel).H2StreamID(), chB.(*channel).H2StreamID()
+
+	// 32 blocks of ~10 KB raw + ~10 KB decoded each: ~640 KB of queued
+	// header bytes against a 65535-byte budget, and 32 events against a
+	// 1024-event cap.
+	const blocks = 32
+	peerDone := p.writeAsync(func(wr *frame.Writer) error {
+		for i := 0; i < blocks; i++ {
+			if err := wr.WriteHeaders(idA, false, true, p.informationalHeaders(10000)); err != nil {
+				return err
+			}
+		}
+		if err := wr.WriteHeaders(idB, false, true, p.statusHeaders()); err != nil {
+			return err
+		}
+		return wr.WriteData(idB, true, []byte("ok"))
+	})
+	if got := expectComplete(t, chB); string(got) != "ok" {
+		t.Fatalf("stream B body = %q, want %q", got, "ok")
+	}
+	if err := waitErr(peerDone); err != nil {
+		t.Fatalf("peer writes: %v", err)
+	}
+	frames := p.barrier(t, 1)
+	if code, ok := rstCode(frames, idA); !ok || code != ErrCodeEnhanceYourCalm {
+		t.Fatalf("frames %v: want RST_STREAM(%d, ENHANCE_YOUR_CALM)", summarize(frames), idA)
+	}
+	events := 0
+	for {
+		_, err := nextWithin(chA, wfTimeout)
+		if err == nil {
+			events++
+			continue
+		}
+		var se *layer.StreamError
+		if !errors.As(err, &se) {
+			t.Fatalf("stream A ended with %v after %d events, want *layer.StreamError", err, events)
+		}
+		break
+	}
+	if events == 0 || events >= blocks {
+		t.Errorf("stream A delivered %d events before the stream error, want between 1 and %d", events, blocks-1)
+	}
+}
+
+// TestStreamWindow_ReadingConsumerTakesManyLargeHeaderBlocks: the queued
+// header-block budget bounds what waits unread, not what a peer may send. A
+// consumer that takes each 1xx block as it arrives receives every one of
+// them, and the final response, with no reset — even when one block alone
+// is larger than the budget.
+func TestStreamWindow_ReadingConsumerTakesManyLargeHeaderBlocks(t *testing.T) {
+	l, p := startWindowPeer(t, startClientLayer, smallWindow())
+	ctx, cancel := context.WithTimeout(context.Background(), wfTimeout)
+	defer cancel()
+	ch := openGET(ctx, t, l, "/a")
+	id := ch.(*channel).H2StreamID()
+
+	const blocks = 32
+	for i := 0; i < blocks; i++ {
+		p.write(t, func(wr *frame.Writer) error {
+			return writeHeaderBlock(wr, id, p.informationalHeaders(40000))
+		})
+		env, err := nextWithin(ch, wfTimeout)
+		if err != nil {
+			t.Fatalf("1xx block %d: %v", i, err)
+		}
+		if h, ok := env.Message.(*H2HeadersEvent); !ok || h.Status != 103 {
+			t.Fatalf("1xx block %d: got %T, want 103 HEADERS", i, env.Message)
+		}
+	}
+	p.write(t, func(wr *frame.Writer) error {
+		if err := wr.WriteHeaders(id, false, true, p.statusHeaders()); err != nil {
+			return err
+		}
+		return wr.WriteData(id, true, []byte("ok"))
+	})
+	if got := expectComplete(t, ch); string(got) != "ok" {
+		t.Fatalf("body = %q, want %q", got, "ok")
+	}
+	if code, ok := rstCode(p.barrier(t, 1), id); ok {
+		t.Fatalf("stream reset with %s while its consumer kept reading", ErrCodeString(code))
+	}
+}
+
+// TestStreamWindow_RepeatedOverWindowDataResetsOnce: further over-window DATA
+// on a stream whose FLOW_CONTROL_ERROR reset is queued but not yet written
+// queues no second RST_STREAM; its connection credit is still returned.
+func TestStreamWindow_RepeatedOverWindowDataResetsOnce(t *testing.T) {
+	var armed atomic.Bool
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	hook := func(streamID uint32) {
+		if streamID != 0 || !armed.Load() {
+			return
+		}
+		first := false
+		once.Do(func() { first = true; close(reached) })
+		if first {
+			select {
+			case <-release:
+			case <-time.After(2 * wfTimeout):
+			}
+		}
+	}
+	l, p := startWindowPeer(t, startServerLayer, smallWindow(), withAfterWindowUpdateWrite(hook))
+	var relOnce sync.Once
+	releaseWriter := func() { relOnce.Do(func() { close(release) }) }
+	defer releaseWriter()
+
+	p.write(t, func(wr *frame.Writer) error {
+		if err := wr.WriteHeaders(1, false, true, p.requestHeaders("/a")); err != nil {
+			return err
+		}
+		for i := 0; i < 3; i++ { // 49152 of the 65535 window
+			if err := wr.WriteData(1, false, make([]byte, 16384)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	_ = acceptChannel(t, l)
+	_ = p.barrier(t, 1)
+
+	// Hold the writer right after the first over-window frame's connection
+	// WINDOW_UPDATE, so the RST_STREAM queued behind it is not yet written
+	// (the stream stays open) when the second over-window frame is read.
+	armed.Store(true)
+	p.write(t, func(wr *frame.Writer) error { return wr.WriteData(1, false, make([]byte, 16384)) })
+	select {
+	case <-reached:
+	case <-time.After(wfTimeout):
+		t.Fatal("writer hook not reached")
+	}
+	// The PING is read only after the second DATA frame has been handled.
+	p.write(t, func(wr *frame.Writer) error {
+		if err := wr.WriteData(1, false, make([]byte, 16384)); err != nil {
+			return err
+		}
+		return wr.WritePing(false, [8]byte{'h', 'a', 'n', 'd', 'l', 'e', 'd'})
+	})
+	releaseWriter()
+
+	frames := p.barrier(t, 2)
+	rsts := 0
+	for _, f := range frames {
+		if f.typ == frame.TypeRSTStream && f.streamID == 1 {
+			rsts++
+			if f.code != ErrCodeFlowControl {
+				t.Errorf("RST_STREAM code = %s, want FLOW_CONTROL_ERROR", ErrCodeString(f.code))
+			}
+		}
+	}
+	if rsts != 1 {
+		t.Errorf("frames %v: %d RST_STREAM on stream 1, want exactly 1", summarize(frames), rsts)
+	}
+	if got := windowUpdates(frames); got.connSum != 2*16384 {
+		t.Errorf("connection credit for the two over-window frames = %d, want %d", got.connSum, 2*16384)
+	}
+}
+
+// TestChannelNext_QueuedEventsPrecedeStreamError: when Next's wait picks the
+// stream error while events are queued, it must still return every queued
+// event first, then the error. In production the wait sees the queue
+// notification and the error ready at once when the reader queues the last
+// events and fails the stream between Next's empty pop and its select, and
+// select then picks either; that window is too narrow to hit reliably, so
+// the test queues the events without a notification, leaving the error as
+// the only thing that wakes the waiting Next.
+func TestChannelNext_QueuedEventsPrecedeStreamError(t *testing.T) {
+	l, _, cleanup := startServerLayer(t)
+	t.Cleanup(cleanup)
+	const iterations = 200
+	const events = 3
+	type result struct {
+		n   int
+		err error
+	}
+	for it := 0; it < iterations; it++ {
+		ch := newChannel(l, 1)
+		resc := make(chan result, 1)
+		go func() {
+			n := 0
+			for {
+				_, err := ch.Next(context.Background())
+				if err != nil {
+					resc <- result{n, err}
+					return
+				}
+				n++
+			}
+		}()
+		// Give Next the chance to park on the empty queue.
+		for i := 0; i < 4; i++ {
+			runtime.Gosched()
+		}
+		time.Sleep(20 * time.Microsecond)
+
+		// failStream's producer order: queued events, errCh, terminate,
+		// close the receive side. The events are queued without waking the
+		// consumer (see above).
+		ch.qMu.Lock()
+		for i := 0; i < events; i++ {
+			ch.q = append(ch.q, queuedEvent{env: newDetachDataEnvelope([]byte{byte(i)}, false)})
+		}
+		ch.qMu.Unlock()
+		se := &layer.StreamError{Code: layer.ErrorProtocol, Reason: "test"}
+		ch.errCh <- se
+		ch.markTerminated(se)
+		ch.closeRecv()
+
+		select {
+		case r := <-resc:
+			if r.n != events {
+				t.Fatalf("iteration %d: Next returned %d events before %v, want %d", it, r.n, r.err, events)
+			}
+			if !errors.Is(r.err, se) {
+				t.Fatalf("iteration %d: Next ended with %v, want the stream error", it, r.err)
+			}
+		case <-time.After(wfTimeout):
+			t.Fatalf("iteration %d: Next did not return", it)
+		}
 	}
 }
