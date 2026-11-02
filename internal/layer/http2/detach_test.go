@@ -386,7 +386,7 @@ func TestLayer_DetachStream_PipeWriterEnqueuesDataFrame(t *testing.T) {
 //
 // Setup: we wait until both HEADERS + DATA have been observed by the
 // Layer's reader before calling DetachStream. The DATA event is sitting
-// on ch.recv; the detach drainer must forward it to the pipe.
+// on the channel queue; the detach drainer must forward it to the pipe.
 func TestLayer_DetachStream_DrainBufferedDataBeforeReturn(t *testing.T) {
 	l, peer, cleanup := startServerLayer(t)
 	defer cleanup()
@@ -418,7 +418,7 @@ func TestLayer_DetachStream_DrainBufferedDataBeforeReturn(t *testing.T) {
 	}
 
 	// Send DATA BEFORE detaching. The Layer will accept it and queue
-	// the H2DataEvent envelope on ch.recv.
+	// the H2DataEvent envelope on the channel queue.
 	want := []byte("buffered-bytes")
 	if err := peer.wr.WriteData(1, false, want); err != nil {
 		t.Fatalf("WriteData: %v", err)
@@ -429,12 +429,12 @@ func TestLayer_DetachStream_DrainBufferedDataBeforeReturn(t *testing.T) {
 	// the DATA event.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if len(ch.recv) > 0 {
+		if ch.queuedEvents() > 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(ch.recv) == 0 {
+	if ch.queuedEvents() == 0 {
 		t.Fatal("DATA event not observed by assembler within 1s")
 	}
 
@@ -518,8 +518,8 @@ func TestLayer_DetachStream_TerminalErrorSurfacesOnReader(t *testing.T) {
 // race that flaked TestFullListener_CONNECT_SSE_OverH2_SiblingNonInterference
 // at ~2% in -race builds.
 //
-// Setup: pre-populate ch.recv with N H2DataEvent envelopes, then close
-// termDone via markTerminated(io.EOF) WITHOUT closing ch.recv. This
+// Setup: pre-populate the receive queue with N H2DataEvent envelopes, then close
+// termDone via markTerminated(io.EOF) WITHOUT closing the receive side. This
 // mirrors the gracefulCloseStream producer ordering (reader.go:368-382):
 // markRecvEnded → markTerminated → closeChannelRecv. The race window is
 // between markTerminated (which closes termDone) and closeChannelRecv
@@ -541,8 +541,8 @@ func TestRunDetachDrain_DrainsRecvBeforeTermDone_Graceful(t *testing.T) {
 		payload := []byte("event-" + string(rune('0'+i)))
 		payloads[i] = payload
 		env := newDetachDataEnvelope(payload, false)
-		// recv is cap-32 buffered; sends do not block.
-		ch.recv <- env
+		// push never blocks.
+		ch.push(env, 0, minStreamEventCap)
 	}
 
 	// Producer ordering from gracefulCloseStream: markTerminated closes
@@ -597,7 +597,7 @@ func TestRunDetachDrain_DrainsRecvBeforeTermDone_FailStream(t *testing.T) {
 		payload := []byte("fail-event-" + string(rune('0'+i)))
 		payloads[i] = payload
 		env := newDetachDataEnvelope(payload, false)
-		ch.recv <- env
+		ch.push(env, 0, minStreamEventCap)
 	}
 
 	// Producer ordering from failStream: markTerminated(*layer.StreamError)
@@ -638,7 +638,7 @@ func TestRunDetachDrain_DrainsRecvBeforeTermDone_FailStream(t *testing.T) {
 // TestRunDetachDrain_DrainsRecvOnMarkTerminatedWithRST verifies the
 // USK-902 fix covers the MarkTerminatedWithRST path. By design (see
 // channel.go:222-234) MarkTerminatedWithRST closes termDone but does
-// NOT close ch.recv — the recv close is deferred to the caller's
+// NOT close the receive side — the close is deferred to the caller's
 // channel.Close. Even on this path, every buffered envelope must
 // surface before the drainer exits.
 func TestRunDetachDrain_DrainsRecvOnMarkTerminatedWithRST(t *testing.T) {
@@ -650,7 +650,7 @@ func TestRunDetachDrain_DrainsRecvOnMarkTerminatedWithRST(t *testing.T) {
 		payload := []byte("rst-event-" + string(rune('0'+i)))
 		payloads[i] = payload
 		env := newDetachDataEnvelope(payload, false)
-		ch.recv <- env
+		ch.push(env, 0, minStreamEventCap)
 	}
 
 	// Simulate MarkTerminatedWithRST's effect: termDone closed, recv

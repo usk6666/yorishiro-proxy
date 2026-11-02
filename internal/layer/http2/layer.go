@@ -284,6 +284,16 @@ type Layer struct {
 	// Layers always resolve to H2FingerprintDefault.
 	h2Fingerprint H2Fingerprint
 
+	// streamCreditBatch and streamEventCap are derived once in New from the
+	// local SETTINGS_INITIAL_WINDOW_SIZE, which this Layer only advertises
+	// in its preface (USK-1399, RFC-001 §9.1 point 3). streamCreditBatch is
+	// the read-driven stream WINDOW_UPDATE batch: half the advertised stream
+	// window. streamEventCap bounds the events one stream may queue for its
+	// consumer — DATA is already bounded by the stream window, but
+	// zero-length DATA and header blocks are not flow-controlled.
+	streamCreditBatch uint32
+	streamEventCap    int
+
 	mu         sync.Mutex
 	channels   map[uint32]*channel
 	assemblers map[uint32]*eventAssembler
@@ -721,6 +731,8 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		nextClientStreamID: 1,
 		encoderTableSize:   local.HeaderTableSize,
 		h2Fingerprint:      fp,
+		streamCreditBatch:  streamCreditBatchFor(local.InitialWindowSize),
+		streamEventCap:     streamEventCapFor(local.InitialWindowSize),
 	}
 	if role == ServerRole && o.clientIdleTimeout != nil {
 		l.streamsChanged = make(chan struct{}, 1)
@@ -785,6 +797,30 @@ func (l *Layer) startLoops() {
 	if l.opts.afterLoopsStart != nil {
 		l.opts.afterLoopsStart()
 	}
+}
+
+// minStreamEventCap is the floor of the per-stream event cap.
+const minStreamEventCap = 1024
+
+// streamCreditBatchFor returns the stream WINDOW_UPDATE batch size for a
+// local initial stream window: half the window, as browsers and x/net do,
+// so the peer always has at least half a window of room while the
+// consumer keeps reading. Never 0, so a credit is never stranded.
+func streamCreditBatchFor(initialWindow uint32) uint32 {
+	if b := initialWindow / 2; b > 0 {
+		return b
+	}
+	return 1
+}
+
+// streamEventCapFor returns the per-stream queued-event cap for a local
+// initial stream window: max(1024, window/1024). 16384 for the default
+// 16 MiB window; 1024 for 128 KiB (Firefox) or less.
+func streamEventCapFor(initialWindow uint32) int {
+	if c := int(initialWindow / 1024); c > minStreamEventCap {
+		return c
+	}
+	return minStreamEventCap
 }
 
 const defaultLargeConnWindow = 16 * 1024 * 1024

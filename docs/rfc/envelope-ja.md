@@ -422,11 +422,15 @@ package http2layer
 // HTTPAggregatorLayer で wrap する必要がある (下記)。gRPC 消費者は GRPCLayer
 // で wrap する。根拠は §9.1 再起草版 resolution を参照。
 //
-// フロー制御: Layer は DATA bytes を stream ごとの BodyBuffer に append し、
-// append 時点で WINDOW_UPDATE を送信する (Pipeline が event を消費したか否か
-// には依存しない)。per-stream の soft cap で stream-level stall + ディスク
-// spill、hard cap で RST_STREAM。接続レベル WINDOW は Pipeline レイテンシから
-// decouple される。
+// フロー制御: 接続レベルの WINDOW_UPDATE は DATA フレームの到着ごとに送る
+// (接続 WINDOW は Pipeline レイテンシから decouple)。stream ごとに event を
+// メモリ上の queue に積み、frame reader はそこで block しない。stream レベル
+// の WINDOW_UPDATE は consumer が event を取り出した分だけ (advertise した
+// stream window の半分単位で batch して) 送るので、止まった consumer が
+// 止めるのは自 stream だけで、queue は advertise した window で上限が
+// 決まる。window 超過の DATA → RST_STREAM(FLOW_CONTROL_ERROR)、queued event
+// が max(1024, window/1024) 超 → RST_STREAM(ENHANCE_YOUR_CALM)。§9.1
+// (USK-1399) 参照。
 func New(conn net.Conn, role Role) layer.Layer
 ```
 
@@ -915,24 +919,29 @@ N9: レガシー削除 + ドキュメント
 
 **解決:** 2026-04-15
 **再起草:** 2026-04-23 (2026-04-15 の in-layer aggregation モデルを置換。動機は OQ#2 resolution を参照)
+**改訂:** 2026-11-03 (USK-1399: stream-level credit は consumer の読み取りに従う。下記 2・3)
 
 **問題:** HTTP/2 には stream ごとと接続ごとのフロー制御 (WINDOW_UPDATE フレーム) がある。Pipeline Step が数分ブロックする (例: AI エージェントのアクション待ちの `InterceptStep`) と、その stream の WINDOW が埋まり、下流側が stall する。同じ接続上の *多数の* 並行 stream が同時にブロックすると、接続レベル WINDOW が埋まり、HTTP/2 接続全体が stall して無関係な stream にも影響する。
 
-**Resolution: event-granular な HTTP/2 Layer + per-stream bounded buffer。集約は上位 wrapper Layer。**
+**Resolution: event-granular な HTTP/2 Layer + advertise した stream window で上限が決まる per-stream queue。集約は上位 wrapper Layer。**
 
 初版 resolution (2026-04-15) は HTTP/2 Layer の内部で集約を行い、`Channel.Next()` は stream ごとに完全な `HTTPMessage` を返す設計だった。OQ#2 (gRPC 粒度) の検討で、このモデルは streaming gRPC と両立しない (長時間 bidi stream は「完了」しないため集約対象が無い) ことが明らかになった。根本的な設計ミスは、Pipeline のレイテンシを transport 層に伝搬させていた点。以下の再起草はこの結合を decouple することで是正する。
 
 **決定:**
 
 1. **HTTP/2 Layer は常に event-granular**。Channel は 3 種類の event を yield する: `H2HeadersEvent` (HEADERS フレーム由来)、`H2DataEvent` (DATA フレーム、もしくは BodyBuffer drain chunk 由来)、`H2TrailersEvent` (END_STREAM 付き trailer HEADERS 由来)。
-2. **per-stream buffer がフロー制御を駆動する**。各 stream は `BodyBuffer` (N6.5 の memory-then-spill primitive を流用) を所有。DATA フレームは到着次第 buffer に append され、WINDOW_UPDATE は **append 時点で** 送信される (Pipeline 消費時点ではない)。接続レベル WINDOW は Pipeline レイテンシから完全に decouple され、どれだけ長い Pipeline hold でも他 stream に影響を及ぼさない。
-3. **back-pressure は stream-scoped であり、connection-scoped ではない**。Pipeline が stream を hold している間に buffer が per-stream soft cap を超えたら、Layer は *その stream の* WINDOW 補充を停止し (stream-level stall)、次にディスクへ spill し、hard cap を超えたら RST_STREAM する。他 stream には影響しない。
+2. **connection-level credit は到着時に返す**。frame reader は DATA フレームごとに、到着した時点で connection-level WINDOW_UPDATE を返す (配送・無視 (closed stream、送信済み GOAWAY 後)・拒否のいずれでも)。接続レベル WINDOW は consumer / Pipeline のレイテンシから完全に decouple され、どれだけ長い hold でも他 stream の connection window を奪わない。
+3. **stream-level credit は consumer の読み取りに従い、back-pressure は stream-scoped**。各 stream はメモリ上の event queue を持ち、接続に 1 本の frame reader がそれを埋める (frame reader はこの queue で block しない)。stream-level WINDOW_UPDATE は event が queue を *出た* 時点 — `Channel.Next`、または detach drain で detach reader が bytes を消費した (`io.Pipe` の write が返った) 時点 — で返し、batch する: 蓄積が advertise した `SETTINGS_INITIAL_WINDOW_SIZE` の半分 (既定 16 MiB なら 8 MiB、Firefox の 128 KiB なら 64 KiB、RFC 既定 65535 なら 32767) に達したら、その蓄積量ちょうどの WINDOW_UPDATE を 1 つ送る (ブラウザや `x/net/http2` と同じ)。padding (pad-length byte + padding) は consumer に届かないので到着時に credit し、次の batch に乗せる。END_STREAM 受信後は stream WINDOW_UPDATE を送らない。consumer が止まる (Intercept hold、遅い SSE client、読まない WS-over-h2 peer) と、止まるのは *その stream* だけ (advertise した window で止まる)。接続と他 stream は流れ続ける。
+   - **上限。** stream あたりの queued DATA は advertise した stream window を超えない (peer は返されていない credit を超えて送れない)。超えた DATA は stream error: RST_STREAM(FLOW_CONTROL_ERROR) で stream の Channel が失敗し、接続は生き残る (RFC 9113 §6.9.1)。フロー制御で縛れない event (長さ 0 の DATA、header block) は stream あたり `max(1024, window/1024)` 個 (16 MiB なら 16384、128 KiB 以下なら 1024) が上限で、超えると RST_STREAM(ENHANCE_YOUR_CALM) で reset し、queued event の後に stream error を consumer に渡す。
+   - **Layer 内 spill なし。** queue はメモリのみで、window が上限。`HTTPAggregatorLayer` は自身が組み立てる body 用に BodyBuffer spill (既定 10 MiB) を持ち続ける。
+   - **接続あたりの最悪値 (理論値)** は window × 同時 stream 数: ServerRole (client 側) 16 MiB × advertise した MAX_CONCURRENT_STREAMS 500 ≈ 7.8 GiB、ClientRole (upstream) 既定 16 MiB × peer の MAX_CONCURRENT_STREAMS (100 / 128 / 256 → 1.6 / 2 / 4 GiB)、ClientRole Firefox 128 KiB × 100 = 12.5 MiB。到達には全 stream が window 満杯で未読のまま hold される必要がある。接続単位の queued-bytes budget は保留 (RSS 問題が観測されたら再検討)。
+   - **会計順序。** writer は WINDOW_UPDATE を書く *前に* ローカルの受信 window を増やす。peer が update を読んだ直後に送る bytes が古い window で測られることはない。
 4. **集約は HTTP/2 Layer の性質ではなく wrapper Layer の責務**。plain HTTP/2 トラフィック向けに `HTTPAggregatorLayer` が H2 event を消費し、request/response ごとに 1 つの `HTTPMessage` を生成する (N6.5 のユーザ可視挙動を保持、HTTP/1.x と parity)。gRPC 向けには `GRPCLayer` が同じ event を消費し `GRPCStartMessage` / `GRPCDataMessage` / `GRPCEndMessage` を生成する (集約しない)。
 
 **なぜこれでフロー制御が解決するか:**
 
-- transport 層の ACK が application 層の処理速度から独立。WINDOW_UPDATE は frame reader goroutine が socket から frame を取り出した直後 (マイクロ秒単位で) per-stream buffer に到達した時点で発射される。Pipeline が個別 stream をブロックしても接続への back-pressure は発生しない。
-- 接続あたりの最悪メモリは `perStreamSoftCap × MAX_CONCURRENT_STREAMS`。soft cap に達した stream はディスク spill する。soft cap は調整可能。ディスク spill パスは N6.5 で実証済み。
+- 接続レベルの ACK は application 層の処理速度から独立: frame reader が DATA フレームを socket から取り出した時点で返る。frame reader 自身は stream の consumer を待たないので、個別 stream のブロックは接続への back-pressure にならない。
+- stream あたりのメモリは consumer の停止時間ではなく advertise した stream window (+ event 数上限) で決まる。USK-1399 以前は両 window を到着時に credit し、上限は 32 slot の per-stream channel だけで、溢れると frame reader が block した — 1 本の未読 stream (読むのを止めた SSE client、hold 中の gRPC / WS-over-h2 message) が、tunnel 間で共有される pooled upstream 接続を含め、接続上の全 stream を止めていた。
 - plain HTTP ユーザは HTTPAggregatorLayer 経由で「1 exchange あたり 1 HTTPMessage」の同じ ergonomics を維持する。streaming プロトコル (gRPC、将来の SSE) のユーザは event を到着順に見る。
 
 **却下した代替案:**

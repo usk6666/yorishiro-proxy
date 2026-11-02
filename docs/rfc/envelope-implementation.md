@@ -400,6 +400,8 @@ RFC を accepted にした以上、実装時の誘惑に抗うために明示化
 
 **状態:** **RESOLVED** (RFC §9.1 正式 resolution, 2026-04-23 再起草)。実装は N6 / N6.5 / N6.6 で in-layer aggregation 版が完了しており、N6.7 で event-granular + HTTPAggregatorLayer へリファクタする。
 
+**改訂 (2026-11-03, USK-1399):** 実装は両 WINDOW_UPDATE を DATA 到着時に送り、32 slot の per-stream channel だけを back-pressure にしていた。1 stream の consumer が止まる (SSE client の停止、Intercept hold 中の gRPC / WS-over-h2) と frame reader がその channel で block し、同じ接続の全 stream が止まっていた。現行の規則: connection-level は到着時のまま、stream-level は consumer が event を取り出した分だけ返す (半 window 単位の batch、END_STREAM 受信後は送らない、padding は到着時に credit)。per-stream queue は frame reader を block せず、advertise した stream window で上限が決まる (超過 DATA は RST_STREAM(FLOW_CONTROL_ERROR)、event 数は max(1024, window/1024) 超過で RST_STREAM(ENHANCE_YOUR_CALM))。Layer 内の disk spill は持たない。詳細と最悪ケースの数値は RFC §9.1。
+
 ### Friction 3-D: stream lifecycle error の区別
 
 **問題:** HTTP/2 の RST_STREAM は「正常 cancellation」と「error」の両方で発生する。Pipeline Step (特に RecordStep) はこれらを区別したい。

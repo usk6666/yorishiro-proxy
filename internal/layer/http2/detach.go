@@ -30,7 +30,10 @@ import (
 //   - DATA frame payloads arrive in arrival order on the returned reader.
 //   - Bytes that arrived between the trigger envelope (the 2xx response to
 //     the extended CONNECT) and the DetachStream call are surfaced first
-//     (the per-stream channel's recv buffer is drained on entry).
+//     (the per-stream channel's receive queue is drained on entry).
+//   - Stream flow-control credit is returned as the reader consumes the
+//     bytes (USK-1399): a reader that stops reading stops the peer on this
+//     stream only, never the connection's other streams.
 //   - END_STREAM surfaces as io.EOF on the reader after any preceding bytes.
 //   - A stream-level error (RST_STREAM, GOAWAY-failed stream, etc.) surfaces
 //     as a wrapped *layer.StreamError on the reader.
@@ -99,14 +102,15 @@ func (l *Layer) DetachStream(streamID uint32, opts ...DetachOption) (io.ReadClos
 	ch.detached.Store(true)
 	l.mu.Unlock()
 
-	// Drain any envelopes already queued on ch.recv into the pipe writer
-	// BEFORE returning the reader to the caller. RFC-001 §3.3.2 BodyBuffer
+	// Drain any envelopes already queued on the channel into the pipe
+	// writer BEFORE returning the reader to the caller. RFC-001 §3.3.2 BodyBuffer
 	// drain MUST: bytes that arrived between the trigger 2xx and this call
 	// MUST be surfaced on the returned reader in arrival order.
 	//
 	// The drain runs in a goroutine because writing into the pipe blocks
 	// until the consumer reads. Goroutine termination is bounded by:
-	//   - ch.recv close (producer-side signal that no more events arrive)
+	//   - receive-side close (producer-side signal that no more events
+	//     arrive)
 	//   - ch.termDone close (channel terminated; pipe writer should close)
 	//   - pipe writer close (caller closed reader; CloseWithError unblocks
 	//     us on the next Write attempt)
@@ -129,32 +133,29 @@ func (l *Layer) DetachStream(streamID uint32, opts ...DetachOption) (io.ReadClos
 	return r, w, closer, nil
 }
 
-// runDetachDrain forwards inbound DATA event payloads from ch.recv into
-// ch.detachWriter, and forwards any non-EOF terminal error via
-// CloseWithError. Returns when ch.recv closes (reader-side EOF), termDone
-// fires AND recv is empty (terminal with no buffered events left), or the
-// pipe writer is closed by the consumer (CloseWithError surfaces back on
-// the next Write attempt).
+// runDetachDrain forwards inbound DATA event payloads from the channel's
+// receive queue into ch.detachWriter, and forwards any non-EOF terminal
+// error via CloseWithError. Returns when the receive side is closed and
+// drained (reader-side EOF), termDone fires AND the queue is empty
+// (terminal with no queued events left), or the pipe writer is closed by
+// the consumer (CloseWithError surfaces back on the next Write attempt).
 //
-// Drain ordering (USK-902): the loop drains every buffered envelope on
-// recv BEFORE honoring termDone. A plain `select { case <-recv: ...;
-// case <-termDone: ... }` would let Go's pseudo-random select pick the
-// termDone arm even with events still queued on recv — and the producer-
-// side teardown paths (reader.gracefulCloseStream / failStream /
-// failStreamsAfterGoAway / broadcastShutdown, plus channel.
-// MarkTerminatedWithRST which intentionally never closes recv) close
-// termDone BEFORE (or without) closing recv. Dropping those trailing
-// events violates RFC-001 §3.3.2 BodyBuffer drain MUST and CLAUDE.md
-// MITM Principle 3 (lossless representations) — the wire delivered the
-// bytes, so the detach reader must surface them.
+// Each event's stream credit is returned only after pw.Write returns, i.e.
+// once the detach reader has consumed the bytes (USK-1399): the peer's
+// room on this stream follows the reader, while the queue keeps the
+// connection's reader goroutine from ever waiting on this consumer.
 //
-// The drain shape (non-blocking Phase 1 → blocking Phase 2 → final
-// drain on termDone) mirrors USK-901's writerLoop sibling fix: drain
-// queued work to empty, then honor shutdown. The producer-side ordering
-// is left unchanged because markTerminated must run before
-// closeChannelRecv so Err() observers see a stable error before EOF; the
-// drain-prefix is the more general consumer-side fix and also covers
-// MarkTerminatedWithRST, where recv is left open by design.
+// Drain ordering (USK-902): every queued envelope is forwarded BEFORE
+// termDone is honored. The producer-side teardown paths
+// (reader.gracefulCloseStream / failStream / failStreamsAfterGoAway /
+// broadcastShutdown, plus channel.MarkTerminatedWithRST which
+// intentionally never closes the receive side) close termDone BEFORE (or
+// without) closing the receive side; dropping the queued events would
+// violate RFC-001 §3.3.2 BodyBuffer drain MUST and CLAUDE.md MITM
+// Principle 3 (lossless representations) — the wire delivered the bytes,
+// so the detach reader must surface them. The final pass after termDone
+// covers events queued in the window between the empty pop and termDone
+// firing.
 func (c *channel) runDetachDrain(done chan struct{}) {
 	defer close(done)
 	pw := c.detachWriter
@@ -162,54 +163,31 @@ func (c *channel) runDetachDrain(done chan struct{}) {
 		return
 	}
 	for {
-		// Phase 1: non-blocking drain of any buffered envelopes. Forwards
-		// recv events ahead of termDone so a producer that closed
-		// termDone before (or without) closing recv cannot strand the
-		// queued bytes.
-		select {
-		case env, ok := <-c.recv:
-			if !ok {
-				c.closeDetachPipeForTerminal(pw)
+		ev, ok, closed := c.pop()
+		if ok {
+			if !c.forwardDetachEnvelope(pw, ev.env) {
 				return
 			}
-			if !c.forwardDetachEnvelope(pw, env) {
-				return
-			}
+			c.returnRecvCredit(ev.credit)
 			continue
-		default:
 		}
-		// Phase 2: recv empty — block until a new event arrives, the
-		// channel terminates, or the consumer closes the pipe.
+		if closed {
+			c.closeDetachPipeForTerminal(pw)
+			return
+		}
 		select {
-		case env, ok := <-c.recv:
-			if !ok {
-				c.closeDetachPipeForTerminal(pw)
-				return
-			}
-			if !c.forwardDetachEnvelope(pw, env) {
-				return
-			}
+		case <-c.qNotify:
 		case <-c.termDone:
-			// Final drain pass — covers envelopes that arrived in the
-			// narrow race window between Phase 1's `default` sample and
-			// termDone firing. Without this pass the gracefulCloseStream
-			// path (markRecvEnded → markTerminated → closeChannelRecv)
-			// can still drop trailing events when termDone wins the
-			// select before recv-close serialises with this goroutine.
 			for {
-				select {
-				case env, ok := <-c.recv:
-					if !ok {
-						c.closeDetachPipeForTerminal(pw)
-						return
-					}
-					if !c.forwardDetachEnvelope(pw, env) {
-						return
-					}
-				default:
+				ev, ok, _ := c.pop()
+				if !ok {
 					c.closeDetachPipeForTerminal(pw)
 					return
 				}
+				if !c.forwardDetachEnvelope(pw, ev.env) {
+					return
+				}
+				c.returnRecvCredit(ev.credit)
 			}
 		}
 	}
@@ -217,7 +195,7 @@ func (c *channel) runDetachDrain(done chan struct{}) {
 
 // closeDetachPipeForTerminal closes the detach pipe writer with the
 // channel's terminal error (CloseWithError for non-EOF, plain Close
-// otherwise). Used by both the recv-closed and termDone branches of
+// otherwise). Used by both the receive-closed and termDone branches of
 // runDetachDrain.
 func (c *channel) closeDetachPipeForTerminal(pw *io.PipeWriter) {
 	if err := c.Err(); err != nil && !errors.Is(err, io.EOF) {
@@ -236,9 +214,9 @@ func (c *channel) closeDetachPipeForTerminal(pw *io.PipeWriter) {
 // delivery of the bytes to the consumer Layer (RFC-001 §3.1 / CLAUDE.md
 // MITM Principle #3 — raw bytes recording reflects on-wire reality, not
 // post-delivery state). The callback contract documented on the channel
-// field requires non-blocking behavior; runDetachDrain is single-
-// consumer for ch.recv and any block here stalls the per-stream byte
-// stream for sibling-frame delivery.
+// field requires non-blocking behavior; runDetachDrain is the single
+// consumer of the stream's receive queue and any block here stalls the
+// per-stream byte stream.
 func (c *channel) forwardDetachEnvelope(pw *io.PipeWriter, env *envelope.Envelope) bool {
 	if env == nil {
 		return true

@@ -20,9 +20,10 @@ import (
 //   - the writer is stuck in a socket write because the peer stopped
 //     reading (net.Pipe has no buffer, so the first frame written after the
 //     peer pauses blocks);
-//   - the reader keeps enqueueing two WINDOW_UPDATEs per DATA frame the peer
-//     sends (maybeWindowUpdate) until writerQueue is full, after which the
-//     reader itself parks in enqueueWrite.
+//   - the reader keeps enqueueing a connection-level WINDOW_UPDATE per DATA
+//     frame the peer sends (USK-1399: stream-level credit follows reads, so
+//     130 frames are needed to fill the 64-slot queue) until writerQueue is
+//     full, after which the reader itself parks in enqueueWrite.
 //
 // Until USK-1166 the writer could also be stuck waiting for flow-control
 // window; that wedge no longer exists (the writer parks DATA per stream and
@@ -204,7 +205,7 @@ func TestLayer_Close_WriterBlockedQueueFull_ClientRole(t *testing.T) {
 	pause()
 	drainChannel(lc1)
 	hdr := peer.encoder.Encode([]hpack.HeaderField{{Name: ":status", Value: "200"}})
-	_ = floodData(peer, 1, hdr, true, 60)
+	_ = floodData(peer, 1, hdr, true, 130)
 
 	waitWriterQueueFull(t, l)
 	assertCloseBoundedNoLeak(t, l, peer, ignore)
@@ -241,7 +242,7 @@ func TestLayer_Close_WriterBlockedQueueFull_ServerRole(t *testing.T) {
 	// The peer stops reading: the writer's next socket write blocks.
 	pause()
 	// Stream 1: POST whose request body the client floods in small frames.
-	_ = floodData(peer, 1, reqHdr("POST"), true, 60)
+	_ = floodData(peer, 1, reqHdr("POST"), true, 130)
 	drainChannel(acceptChannel())
 
 	waitWriterQueueFull(t, l)
