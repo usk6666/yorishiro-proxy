@@ -21,6 +21,10 @@ import (
 // rotated files beyond that count. A non-empty flows.jsonl found at open
 // (left by an earlier run, possibly ending in a torn line after a crash)
 // is rotated away first.
+//
+// The active file is never a symlink (refused at open, and opened with
+// O_NOFOLLOW where available); it is chmod'ed to 0600 on every open so
+// a pre-existing looser mode is not inherited by the rotated files.
 
 const (
 	sinkActiveFileName = "flows.jsonl"
@@ -38,7 +42,10 @@ type fileSinkWriter struct {
 	f         *os.File
 	size      int64
 	rotations int
-	now       func() time.Time
+	// torn is set when a failed write left a partial line that could not
+	// be truncated away; the next write rotates the file first.
+	torn bool
+	now  func() time.Time
 	// writeFile writes to the active file; nil means f.Write. Tests
 	// replace it to simulate a short write.
 	writeFile func(f *os.File, b []byte) (int, error)
@@ -53,7 +60,9 @@ func openFileSinkWriter(dir string, maxBytes int64, maxFiles int, fsync bool) (*
 	}
 	w := &fileSinkWriter{dir: dir, maxBytes: maxBytes, maxFiles: maxFiles, fsync: fsync, now: time.Now}
 	active := w.activePath()
-	if fi, err := os.Stat(active); err == nil && fi.Mode().IsRegular() && fi.Size() > 0 {
+	if fi, err := os.Lstat(active); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		return nil, fmt.Errorf("flow sink: %s is a symlink; refusing to write through it", active)
+	} else if err == nil && fi.Mode().IsRegular() && fi.Size() > 0 {
 		if err := os.Rename(active, w.nextRotatedPath()); err != nil {
 			return nil, fmt.Errorf("flow sink: rotate previous %s: %w", active, err)
 		}
@@ -70,7 +79,7 @@ func openFileSinkWriter(dir string, maxBytes int64, maxFiles int, fsync bool) (*
 func (w *fileSinkWriter) activePath() string { return filepath.Join(w.dir, sinkActiveFileName) }
 
 func (w *fileSinkWriter) open() error {
-	f, err := os.OpenFile(w.activePath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(w.activePath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND|sinkOpenNoFollow, 0o600)
 	if err != nil {
 		return fmt.Errorf("flow sink: open %s: %w", w.activePath(), err)
 	}
@@ -78,6 +87,14 @@ func (w *fileSinkWriter) open() error {
 	if err != nil {
 		_ = f.Close()
 		return fmt.Errorf("flow sink: stat %s: %w", w.activePath(), err)
+	}
+	// The create mode applies only to a new file; tighten a pre-existing
+	// one too (rotated files keep the active file's mode).
+	if fi.Mode().Perm() != 0o600 {
+		if err := f.Chmod(0o600); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("flow sink: chmod %s: %w", w.activePath(), err)
+		}
 	}
 	w.f, w.size = f, fi.Size()
 	return nil
@@ -96,7 +113,8 @@ func (w *fileSinkWriter) nextRotatedPath() string {
 }
 
 // WriteLine appends line and a newline, rotating first when the line
-// would take a non-empty file past maxBytes.
+// would take a non-empty file past maxBytes. A failed write is rolled
+// back so no partial line is left for the next one to be appended to.
 func (w *fileSinkWriter) WriteLine(line []byte) error {
 	if w.f == nil {
 		if err := w.open(); err != nil {
@@ -104,7 +122,7 @@ func (w *fileSinkWriter) WriteLine(line []byte) error {
 		}
 	}
 	need := int64(len(line)) + 1
-	if w.size > 0 && w.size+need > w.maxBytes {
+	if w.torn || (w.size > 0 && w.size+need > w.maxBytes) {
 		if err := w.rotate(); err != nil {
 			return err
 		}
@@ -116,10 +134,17 @@ func (w *fileSinkWriter) WriteLine(line []byte) error {
 		write = (*os.File).Write
 	}
 	n, err := write(w.f, buf)
-	w.size += int64(n)
 	if err != nil {
+		if n > 0 {
+			if terr := w.f.Truncate(w.size); terr != nil {
+				// The fragment stays; keep the file out of further use.
+				w.size += int64(n)
+				w.torn = true
+			}
+		}
 		return fmt.Errorf("flow sink: write %s: %w", w.activePath(), err)
 	}
+	w.size += int64(n)
 	if w.fsync {
 		if err := w.f.Sync(); err != nil {
 			return fmt.Errorf("flow sink: sync %s: %w", w.activePath(), err)
@@ -134,6 +159,7 @@ func (w *fileSinkWriter) rotate() error {
 	}
 	err := w.f.Close()
 	w.f = nil
+	w.torn = false
 	w.prune()
 	if oerr := w.open(); oerr != nil {
 		return oerr

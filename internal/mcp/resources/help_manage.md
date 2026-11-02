@@ -82,13 +82,13 @@ A server started with a `flow_sink` block in its `-config` file streams every co
 
 Only `dir` is required; the values shown are the defaults. `wire_level` takes the `export_flows` vocabulary (`semantic` default, one overlay level, or `all`).
 
-**The sink is not masked.** The SafetyFilter Output Filter applies only where an MCP tool returns recorded data; sink lines carry bodies and raw bytes exactly as recorded. Protect the directory like the database.
+**The sink is not masked.** The SafetyFilter Output Filter applies only where an MCP tool returns recorded data; sink lines carry bodies and raw bytes exactly as recorded. Protect the directory like the database: `flows.jsonl` is kept at mode 0600, a symlinked `flows.jsonl` is refused, and a directory accessible by group/other is reported with a warning.
 
 **Line format** — a superset of the `export_flows` JSONL record (`version` `"1"`), so every line imports:
 - `event`: `stream_created`, `stream_updated`, `flow_saved` or `gap`.
 - `stream`: the stream's snapshot as stored when the line was written (so it can be newer than the event; the latest line per stream ID wins). `flows`: empty, or the one saved flow (headers, body and `raw_bytes` base64 as stored; an intercept variant pair is two lines).
 - `seq`: per-run event number from 1; `run_id`: one per server process; `emitted_at`: write time (RFC 3339, UTC).
-- A flow whose body + raw bytes exceed `queue_max_bytes` is written without them, with `body_omitted` / `body_size` / `body_sha256` and `raw_bytes_omitted` / `raw_bytes_size` / `raw_bytes_sha256`; importing it marks the flow `body_truncated`.
+- A flow whose body + raw bytes exceed `queue_max_bytes` is written without them, with `body_omitted` / `body_size` / `body_sha256` and `raw_bytes_omitted` / `raw_bytes_size` / `raw_bytes_sha256`; importing it (either payload omitted) marks the flow `body_truncated`.
 
 **Loss is detectable, not prevented.** The proxy never waits for the sink: when the in-memory queue (`queue_max_events` / `queue_max_bytes`) is full, the event is dropped. The next line written is then preceded by `{"event":"gap","gap":{"dropped":N,"dropped_bytes":B,"first_seq":F,"last_seq":L}}` covering exactly the missing `seq` numbers (also written at shutdown for drops no later event reported). `query { resource: "status" }` reports `flow_sink` {dir, run_id, emitted, dropped_events, dropped_bytes, write_errors}. A `seq` jump with no gap line means lines were lost after writing (for example a crash before `fsync`).
 

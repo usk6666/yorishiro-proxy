@@ -2,6 +2,7 @@ package flow
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -167,6 +168,12 @@ func ImportStreams(ctx context.Context, store Store, r io.Reader, opts ImportOpt
 
 // isSinkGapLine reports whether line is a flow sink "gap" record.
 func isSinkGapLine(line []byte) bool {
+	// Cheap pre-check so ordinary lines (possibly carrying large base64
+	// bodies) are not decoded twice; the sink writes the event value
+	// unescaped.
+	if !bytes.Contains(line, []byte(`"gap"`)) {
+		return false
+	}
 	var probe struct {
 		Event string `json:"event"`
 	}
@@ -433,9 +440,10 @@ func exportToFlow(ef *ExportFlow) (*Flow, error) {
 		f.URL = envelope.ParseWireURL(ef.URL)
 	}
 
-	if ef.BodyOmitted {
-		// A flow sink line that left an oversize body out: the imported
-		// row has no body, which BodyTruncated records.
+	if ef.BodyOmitted || ef.RawBytesOmitted {
+		// A flow sink line that left an oversize body / raw bytes out:
+		// the imported row lacks that payload, which BodyTruncated
+		// records.
 		f.BodyTruncated = true
 	}
 

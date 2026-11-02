@@ -25,6 +25,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -208,6 +210,15 @@ func NewFileSink(cfg SinkConfig, reader StreamReader, logger *slog.Logger) (*Sin
 	if err != nil {
 		return nil, err
 	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	// MkdirAll's 0700 applies only to a directory it creates; the sink
+	// holds unmasked recordings, so report a looser existing one.
+	if fi, err := os.Stat(cfg.Dir); err == nil && runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
+		logger.Warn("flow sink directory is accessible by group/other; recordings are unmasked",
+			"dir", cfg.Dir, "mode", fmt.Sprintf("%#o", fi.Mode().Perm()))
+	}
 	return newSink(cfg, reader, w, logger), nil
 }
 
@@ -273,6 +284,14 @@ func (s *Sink) FlowCommitted(f *Flow) {
 			size = 0
 		}
 		it.charge = size
+	} else {
+		// Bodies are not written in this mode, so they are not charged
+		// against QueueMaxBytes either; queue a copy without them so a
+		// slow writer cannot pin QueueMaxEvents bodies (exportFlow reads
+		// neither field when IncludeBodies is false).
+		cp := *f
+		cp.Body, cp.RawBytes = nil, nil
+		it.flow = &cp
 	}
 	s.enqueue(it)
 }
