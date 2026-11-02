@@ -222,8 +222,19 @@ type opaqueHTTP1 struct {
 	// rewritten path / query can be spliced behind the wire prefix.
 	targetPrefix     string
 	targetSpliceable bool
-	origStatus       int
-	origStatusReason string
+	// USK-1117: forwardOriginForm is set on requests parsed by the
+	// plain-HTTP forward proxy's ingress Layer (WithForwardProxyOriginForm):
+	// the request is sent upstream in origin-form without Proxy-* headers.
+	// forwardRewrite reports that the wire form needs that conversion
+	// (absolute-form target or a Proxy-* header); when false the zero-copy
+	// path still applies. forwardTarget reports that the absolute-form
+	// target is sent in origin-form (false without a Host header, where
+	// the target is kept as received). See setForwardOriginForm.
+	forwardOriginForm bool
+	forwardTarget     bool
+	forwardRewrite    bool
+	origStatus        int
+	origStatusReason  string
 }
 
 // snapshotRequestLine records the request-line fields msg was built from.
@@ -250,6 +261,13 @@ func (o *opaqueHTTP1) snapshotStatusLine(msg *envelope.HTTPMessage) {
 // when the original target was spliceable. msg.Authority / msg.Scheme are
 // never written here: on HTTP/1.x the Host header carries the authority.
 //
+// On the plain-HTTP forward proxy (forwardTarget, USK-1117) an
+// unchanged absolute-form target is sent in origin-form (originFormTarget,
+// a wire substring), and a changed target is msg.Path [+ "?" +
+// msg.RawQuery] as written — never spliced behind the prefix, so an
+// absolute URI written into Path is honoured. A Host-less request is not
+// forwardTarget: its target is handled as on any other Layer.
+//
 // Values are not validated (USK-1148 user decision): a plugin can already
 // put arbitrary bytes on the wire via msg["raw"], so CR / LF / SP in a
 // structured field go out verbatim.
@@ -257,7 +275,11 @@ func (o *opaqueHTTP1) requestLine(msg *envelope.HTTPMessage) (method, target str
 	rawReq := o.rawReq
 	methodChanged := msg.Method != o.origMethod
 	targetChanged := msg.Path != o.origPath || msg.RawQuery != o.origRawQuery
+	forwardTarget := o.forwardTarget
 	if !methodChanged && !targetChanged {
+		if forwardTarget {
+			return rawReq.Method, originFormTarget(rawReq.Method, rawReq.RequestURI, o.targetPrefix), true
+		}
 		return rawReq.Method, rawReq.RequestURI, false
 	}
 	method = rawReq.Method
@@ -265,12 +287,15 @@ func (o *opaqueHTTP1) requestLine(msg *envelope.HTTPMessage) (method, target str
 		method = msg.Method
 	}
 	target = rawReq.RequestURI
+	if !targetChanged && forwardTarget {
+		target = originFormTarget(method, rawReq.RequestURI, o.targetPrefix)
+	}
 	if targetChanged {
 		target = msg.Path
 		if msg.RawQuery != "" {
 			target += "?" + msg.RawQuery
 		}
-		if o.targetSpliceable {
+		if o.targetSpliceable && !o.forwardTarget {
 			target = o.targetPrefix + target
 		}
 		if target == "" {
@@ -1202,6 +1227,7 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 		origBodyBuffer: bb,
 	}
 	opaque.snapshotRequestLine(msg)
+	opaque.setForwardOriginForm(c.layer.opts.forwardOriginForm)
 
 	env := &envelope.Envelope{
 		StreamID:  streamID,
@@ -1719,29 +1745,51 @@ func headerSectionAfterStartLine(raw []byte) ([]byte, bool) {
 // msg.Headers (OWS preserved on untouched headers), with the request line
 // from opaque.requestLine. opaque is never mutated, so a StaleUpstream
 // replay of the same envelope renders the same bytes.
+//
+// On the plain-HTTP forward proxy (opaque.forwardOriginForm, USK-1117)
+// the request line is origin-form (see requestLine) and Proxy-Connection /
+// Proxy-Authorization are dropped on every branch: by the byte-level line
+// filter (stripForwardProxyHeaders) when the wire header section is
+// re-emitted — an unchanged start line is then kept verbatim from
+// WireHead — and from the patched headers when the head is re-serialized,
+// including a Proxy-* header an edit added. A request that needs no
+// conversion (!opaque.forwardRewrite) still takes the zero-copy path.
 func opaqueRequestHead(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte, opaqueSendDecision) {
 	rawReq := opaque.rawReq
 	method, target, lineChanged := opaque.requestLine(msg)
 	d := classifyOpaqueSend(rawReq.Headers, rawReq.RawBody, rawReq.RawBodyBuffer != nil, rawReq.RawBodyTruncated,
 		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
 	d.lineChanged = lineChanged
-	if d.canZeroCopy(rawReq.WireHead) {
+	if d.canZeroCopy(rawReq.WireHead) && !opaque.forwardRewrite {
 		d.zeroCopy = true
 		return rawReq.WireHead, d
 	}
-	if d.lineOnly() {
+	if d.lineOnly() || d.canZeroCopy(rawReq.WireHead) {
 		if tail, ok := headerSectionAfterStartLine(rawReq.WireHead); ok {
 			var buf bytes.Buffer
-			_ = serializeRequestLine(&buf, method, target, rawReq.Proto)
+			if lineChanged {
+				_ = serializeRequestLine(&buf, method, target, rawReq.Proto)
+			} else {
+				// Only the forward-proxy header filter applies: keep the
+				// start line as the wire carried it.
+				buf.Write(rawReq.WireHead[:len(rawReq.WireHead)-len(tail)])
+			}
+			if opaque.forwardOriginForm {
+				tail = stripForwardProxyHeaders(tail)
+			}
 			buf.Write(tail)
 			return buf.Bytes(), d
 		}
+	}
+	headers := patchOpaqueHeaders(msg, opaque, rawReq.Headers, d)
+	if opaque.forwardOriginForm {
+		delForwardProxyHeaders(&headers)
 	}
 	head := parser.RawRequest{
 		Method:     method,
 		RequestURI: target,
 		Proto:      rawReq.Proto,
-		Headers:    patchOpaqueHeaders(msg, opaque, rawReq.Headers, d),
+		Headers:    headers,
 	}
 	return serializeRequestHeader(&head), d
 }

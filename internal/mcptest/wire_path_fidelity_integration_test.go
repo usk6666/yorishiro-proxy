@@ -73,9 +73,10 @@ func TestE2E_WirePath_HTTP1_AbsoluteForm_RecordAndResend(t *testing.T) {
 		t.Fatalf("proxied status line = %q, want 200", status)
 	}
 
-	// (1) Live forward is wire-exact (it already was before the fix): the
-	// opaque HTTP/1.x send path relays the absolute-form target verbatim.
-	liveTarget := "http://" + upstream.addr() + usk1139WireTarget
+	// (1) Live forward is wire-exact: since USK-1117 the plain-HTTP
+	// forward proxy sends origin-form, the wire path + query substring of
+	// the absolute-form target byte-for-byte (no re-encoding).
+	liveTarget := usk1139WireTarget
 	if got := upstream.waitForRequest(t, 5*time.Second).path; got != liveTarget {
 		t.Errorf("upstream request-target = %q, want %q", got, liveTarget)
 	}
@@ -179,10 +180,10 @@ func TestE2E_WirePath_HTTP2_RecordAndResend(t *testing.T) {
 // invented for the test.
 //
 // Since USK-1258 the modified request keeps the held Layer state, so a
-// header-only modify relays the request line exactly like a release: the
-// absolute-form target the client sent, byte for byte (see
-// TestE2E_WirePath_HTTP1_AbsoluteForm_RecordAndResend). Before, the modify
-// lost that state and the request line was re-synthesized in origin-form.
+// header-only modify relays the request line exactly like a release. On
+// the plain-HTTP forward proxy that is origin-form since USK-1117: the
+// wire path of the absolute-form target the client sent, byte for byte
+// (see TestE2E_WirePath_HTTP1_AbsoluteForm_RecordAndResend).
 func TestE2E_Intercept_HTTP1_ModifyHeaderKeepsWirePath(t *testing.T) {
 	const wireTarget = "/a%3Fb%20c"
 	upstream := startRawHTTPUpstream(t)
@@ -224,7 +225,7 @@ func TestE2E_Intercept_HTTP1_ModifyHeaderKeepsWirePath(t *testing.T) {
 	})
 
 	got := upstream.waitForRequest(t, 5*time.Second)
-	if want := "http://" + upstream.addr() + wireTarget; got.path != want {
+	if want := wireTarget; got.path != want {
 		t.Errorf("upstream request-target = %q, want %q (request line %q %q %q)",
 			got.path, want, got.method, got.path, got.httpVersion)
 	}
@@ -363,8 +364,8 @@ func TestE2E_ResendWS_FlowID_EncodedUpgradePathWireExact(t *testing.T) {
 	}
 	_ = conn.Close()
 
-	// The live leg relays the absolute-form target verbatim.
-	if got, want := upstream.waitTarget(t, 1, 5*time.Second), "http://"+addr+wireTarget; got != want {
+	// The live leg relays the wire path + query in origin-form (USK-1117).
+	if got, want := upstream.waitTarget(t, 1, 5*time.Second), wireTarget; got != want {
 		t.Errorf("live upgrade request-target = %q, want %q", got, want)
 	}
 	fl := waitForWirePathFlow(t, h, "/ws", nil, 10*time.Second)
