@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // USK-1414: HTTP/1.x request body streaming, driven through the CONNECT
@@ -238,7 +239,9 @@ func TestSmoke_HTTP1_RequestBodyStreaming_ChunkedByteIdentical(t *testing.T) {
 // T8): a streamed request denied by HTTPScope is answered 403 (Connection:
 // close) without waiting for its body, and the connection then closes. A
 // second request carried inside the unsent body is never parsed: the
-// upstream reads no byte and only one Stream is recorded.
+// upstream reads no byte, the Pipeline blocked exactly one request, and no
+// request reached RecordStep (the harness records no policy block; a parsed
+// smuggled request would be forwarded and recorded).
 func TestSmoke_HTTP1_RequestBodyStreaming_ScopeDenyClosesConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -247,7 +250,13 @@ func TestSmoke_HTTP1_RequestBodyStreaming_ScopeDenyClosesConnection(t *testing.T
 	scope.SetPolicyRules([]connector.TargetRule{
 		{Hostname: "127.0.0.1", PathPrefix: "/allowed/"},
 	}, nil)
-	proxyAddr, store, sessionDone := startRequestStreamingProxy(t, ctx, target, proxyOpts{scope: scope})
+	var drops atomic.Int32
+	proxyAddr, store, sessionDone := startRequestStreamingProxy(t, ctx, target, proxyOpts{
+		scope: scope,
+		onPipelineDrop: func(context.Context, *envelope.Envelope, string) {
+			drops.Add(1)
+		},
+	})
 
 	conn := connectThroughProxy(t, proxyAddr, target)
 	defer conn.Close()
@@ -285,7 +294,10 @@ func TestSmoke_HTTP1_RequestBodyStreaming_ScopeDenyClosesConnection(t *testing.T
 	if n := up.total(t); n != 0 {
 		t.Errorf("upstream read %d bytes, want 0", n)
 	}
-	if n := len(store.getStreams()); n != 1 {
-		t.Errorf("recorded Streams = %d, want 1 (the request inside the unsent body must never be parsed)", n)
+	if n := drops.Load(); n != 1 {
+		t.Errorf("policy blocks = %d, want 1 (the request inside the unsent body must never be parsed)", n)
+	}
+	if n := len(store.getStreams()); n != 0 {
+		t.Errorf("recorded Streams = %d, want 0 (no request may reach the upstream path)", n)
 	}
 }
