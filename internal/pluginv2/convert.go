@@ -14,9 +14,10 @@ import (
 )
 
 // ErrBodyTooLarge is returned by convertMessageToDict when an HTTPMessage's
-// body (Body or materialized BodyBuffer) exceeds maxPluginBodySize. Per
-// RFC §9.3 D7 and design decision #16, the Pipeline integration (USK-671)
-// must skip the plugin in this case rather than mutate or hide the body.
+// body (Body or materialized BodyBuffer) exceeds the Engine's plugin body
+// cap (plugin_max_body_size). Per RFC §9.3 D7 and design decision #16, the
+// Pipeline integration (USK-671) must skip the plugin in this case rather
+// than mutate or hide the body.
 var ErrBodyTooLarge = errors.New("pluginv2: body exceeds plugin size cap")
 
 // ErrUnsupportedMessageType is returned by convertMessageToDict when the
@@ -25,13 +26,13 @@ var ErrBodyTooLarge = errors.New("pluginv2: body exceeds plugin size cap")
 // any future protocol whose Message hasn't been wired in.
 var ErrUnsupportedMessageType = errors.New("pluginv2: unsupported message type")
 
-// maxPluginBodySize bounds the bytes a plugin can observe through
-// msg["body"]. Matches the per-plugin state value cap (state.go) for
-// symmetry — operators should expect a single uniform "1 MiB or less"
-// rule across plugin-visible blobs. Larger bodies surface
-// ErrBodyTooLarge so USK-671 skips the plugin (preserving wire fidelity:
-// the body never ships in a truncated form to the plugin).
-const maxPluginBodySize = 1 << 20
+// defaultMaxPluginBodySize is the default bound on the bytes a plugin can
+// observe through msg["body"] — what Engine.MaxBodySize reports until
+// SetMaxBodySize installs the operator's plugin_max_body_size (USK-1408).
+// Larger bodies surface ErrBodyTooLarge so USK-671 skips the plugin
+// (preserving wire fidelity: the body never ships in a truncated form to
+// the plugin). Equals config.DefaultPluginMaxBodySize.
+const defaultMaxPluginBodySize = 1 << 20
 
 // convertMessageToDict produces the Starlark `msg` value for a hook
 // invocation. The returned *MessageDict implements starlark.HasSetKey, so
@@ -40,10 +41,10 @@ const maxPluginBodySize = 1 << 20
 //
 // Returns ErrUnsupportedMessageType when env.Message is a type without a
 // schema (e.g., a future TLSHandshakeMessage). Returns ErrBodyTooLarge
-// when an HTTPMessage body exceeds maxPluginBodySize. The Pipeline
-// integration must treat these as "skip plugin" signals — never
-// materialize a truncated view.
-func convertMessageToDict(env *envelope.Envelope) (*MessageDict, error) {
+// when an HTTPMessage body exceeds maxBody (the Engine's plugin body cap).
+// The Pipeline integration must treat these as "skip plugin" signals —
+// never materialize a truncated view.
+func convertMessageToDict(env *envelope.Envelope, maxBody int64) (*MessageDict, error) {
 	if env == nil {
 		return nil, fmt.Errorf("pluginv2: nil envelope")
 	}
@@ -61,7 +62,7 @@ func convertMessageToDict(env *envelope.Envelope) (*MessageDict, error) {
 
 	switch m := env.Message.(type) {
 	case *envelope.HTTPMessage:
-		if err := buildHTTPDict(d, m); err != nil {
+		if err := buildHTTPDict(d, m, maxBody); err != nil {
 			return nil, err
 		}
 	case *envelope.WSMessage:
@@ -188,7 +189,7 @@ func cloneKVs(in []envelope.KeyValue) []envelope.KeyValue {
 
 // --- HTTPMessage ---
 
-func buildHTTPDict(d *MessageDict, m *envelope.HTTPMessage) error {
+func buildHTTPDict(d *MessageDict, m *envelope.HTTPMessage, maxBody int64) error {
 	d.typeLabel = "HTTPMessage"
 
 	d.setKV("Method", starlark.String(m.Method))
@@ -201,7 +202,7 @@ func buildHTTPDict(d *MessageDict, m *envelope.HTTPMessage) error {
 	d.setHeadersKV("Headers", m.Headers)
 	d.setHeadersKV("Trailers", m.Trailers)
 
-	body, err := materializeHTTPBody(m)
+	body, err := materializeHTTPBody(m, maxBody)
 	if err != nil {
 		return err
 	}
@@ -282,18 +283,21 @@ func buildHTTPDict(d *MessageDict, m *envelope.HTTPMessage) error {
 // materializeHTTPBody returns the bytes a plugin will see under
 // msg["body"]. Body []byte takes precedence; BodyBuffer is materialized
 // when Body is nil. Returns ErrBodyTooLarge when the materialized size
-// exceeds maxPluginBodySize so USK-671 can skip the plugin without ever
-// presenting truncated bytes.
-func materializeHTTPBody(m *envelope.HTTPMessage) ([]byte, error) {
+// exceeds maxBody (<= 0 selects defaultMaxPluginBodySize) so USK-671 can
+// skip the plugin without ever presenting truncated bytes.
+func materializeHTTPBody(m *envelope.HTTPMessage, maxBody int64) ([]byte, error) {
+	if maxBody <= 0 {
+		maxBody = defaultMaxPluginBodySize
+	}
 	if m.Body != nil {
-		if len(m.Body) > maxPluginBodySize {
-			return nil, fmt.Errorf("%w: %d > %d", ErrBodyTooLarge, len(m.Body), maxPluginBodySize)
+		if int64(len(m.Body)) > maxBody {
+			return nil, fmt.Errorf("%w: %d > %d", ErrBodyTooLarge, len(m.Body), maxBody)
 		}
 		return m.Body, nil
 	}
 	if m.BodyBuffer != nil {
-		if m.BodyBuffer.Len() > maxPluginBodySize {
-			return nil, fmt.Errorf("%w: %d > %d", ErrBodyTooLarge, m.BodyBuffer.Len(), maxPluginBodySize)
+		if m.BodyBuffer.Len() > maxBody {
+			return nil, fmt.Errorf("%w: %d > %d", ErrBodyTooLarge, m.BodyBuffer.Len(), maxBody)
 		}
 		// Background ctx is acceptable: BodyBuffer.Bytes for an in-spec
 		// Layer-owned buffer is bounded by Len(), already checked above.
