@@ -39,6 +39,9 @@ type fileSinkWriter struct {
 	size      int64
 	rotations int
 	now       func() time.Time
+	// writeFile writes to the active file; nil means f.Write. Tests
+	// replace it to simulate a short write.
+	writeFile func(f *os.File, b []byte) (int, error)
 }
 
 func openFileSinkWriter(dir string, maxBytes int64, maxFiles int, fsync bool) (*fileSinkWriter, error) {
@@ -108,7 +111,11 @@ func (w *fileSinkWriter) WriteLine(line []byte) error {
 	}
 	buf := make([]byte, 0, need)
 	buf = append(append(buf, line...), '\n')
-	n, err := w.f.Write(buf)
+	write := w.writeFile
+	if write == nil {
+		write = (*os.File).Write
+	}
+	n, err := write(w.f, buf)
 	w.size += int64(n)
 	if err != nil {
 		return fmt.Errorf("flow sink: write %s: %w", w.activePath(), err)
