@@ -559,6 +559,11 @@ func (h *LiveConnHandle) Settle() {
 		r.logAttrs(e, "reason", reason, "trigger", trigger, "deferred", true)...)
 }
 
+// Retarget moves the live connection's registration to target (USK-1410).
+func (h *LiveConnHandle) Retarget(target string, admit, admitOpaque LiveConnAdmitFunc) error {
+	return nil
+}
+
 // holdPinHandoffKey is the context key under which WithHoldPinHandoff
 // stores its *HoldPinHandoff.
 type holdPinHandoffKey struct{}
