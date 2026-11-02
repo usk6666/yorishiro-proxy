@@ -161,8 +161,8 @@ func TestHTTP1StaleConnRecovery_AfterIdleClose(t *testing.T) {
 
 	// Chain bookkeeping: the original + redial step both retained for
 	// closeAll on CONNECT exit.
-	if got := len(chain.layers); got != 2 {
-		t.Errorf("chain.layers length = %d, want 2 (original + 1 redial)", got)
+	if got := chain.generation; got != 1 {
+		t.Errorf("chain.generation = %d, want 1 (original + 1 redial)", got)
 	}
 
 	// EnvelopeContext continuity: the fresh Layer's template carries

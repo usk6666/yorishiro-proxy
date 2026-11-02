@@ -23,9 +23,10 @@ import (
 //
 // Shape vs h2's redialChain (USK-991/992):
 //   - Thinner: HTTP/1 has no pool, no GOAWAY observer, no pre-warm worker.
-//   - Layer slice retains every layer (the original + every redial) so
-//     closeAll on CONNECT exit reliably terminates every parser goroutine
-//     and underlying conn.
+//   - Only the live Layer is retained: every swap (redial or forward
+//     retarget) closes its predecessor synchronously, so closeAll on
+//     CONNECT exit closes current and the chain holds O(1) Layers however
+//     many times a client switches targets (USK-1410).
 //   - Single sync.Mutex serialises EnsureFresh with closeAll. EnsureFresh
 //     calls do not overlap meaningfully in HTTP/1 — the wire is strictly
 //     serial per RFC 9112 §9.5 and the per-exchange goroutines pulling
@@ -41,7 +42,6 @@ import (
 type h1Chain struct {
 	mu      sync.Mutex
 	current *http1.Layer
-	layers  []*http1.Layer
 	target  string // current dial target (upstream.Dial); Acquire compares against it
 	cfg     *connector.BuildConfig
 
@@ -65,13 +65,19 @@ type h1Chain struct {
 	// gauge family. Nil-safe.
 	metrics *H1UpstreamMetrics
 
-	// liveGen is the number of redial steps this chain currently
-	// contributes to the manager-wide chainGenerationLive gauge. Bumped
-	// under c.mu on every redial-append; consumed by closeAll so the
-	// manager's live counter is decremented by the exact contribution
-	// of this chain. Tracking the contribution here (rather than
-	// recomputing from len(c.layers) at close time) keeps the counter
-	// stable if future evolutions change how layers are accounted.
+	// generation counts every swap of current (stale redial, write-EPIPE
+	// redial, forward retarget); the initial Layer is generation 0. It
+	// only labels the next dial's ConnID (redialConnIDLabel) so every
+	// Layer on the connection gets a unique label.
+	generation int
+
+	// liveGen is the number of stale / write-EPIPE redial steps this
+	// chain currently contributes to the manager-wide
+	// chainGenerationLive gauge. Forward retargets do not count: the
+	// gauge is a staleness signal, and a client alternating origins is
+	// not one. Bumped under c.mu on every redial; consumed by closeAll
+	// so the manager's live counter is decremented by the exact
+	// contribution of this chain.
 	liveGen int64
 
 	// stack is the connection stack whose upstream topmost Layer the
@@ -98,14 +104,13 @@ func (c *h1Chain) attachStack(stack *connector.ConnectionStack) {
 }
 
 // swapLocked makes fresh the chain's current Layer: the previous one is
-// closed (sync.Once-guarded inside the Layer), fresh is appended so
-// closeAll tears it down, and it becomes the stack's upstream topmost.
-// Caller holds c.mu.
+// closed (sync.Once-guarded inside the Layer) and dropped, the generation
+// advances, and fresh becomes the stack's upstream topmost. Caller holds
+// c.mu.
 func (c *h1Chain) swapLocked(fresh *http1.Layer) {
 	_ = c.current.Close()
 	c.current = fresh
-	c.layers = append(c.layers, fresh)
-	c.bumpGenerationLocked()
+	c.generation++
 	if c.stack != nil {
 		c.stack.ReplaceUpstreamTop(fresh)
 	}
@@ -132,7 +137,7 @@ func (c *h1Chain) Acquire(ctx context.Context, target string) (*http1.Layer, err
 // holds c.mu. Later stale redials and replay retries dial target.
 func (c *h1Chain) retargetLocked(ctx context.Context, target string) (*http1.Layer, error) {
 	from := c.target
-	fresh, err := c.router.Retarget(ctx, c.current, target, len(c.layers))
+	fresh, err := c.router.Retarget(ctx, c.current, target, c.generation+1)
 	if err != nil {
 		if c.logger != nil {
 			c.logger.Debug("proxybuild: http1 forward retarget refused",
@@ -145,7 +150,7 @@ func (c *h1Chain) retargetLocked(ctx context.Context, target string) (*http1.Lay
 	c.upstream = connector.SameUpstreamTarget(target)
 	if c.logger != nil {
 		c.logger.Debug("proxybuild: http1 upstream retargeted",
-			"from", from, "target", target, "trigger", "retarget", "generation", len(c.layers)-1)
+			"from", from, "target", target, "trigger", "retarget", "generation", c.generation)
 	}
 	return fresh, nil
 }
@@ -166,7 +171,6 @@ func newH1Chain(
 ) *h1Chain {
 	return &h1Chain{
 		current:  initial,
-		layers:   []*http1.Layer{initial},
 		target:   upstream.Dial,
 		cfg:      cfg,
 		upstream: upstream,
@@ -206,9 +210,9 @@ func (c *h1Chain) ensureFreshLocked(ctx context.Context) (*http1.Layer, error) {
 	c.metrics.incStaleDetectedHealthcheck()
 	if c.logger != nil {
 		c.logger.Debug("proxybuild: http1 stale detected, redialing",
-			"target", c.target, "trigger", "healthcheck", "generation", len(c.layers))
+			"target", c.target, "trigger", "healthcheck", "generation", c.generation+1)
 	}
-	fresh, err := connector.RedialUpstreamH1(ctx, c.upstream, c.shape, c.current, c.cfg, len(c.layers))
+	fresh, err := connector.RedialUpstreamH1(ctx, c.upstream, c.shape, c.current, c.cfg, c.generation+1)
 	if err != nil {
 		c.metrics.incRedialFailedHealthcheck()
 		if c.logger != nil {
@@ -222,6 +226,7 @@ func (c *h1Chain) ensureFreshLocked(ctx context.Context) (*http1.Layer, error) {
 	// construction there is no in-flight Channel reader to disrupt. Close
 	// is sync.Once-guarded inside the Layer.
 	c.swapLocked(fresh)
+	c.bumpGenerationLocked()
 	c.metrics.incRedialHealthcheck()
 	return fresh, nil
 }
@@ -232,7 +237,7 @@ func (c *h1Chain) ensureFreshLocked(ctx context.Context) (*http1.Layer, error) {
 // closed mid-Write, so re-running HealthCheck would just confirm what the
 // failed write already proved. The unconditional dial path is symmetric
 // to EnsureFresh's redial branch (lines 71-82) — same RedialUpstreamH1
-// call, same close-stale + append + swap-current bookkeeping — minus the
+// call, same close-stale + swap-current bookkeeping — minus the
 // HealthCheck short-circuit.
 //
 // Concurrency: acquires c.mu so concurrent EnsureFresh and closeAll are
@@ -252,7 +257,7 @@ func (c *h1Chain) ensureFreshLocked(ctx context.Context) (*http1.Layer, error) {
 func (c *h1Chain) Redial(ctx context.Context) (*http1.Layer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	fresh, err := connector.RedialUpstreamH1(ctx, c.upstream, c.shape, c.current, c.cfg, len(c.layers))
+	fresh, err := connector.RedialUpstreamH1(ctx, c.upstream, c.shape, c.current, c.cfg, c.generation+1)
 	if err != nil {
 		c.metrics.incRedialFailedWriteEpipe()
 		if c.logger != nil {
@@ -266,30 +271,44 @@ func (c *h1Chain) Redial(ctx context.Context) (*http1.Layer, error) {
 	// per exchange — there is no in-flight reader on c.current to
 	// disrupt. Close is sync.Once-guarded inside the Layer.
 	c.swapLocked(fresh)
+	c.bumpGenerationLocked()
 	c.metrics.incRedialWriteEpipe()
 	if c.logger != nil {
 		c.logger.Debug("proxybuild: http1 redialed after write EPIPE",
-			"target", c.target, "trigger", "write_epipe", "generation", len(c.layers)-1)
+			"target", c.target, "trigger", "write_epipe", "generation", c.generation)
 	}
 	return fresh, nil
 }
 
 // bumpGenerationLocked updates the chain-generation gauges after a
-// successful redial-append. Caller MUST hold c.mu — both the layer
-// slice and the local liveGen are mutated. The generation value
-// reported to the metrics struct is the number of redial steps
-// (len(layers) - 1) so the implicit initial Layer is generation 0
-// and the first redial is generation 1, matching the
-// RedialUpstreamH1(generation=N) ConnID suffix convention.
+// successful stale / write-EPIPE redial (not after a forward retarget).
+// Caller MUST hold c.mu — liveGen is mutated. The value reported to the
+// metrics struct is the number of redial steps, so the first redial is
+// generation 1.
 func (c *h1Chain) bumpGenerationLocked() {
-	gen := int64(len(c.layers) - 1)
-	c.liveGen = gen
-	c.metrics.observeChainGeneration(gen)
+	c.liveGen++
+	c.metrics.observeChainGeneration(c.liveGen)
 }
 
-// closeAll closes every Layer in the chain. Called from the CONNECT-exit
-// deferred cleanup in runHTTP1ExchangeLoop so every redial step's parser
-// goroutine and underlying conn is torn down.
+// boundTarget returns the target a record made outside an exchange (a
+// request head the client Layer closed, USK-1181) names as the
+// connection's target. On a forward-routing chain (USK-1410) that is the
+// current upstream's dial target — after a switch the connection is bound
+// to the last target switched to, not the first request's. Every other
+// chain is pinned, so connTarget (the stack's target) is returned as is.
+func (c *h1Chain) boundTarget(connTarget string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.router == nil {
+		return connTarget
+	}
+	return c.target
+}
+
+// closeAll closes the chain's current Layer — every predecessor was
+// closed when it was swapped out. Called from the CONNECT-exit deferred
+// cleanup in runHTTP1ExchangeLoop so the live parser goroutine and
+// underlying conn are torn down.
 //
 // USK-1000: releases this chain's contribution to the manager-wide
 // chainGenerationLive gauge so the gauge stays meaningful across many
@@ -297,9 +316,7 @@ func (c *h1Chain) bumpGenerationLocked() {
 func (c *h1Chain) closeAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, l := range c.layers {
-		_ = l.Close()
-	}
+	_ = c.current.Close()
 	if c.liveGen > 0 {
 		c.metrics.releaseChainGeneration(c.liveGen)
 		c.liveGen = 0

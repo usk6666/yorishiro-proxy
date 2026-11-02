@@ -747,3 +747,28 @@ func TestProxybuild_ForwardRetarget_UnresolvableAfterSwitchTagsCurrentTarget(t *
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// Review F-3: switching targets is not staleness. Alternating A/B on one
+// keep-alive connection leaves the chain_generation gauges (stale / EPIPE
+// redial steps) at zero.
+func TestProxybuild_ForwardRetarget_SwitchesDoNotBumpChainGeneration(t *testing.T) {
+	a := startRTUpstream(t, "A", 0)
+	b := startRTUpstream(t, "B", 0)
+	m := proxybuild.NewH1UpstreamMetrics()
+	_, proxyAddr := startRetargetProxy(t, func(d *proxybuild.Deps) { d.H1UpstreamMetrics = m })
+	c, br := fwdDial(t, proxyAddr)
+
+	for i := 0; i < 6; i++ {
+		u := a
+		if i%2 == 1 {
+			u = b
+		}
+		rtWrite(t, c, absGet(u.addr(), "/r"+strconv.Itoa(i)))
+		if r := readRTResponse(t, br); r.status != 200 || r.upstream != u.name {
+			t.Fatalf("response %d = %+v, want 200 from %s", i, r, u.name)
+		}
+	}
+	if snap := m.Snapshot(); snap.ChainGenerationLive != 0 || snap.ChainGenerationMax != 0 {
+		t.Errorf("chain_generation live=%d max=%d after 5 forward switches, want 0/0", snap.ChainGenerationLive, snap.ChainGenerationMax)
+	}
+}

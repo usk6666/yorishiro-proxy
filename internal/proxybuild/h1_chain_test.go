@@ -2,7 +2,9 @@ package proxybuild
 
 import (
 	"context"
+	"errors"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -105,8 +107,9 @@ func TestH1Chain_EnsureFresh_RedialFailureSurfaced(t *testing.T) {
 	}
 }
 
-// TestH1Chain_CloseAll_ClosesEveryLayer verifies that closeAll Closes
-// every layer registered in the chain, including the original. The
+// TestH1Chain_CloseAll_ClosesEveryLayer verifies that after a swap both
+// the original and the swapped-in Layer end up closed once closeAll runs:
+// the predecessor by the swap itself, the current one by closeAll. The
 // underlying conn close is observable via a Read on the peer side.
 func TestH1Chain_CloseAll_ClosesEveryLayer(t *testing.T) {
 	client1, server1 := testTCPPair(t)
@@ -118,12 +121,11 @@ func TestH1Chain_CloseAll_ClosesEveryLayer(t *testing.T) {
 	layer2 := http1.New(server2, "stream-close-2", envelope.Receive)
 
 	chain := newH1Chain(layer1, connector.SameUpstreamTarget("example.com:443"), connector.UpstreamTLSProfiled, nil, nil, nil)
-	// Simulate a prior successful redial by injecting the second Layer
-	// into the chain by hand. The real path appends through EnsureFresh's
-	// dial; here we exercise closeAll's iteration shape directly without
-	// needing a working dial.
-	chain.layers = append(chain.layers, layer2)
-	chain.current = layer2
+	// Simulate a prior successful redial by swapping the second Layer in
+	// by hand, the bookkeeping every real redial / retarget runs.
+	chain.mu.Lock()
+	chain.swapLocked(layer2)
+	chain.mu.Unlock()
 
 	chain.closeAll()
 
@@ -138,6 +140,67 @@ func TestH1Chain_CloseAll_ClosesEveryLayer(t *testing.T) {
 	if _, err := client2.Read(buf[:]); err == nil {
 		t.Error("closeAll: layer2 conn still readable; expected EOF after Close")
 	}
+}
+
+// TestH1Chain_SwapRetainsOnlyCurrent covers a client that switches its
+// forward target many times on one connection (USK-1410): each swap
+// closes and drops its predecessor, so the chain holds only the live
+// Layer, the ConnID generation keeps advancing, and — swaps alone being
+// no staleness — the chain_generation gauges stay untouched.
+func TestH1Chain_SwapRetainsOnlyCurrent(t *testing.T) {
+	const swaps = 8
+	m := NewH1UpstreamMetrics()
+	peers := make([]net.Conn, 0, swaps+1)
+	newLayer := func(i int) *http1.Layer {
+		client, server := testTCPPair(t)
+		peers = append(peers, client)
+		return http1.New(server, "stream-swap-"+strconv.Itoa(i), envelope.Receive)
+	}
+
+	chain := newH1Chain(newLayer(0), connector.SameUpstreamTarget("a.example:80"), connector.UpstreamTLSProfiled, nil, discardLogger(), m)
+	var last *http1.Layer
+	for i := 1; i <= swaps; i++ {
+		last = newLayer(i)
+		chain.mu.Lock()
+		chain.swapLocked(last)
+		chain.mu.Unlock()
+	}
+
+	if chain.current != last {
+		t.Fatal("current is not the last swapped-in Layer")
+	}
+	if chain.generation != swaps {
+		t.Errorf("generation = %d, want %d", chain.generation, swaps)
+	}
+	if chain.liveGen != 0 {
+		t.Errorf("liveGen = %d after swaps alone, want 0", chain.liveGen)
+	}
+	if snap := m.Snapshot(); snap.ChainGenerationLive != 0 || snap.ChainGenerationMax != 0 {
+		t.Errorf("chain_generation live=%d max=%d after swaps alone, want 0/0", snap.ChainGenerationLive, snap.ChainGenerationMax)
+	}
+	// Every predecessor is already closed; the current one is still open.
+	var buf [1]byte
+	for i, c := range peers[:swaps] {
+		_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		if _, err := c.Read(buf[:]); err == nil {
+			t.Errorf("predecessor %d still readable after its swap; want closed", i)
+		}
+	}
+	_ = peers[swaps].SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if _, err := peers[swaps].Read(buf[:]); err == nil || !isTimeout(err) {
+		t.Errorf("current Layer's conn: Read err = %v, want a timeout (still open)", err)
+	}
+
+	chain.closeAll()
+	_ = peers[swaps].SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	if _, err := peers[swaps].Read(buf[:]); err == nil || isTimeout(err) {
+		t.Errorf("current Layer's conn after closeAll: Read err = %v, want EOF", err)
+	}
+}
+
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // _ guards against the linter pruning the connector import when none of

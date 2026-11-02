@@ -1151,7 +1151,9 @@ func runHTTP1Exchange(
 		// USK-1181: a request head the Layer itself closed (deadline,
 		// 414, 431) never became an envelope; record it here.
 		_ = clientCh.Close()
-		recordH1RequestHead(ctx, headRecorder, stack.ConnID, target, err)
+		// USK-1410: on a forward stack, name the upstream the connection
+		// is bound to now, which a switch may have moved off target.
+		recordH1RequestHead(ctx, headRecorder, stack.ConnID, chain.boundTarget(target), err)
 		if !errors.Is(err, context.Canceled) {
 			logger.Debug("proxybuild: http1 dispatch failed",
 				"target", target, "stream_id", clientCh.StreamID(), "error", err)
