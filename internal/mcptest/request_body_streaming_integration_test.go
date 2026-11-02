@@ -20,10 +20,16 @@ import (
 )
 
 // waitUploadStream polls `query flows` until one Stream matches urlPattern
-// in state (any state when ""), returning it.
+// (any http Stream when "") in state (any state when ""), returning it.
+// A Stream whose request body is still uploading has no send message yet,
+// and url_pattern matches the recorded request, so such a Stream is found
+// with urlPattern "" (each test runs its own harness).
 func waitUploadStream(t *testing.T, h *mcptest.Harness, urlPattern, state string) map[string]any {
 	t.Helper()
-	filter := map[string]any{"url_pattern": urlPattern}
+	filter := map[string]any{"protocol": "http"}
+	if urlPattern != "" {
+		filter["url_pattern"] = urlPattern
+	}
 	if state != "" {
 		filter["state"] = state
 	}
@@ -77,7 +83,7 @@ func TestE2E_RequestBodyStreaming_RecordingLifecycle(t *testing.T) {
 		t.Fatal("the upstream did not receive the first body fragment before the client sent the rest (request body buffered)")
 	}
 
-	st := waitUploadStream(t, h, "/rec-upload", "")
+	st := waitUploadStream(t, h, "", "")
 	if s, _ := st["state"].(string); s != "active" {
 		t.Errorf("Stream state while the body is uploading = %q, want active", s)
 	}
@@ -125,7 +131,7 @@ func TestE2E_RequestBodyStreaming_ClientCutMidBody(t *testing.T) {
 
 	c := dialUploadProxy(t, proxyAddr)
 	fmt.Fprintf(c, "POST http://%s/cut-upload HTTP/1.1\r\nHost: %s\r\nContent-Length: 1000\r\n\r\n%s", upstream, upstream, strings.Repeat("c", sent))
-	st := waitUploadStream(t, h, "/cut-upload", "")
+	st := waitUploadStream(t, h, "", "")
 	_ = c.Close()
 
 	select {
