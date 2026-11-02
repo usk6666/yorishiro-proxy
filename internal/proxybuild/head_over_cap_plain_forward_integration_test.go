@@ -17,7 +17,8 @@ import (
 // TestProxybuild_PlainForward_HeadOverRawCaptureCap_ByteIdentical
 // (USK-1320, T10): through the production live stack (plain forward,
 // absolute-form), a request and a response whose header sections exceed
-// max_raw_capture_size reach the other side byte-identical. The cap is a
+// max_raw_capture_size reach the other side byte-identical (the request in
+// origin-form since USK-1117; every other byte unchanged). The cap is a
 // recording policy only. The within-cap subtest is the control proving the
 // fixture is forwarded verbatim at all.
 func TestProxybuild_PlainForward_HeadOverRawCaptureCap_ByteIdentical(t *testing.T) {
@@ -44,6 +45,10 @@ func TestProxybuild_PlainForward_HeadOverRawCaptureCap_ByteIdentical(t *testing.
 			upAddr := upLn.Addr().String()
 			reqWire := fmt.Sprintf("POST http://%s/p HTTP/1.1\r\nHost: %s\r\nX-Long: %s\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc",
 				upAddr, upAddr, strings.Repeat("a", 300))
+			// USK-1117: the forward proxy sends origin-form; every other
+			// byte of the over-cap head (read from WireHead, not the
+			// capped record copy) is unchanged.
+			wantUp := strings.Replace(reqWire, "http://"+upAddr+"/p", "/p", 1)
 
 			gotReq := make(chan []byte, 1)
 			go func() {
@@ -54,7 +59,7 @@ func TestProxybuild_PlainForward_HeadOverRawCaptureCap_ByteIdentical(t *testing.
 				}
 				defer c.Close()
 				_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
-				buf := make([]byte, len(reqWire))
+				buf := make([]byte, len(wantUp))
 				n, _ := io.ReadFull(c, buf)
 				gotReq <- buf[:n]
 				_, _ = c.Write([]byte(respWire))
@@ -80,8 +85,8 @@ func TestProxybuild_PlainForward_HeadOverRawCaptureCap_ByteIdentical(t *testing.
 			case <-time.After(10 * time.Second):
 				t.Fatal("upstream never accepted")
 			}
-			if string(up) != reqWire {
-				t.Errorf("upstream request differs:\ngot  %q\nwant %q", up, reqWire)
+			if string(up) != wantUp {
+				t.Errorf("upstream request differs:\ngot  %q\nwant %q", up, wantUp)
 			}
 			if string(resp) != respWire {
 				t.Errorf("client response differs:\ngot  %q\nwant %q", resp, respWire)

@@ -126,6 +126,11 @@ type proxyStartInput struct {
 	// server-first (passthrough). Default 1000.
 	TransparentPeekTimeoutMs *int `json:"transparent_peek_timeout_ms,omitempty" jsonschema:"transparent mode only: milliseconds to wait for the client's first bytes before relaying as server-first passthrough (100-600000; default: 1000)"`
 
+	// ForwardAsReceived (USK-1117) turns off the plain-HTTP forward-proxy
+	// egress form for this listener. Omitted inherits the config-file
+	// default (false when none).
+	ForwardAsReceived *bool `json:"forward_as_received,omitempty" jsonschema:"plain-HTTP forward proxy only: true relays each request to the upstream exactly as the client sent it (absolute-form request-target, Proxy-Connection / Proxy-Authorization included); false (default) sends origin-form (path + query, Host header as sent) without those two headers, as a client talking to the origin directly would. The recording is the received bytes either way. No effect on CONNECT / SOCKS5 tunnels or transparent mode. Full reference: call docs(topic=\"proxy_start\")"`
+
 	// TLSFingerprint selects the TLS ClientHello fingerprint profile for upstream connections.
 	// Valid values: "firefox" (default), "chrome", "safari", "edge", "random", "none" (standard crypto/tls).
 	// If omitted, defaults to "firefox" (camoufox coherence, USK-1013).
@@ -322,6 +327,8 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	if err != nil {
 		return nil, nil, err
 	}
+	// USK-1117: per-listener forward_as_received (config default merged).
+	listenerOpts.ForwardAsReceived = input.ForwardAsReceived != nil && *input.ForwardAsReceived
 
 	// Start the listener BEFORE resetting/applying settings.
 	// This ensures a failed start (already running, bind error) does not
@@ -1003,6 +1010,12 @@ func applyProxyDefaultTransparent(input *proxyStartInput, d *config.ProxyConfig)
 	if input.TransparentPeekTimeoutMs == nil && d.TransparentPeekTimeoutMs != 0 {
 		ms := d.TransparentPeekTimeoutMs
 		input.TransparentPeekTimeoutMs = &ms
+	}
+	// USK-1117: an omitted forward_as_received inherits the config-file
+	// value; an explicit false overrides a config-file true.
+	if input.ForwardAsReceived == nil && d.ForwardAsReceived {
+		v := true
+		input.ForwardAsReceived = &v
 	}
 }
 

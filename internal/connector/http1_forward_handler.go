@@ -72,8 +72,25 @@ type HTTP1ForwardHandlerConfig struct {
 	// answered 403 (USK-1403). Nil disables — the refusal is only logged.
 	OnGateRefusal OnGateRefusalFunc
 
+	// ForwardAsReceived disables the forward-proxy egress form (USK-1117):
+	// when false (the default) the upstream request is origin-form without
+	// Proxy-Connection / Proxy-Authorization; when true it is relayed
+	// verbatim, absolute-form and Proxy-* included. The recording is the
+	// received bytes either way. Per listener (forward_as_received).
+	ForwardAsReceived bool
+
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
+}
+
+// plainHTTPStackOptions returns the BuildPlainHTTPStack options the
+// forward handler builds every stack with: the forward-proxy egress form
+// (USK-1117) unless ForwardAsReceived.
+func (cfg HTTP1ForwardHandlerConfig) plainHTTPStackOptions() []PlainHTTPStackOption {
+	if cfg.ForwardAsReceived {
+		return nil
+	}
+	return []PlainHTTPStackOption{WithForwardProxyOriginForm()}
 }
 
 // dialTimeoutPlainHTTP bounds the per-request upstream TCP dial. Aligned with
@@ -271,7 +288,7 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 		// Step 5: Build the per-connection stack. After this point the
 		// stack owns both conns; failures must close upstreamConn explicitly
 		// (which BuildPlainHTTPStack does NOT do — it only constructs).
-		stack, berr := BuildPlainHTTPStack(ctx, pc, upstreamConn, target, cfg.BuildCfg)
+		stack, berr := BuildPlainHTTPStack(ctx, pc, upstreamConn, target, cfg.BuildCfg, cfg.plainHTTPStackOptions()...)
 		if berr != nil {
 			upstreamConn.Close()
 			connLogger.Warn("plain HTTP stack build failed", "error", berr)

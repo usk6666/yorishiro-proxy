@@ -332,6 +332,14 @@ type Deps struct {
 	// NameResolver resolves SNI / Host names for the transparent
 	// name-binding check. Nil = net.DefaultResolver.
 	NameResolver connector.NameResolver
+
+	// ForwardAsReceived turns off the plain-HTTP forward-proxy egress form
+	// for this listener (USK-1117, forward_as_received): false (default)
+	// sends the upstream origin-form without Proxy-Connection /
+	// Proxy-Authorization, true relays the request verbatim. Only the
+	// plain-HTTP forward handler reads it; on a transparent listener it is
+	// a no-op.
+	ForwardAsReceived bool
 }
 
 // Stack holds the per-listener live RFC-001 assembly produced by
@@ -608,7 +616,9 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		// with the 400 the handler returns.
 		OnRequestHeadFailure: connectorRequestHeadCallback(headRecorder),
 		OnGateRefusal:        onGateRefusal,
-		Logger:               logger,
+		// USK-1117: origin-form + Proxy-* removal unless forward_as_received.
+		ForwardAsReceived: deps.ForwardAsReceived,
+		Logger:            logger,
 	})
 
 	flCfg := connector.FullListenerConfig{
