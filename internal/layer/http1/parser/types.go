@@ -320,6 +320,11 @@ type RawResponse struct {
 	// the absolute byte cap.
 	RawBodyTruncated bool
 	Anomalies        []Anomaly
+	// Close is true when the response makes the connection non-reusable:
+	// a Connection header carrying the close token (any casing, any of the
+	// Connection headers, anywhere in a token list), or HTTP/1.0 without
+	// keep-alive. The same rule as RawRequest.Close.
+	Close bool
 
 	// Truncated is true when RawBytes was capped at MaxRawCaptureSize.
 	Truncated bool
