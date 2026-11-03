@@ -225,11 +225,34 @@ func acceptStream(t *testing.T, l *http2.Layer) layer.Channel {
 	}
 }
 
+// nextWithin calls ch.Next bounded by d. The Next context itself is not
+// cancelled when nextWithin returns: a streamed body's reads run on the
+// context of the Next that emitted its head (USK-1401 R7), as the
+// session's long-lived context does.
 func nextWithin(t *testing.T, ch layer.Channel, d time.Duration) (*envelope.Envelope, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), d)
-	defer cancel()
-	return ch.Next(ctx)
+	type res struct {
+		env *envelope.Envelope
+		err error
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan res, 1)
+	go func() {
+		env, err := ch.Next(ctx)
+		done <- res{env, err}
+	}()
+	select {
+	case r := <-done:
+		return r.env, r.err
+	case <-time.After(d):
+		cancel()
+		r := <-done
+		if r.err == nil {
+			return r.env, nil
+		}
+		return nil, context.DeadlineExceeded
+	}
 }
 
 // nextWithCtx is agg.Next(ctx) bounded by 5s, for a ctx the test cancels
@@ -890,7 +913,8 @@ func TestBufferedRawBuffer(t *testing.T) {
 		if !marked {
 			t.Error("no AnomalyRawBodyTruncated on a capture cut at max_record_body_size")
 		}
-		_ = env.RawBuffer.Release()
+		// The 4 KiB body itself spilled too (BodyBuffer); release both.
+		env.ReleaseBuffers()
 		if n := spillFiles(t, dir); n != 0 {
 			t.Errorf("%d spill files remain after the RawBuffer was released", n)
 		}
@@ -909,8 +933,6 @@ func TestBufferedRawBuffer(t *testing.T) {
 				t.Error("AnomalyRawBodyTruncated on an uncut capture")
 			}
 		}
-		if env.RawBuffer != nil {
-			_ = env.RawBuffer.Release()
-		}
+		env.ReleaseBuffers()
 	})
 }
