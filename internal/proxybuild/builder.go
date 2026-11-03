@@ -1301,10 +1301,8 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 				"target", target, "type", fmt.Sprintf("%T", stack.ClientTopmost()))
 			return
 		}
-		clientLOpts := httpaggregator.OptionsFromLayer(clientL)
-		clientLOpts.StateReleaser = deps.PluginV2Engine
-		upstreamLOpts := httpaggregator.OptionsFromLayer(upstreamH2)
-		upstreamLOpts.StateReleaser = deps.PluginV2Engine
+		clientLOpts, upstreamLOpts := h2AggregatorOptions(clientL, upstreamH2, deps.PluginV2Engine,
+			deps.BuildConfig, deps.RecordMaxBodySize)
 
 		// USK-816 / USK-991: when the pooled upstreamH2 (or a previously
 		// redialed Layer) goes stale during a long intercept hold — server
@@ -1451,8 +1449,7 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 						// configuration matches the original.
 						lopts := upstreamLOpts
 						if upL != upstreamH2 {
-							lopts = httpaggregator.OptionsFromLayer(upL)
-							lopts.StateReleaser = deps.PluginV2Engine
+							lopts = upstreamLOpts.WithLayer(upL)
 						}
 						// USK-771: wrap the upstream channel with the same
 						// per-protocol layer the client side chose. Without

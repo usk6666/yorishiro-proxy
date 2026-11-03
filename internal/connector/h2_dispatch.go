@@ -134,7 +134,7 @@ func DispatchH2StreamFull(
 			"path", evt.Path,
 			"content_type", ct,
 		)
-		aggCh := httpaggregator.Wrap(ch, role, firstEnv, lopts, aggregatorOpts...)
+		aggCh := httpaggregator.Wrap(ch, role, firstEnv, grpcWebAggregatorOptions(lopts), aggregatorOpts...)
 		return grpcweb.Wrap(aggCh, translateRoleForGRPCWeb(role), grpcwebOpts...), nil
 	}
 
@@ -213,11 +213,22 @@ func WrapH2UpstreamForDispatchFull(
 	case envelope.ProtocolGRPC:
 		return grpclayer.Wrap(upCh, nil, grpclayer.RoleClient, grpcOpts...)
 	case envelope.ProtocolGRPCWeb:
-		aggCh := httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, upstreamLOpts, aggregatorOpts...)
+		aggCh := httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, grpcWebAggregatorOptions(upstreamLOpts), aggregatorOpts...)
 		return grpcweb.Wrap(aggCh, grpcweb.RoleClient, grpcwebOpts...)
 	default:
 		return httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, upstreamLOpts, aggregatorOpts...)
 	}
+}
+
+// grpcWebAggregatorOptions returns lopts for the aggregator under a gRPC-Web
+// Channel: the gRPC-Web Layer reassembles whole bodies, so the body is
+// always buffered (no body-mode predicate, USK-1401 R5). On the upstream
+// side the branch follows the request protocol, so this holds whatever
+// content-type the response carries; the predicate's own gRPC-Web
+// content-type check is a second guard.
+func grpcWebAggregatorOptions(lopts httpaggregator.WrapOptions) httpaggregator.WrapOptions {
+	lopts.BodyMode = nil
+	return lopts
 }
 
 // GRPCOptionsFromBuildConfig assembles the [grpclayer.Option] slice from

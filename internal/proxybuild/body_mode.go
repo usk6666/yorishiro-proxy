@@ -3,8 +3,11 @@ package proxybuild
 import (
 	"strings"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
@@ -122,4 +125,29 @@ func headerValue(headers []envelope.KeyValue, name string) string {
 		}
 	}
 	return ""
+}
+
+// h2AggregatorOptions returns the httpaggregator WrapOptions for the
+// client-facing and the upstream-facing aggregators of an HTTP/2 stream
+// pair (USK-1401 R1): body-spill settings from each Layer, the plugin state
+// releaser, the body-mode predicates of bc (requests on the client side,
+// responses on the upstream side) and the record cap for the buffered raw
+// capture. recordCap is max_record_body_size; zero falls back to
+// bc.RecordMaxBodySize. A stream on a redialed upstream Layer takes
+// upstream.WithLayer(redialed), which keeps all of this.
+func h2AggregatorOptions(clientL, upstreamL *http2.Layer, eng *pluginv2.Engine, bc *connector.BuildConfig, recordCap int64) (client, upstream httpaggregator.WrapOptions) {
+	client = httpaggregator.OptionsFromLayer(clientL)
+	client.StateReleaser = eng
+	upstream = httpaggregator.OptionsFromLayer(upstreamL)
+	upstream.StateReleaser = eng
+	if bc != nil {
+		client.BodyMode = bc.RequestBodyMode
+		upstream.BodyMode = bc.ResponseBodyMode
+		if recordCap <= 0 {
+			recordCap = bc.RecordMaxBodySize
+		}
+	}
+	client.MaxRecordBodySize = recordCap
+	upstream.MaxRecordBodySize = recordCap
+	return client, upstream
 }
