@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -140,12 +141,95 @@ func TestSendRequest_BodyStageErrorComposition(t *testing.T) {
 	}
 }
 
+// gatedWriteConn passes Writes before the gateFrom-th (1-based) and blocks
+// that one and every later one — as a socket whose peer stopped reading
+// blocks once its send buffer is full — until release (the Write then goes
+// through), a write deadline at or before now (it fails with
+// os.ErrDeadlineExceeded) or Close (net.ErrClosed), the way a net.Conn's
+// pending Write does.
+type gatedWriteConn struct {
+	net.Conn
+	gateFrom int32
+	writes   atomic.Int32
+
+	blocked     chan struct{} // closed when the first gated Write blocks
+	blockedOnce sync.Once
+	pass        chan struct{} // closed by release
+	passOnce    sync.Once
+	fail        chan struct{} // closed by failWith; failErr is set first
+	failOnce    sync.Once
+	failErr     error
+}
+
+func newGatedWriteConn(c net.Conn, gateFrom int32) *gatedWriteConn {
+	return &gatedWriteConn{
+		Conn:     c,
+		gateFrom: gateFrom,
+		blocked:  make(chan struct{}),
+		pass:     make(chan struct{}),
+		fail:     make(chan struct{}),
+	}
+}
+
+func (c *gatedWriteConn) Write(p []byte) (int, error) {
+	if c.writes.Add(1) < c.gateFrom {
+		return c.Conn.Write(p)
+	}
+	select {
+	case <-c.fail:
+		return 0, c.failErr
+	default:
+	}
+	c.blockedOnce.Do(func() { close(c.blocked) })
+	select {
+	case <-c.fail:
+		return 0, c.failErr
+	case <-c.pass:
+		return c.Conn.Write(p)
+	}
+}
+
+func (c *gatedWriteConn) SetWriteDeadline(d time.Time) error {
+	if !d.IsZero() && !d.After(time.Now()) {
+		c.failWith(os.ErrDeadlineExceeded)
+	}
+	return c.Conn.SetWriteDeadline(d)
+}
+
+func (c *gatedWriteConn) Close() error {
+	c.failWith(net.ErrClosed)
+	return c.Conn.Close()
+}
+
+func (c *gatedWriteConn) release() { c.passOnce.Do(func() { close(c.pass) }) }
+
+func (c *gatedWriteConn) failWith(err error) {
+	c.failOnce.Do(func() {
+		c.failErr = err
+		close(c.fail)
+	})
+}
+
+// waitClosed waits until ch is closed, bounded by 5s.
+func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not happen within 5s", what)
+	}
+}
+
 // newAnsweringUpstream builds a Receive-direction Layer over a real TCP
 // pair whose peer records every byte it reads; the peer conn is returned
-// so the test can write the response.
-func newAnsweringUpstream(t *testing.T) (*Layer, net.Conn, *wireCapture) {
+// so the test can write the response. wrap, when non-nil, wraps the
+// Layer's side of the pair.
+func newAnsweringUpstream(t *testing.T, wrap func(net.Conn) net.Conn) (*Layer, net.Conn, *wireCapture) {
 	t.Helper()
 	peer, server := testConn(t)
+	if wrap != nil {
+		server = wrap(server)
+	}
 	l := New(server, "answering-up", envelope.Receive)
 	t.Cleanup(func() {
 		_ = l.Close()
@@ -199,22 +283,40 @@ func readResponseHeadWithin(t *testing.T, conn net.Conn, br *bufio.Reader) strin
 // reads the response, then the end of its connection. A reusable response
 // keeps the forwarding going: the whole body reaches the upstream and the
 // client connection carries the next request.
+//
+// gateFrom > 0 blocks the upstream conn's Writes from that one on
+// (gatedWriteConn). 2 blocks the first body write, as against an upstream
+// that stopped reading: only the stop's write deadline unblocks it. 1 blocks
+// the head write until the response was delivered, so the stop comes before
+// the upstream Layer was registered as the body's forward target.
 func TestRequestStream_EarlyFinalResponse(t *testing.T) {
+	const closeResp = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 	tests := []struct {
 		name     string
 		response string
 		stop     bool
+		gateFrom int32
 	}{
-		{"connection close", "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", true},
-		{"close token in list mixed case", "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nconnection: keep-alive, Close\r\n\r\n", true},
-		{"http10 without keep-alive", "HTTP/1.0 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n", true},
-		{"http10 keep-alive", "HTTP/1.0 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n", false},
-		{"http11 keep-alive", "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n", false},
+		{"connection close", closeResp, true, 0},
+		{"connection close, body write blocked", closeResp, true, 2},
+		{"connection close before the body forwarding started", closeResp, true, 1},
+		{"close token in list mixed case", "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nconnection: keep-alive, Close\r\n\r\n", true, 0},
+		{"http10 without keep-alive", "HTTP/1.0 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n", true, 0},
+		{"http10 keep-alive", "HTTP/1.0 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n", false, 0},
+		{"http11 keep-alive", "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n", false, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cl, peer := newStreamingClient(t, streamAll)
-			up, upPeer, wire := newAnsweringUpstream(t)
+			var gate *gatedWriteConn
+			var wrap func(net.Conn) net.Conn
+			if tt.gateFrom > 0 {
+				wrap = func(c net.Conn) net.Conn {
+					gate = newGatedWriteConn(c, tt.gateFrom)
+					return gate
+				}
+			}
+			up, upPeer, wire := newAnsweringUpstream(t, wrap)
 			const head = "PUT /big HTTP/1.1\r\nHost: up.test\r\nContent-Length: 10\r\n\r\n"
 			peerWrite(t, peer, head+"hello")
 			ch := nextChannelWithin(t, cl)
@@ -222,7 +324,18 @@ func TestRequestStream_EarlyFinalResponse(t *testing.T) {
 			streamedMsg(t, env)
 			upCh := up.OpenExchange()
 			done := sendAsync(upCh, env)
-			wire.waitLen(t, len(head)+5)
+			wantWire := head + "hello"
+			switch tt.gateFrom {
+			case 0:
+				wire.waitLen(t, len(head)+5)
+			case 1:
+				waitClosed(t, gate.blocked, "the blocked head write")
+				wantWire = head
+			case 2:
+				wire.waitLen(t, len(head))
+				waitClosed(t, gate.blocked, "the blocked body write")
+				wantWire = head
+			}
 
 			peerWrite(t, upPeer, tt.response)
 			resp, err := upCh.Next(context.Background())
@@ -231,6 +344,9 @@ func TestRequestStream_EarlyFinalResponse(t *testing.T) {
 			}
 			if err := ch.Send(context.Background(), resp); err != nil {
 				t.Fatalf("client Send response: %v", err)
+			}
+			if tt.gateFrom == 1 {
+				gate.release()
 			}
 			br := bufio.NewReader(peer)
 			if got := readResponseHeadWithin(t, peer, br); !strings.HasPrefix(got, "HTTP/1.") || !strings.Contains(got, " 413 ") {
@@ -262,8 +378,8 @@ func TestRequestStream_EarlyFinalResponse(t *testing.T) {
 			if !up.Retired() {
 				t.Error("upstream Layer not retired; its connection is mid-request")
 			}
-			if got := string(wire.bytes()); got != head+"hello" {
-				t.Errorf("upstream wire = %q, want the head and the first fragment only", got)
+			if got := string(wire.waitLen(t, len(wantWire))); got != wantWire {
+				t.Errorf("upstream wire = %q, want %q (the head and what was forwarded before the stop)", got, wantWire)
 			}
 			_ = ch.Close()
 			_ = peer.SetReadDeadline(time.Now().Add(5 * time.Second))
