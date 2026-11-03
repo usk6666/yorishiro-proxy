@@ -818,7 +818,7 @@ func (a *aggregatorChannel) absorbData(ctx context.Context, env *envelope.Envelo
 	// body-buffer mutation. The envelope passed to the callback is a
 	// fresh struct with a defensive copy of the DATA payload so the
 	// callback may retain the slice across return without interfering
-	// with the aggregator's own raw-bytes accumulation on inflight.Raw.
+	// with the aggregator's own raw-bytes capture (rawBuf).
 	if a.h2FrameCB != nil {
 		a.h2FrameCB(buildH2FrameWireEnvelope(env, evt, &a.inflight.Context))
 	}
@@ -1153,8 +1153,7 @@ func cloneBytes(b []byte) []byte {
 //
 // The defensive copy keeps the callback contract simple — consumers may
 // retain the Raw slice without coordinating with the aggregator's
-// inflight.Raw accumulation (which appends to the same backing array as
-// env.Raw). The cost is one allocation per DATA frame; for gRPC over
+// raw-bytes capture (rawBuf, surfaced as Envelope.RawBuffer). The cost is one allocation per DATA frame; for gRPC over
 // h2 this matches USK-896's grpc LPM wire-record allocation profile.
 func buildH2FrameWireEnvelope(env *envelope.Envelope, evt *http2.H2DataEvent, headCtx *envelope.EnvelopeContext) *envelope.Envelope {
 	ctx := env.Context

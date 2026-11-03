@@ -6,14 +6,23 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	xhttp2 "golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
+
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 )
 
 // mockChannel is a programmable layer.Channel used to drive both the
@@ -1670,5 +1679,147 @@ func TestSend_AuthorityFromOverlayReachesHTTPMessage(t *testing.T) {
 				t.Errorf("HTTPMessage.Scheme = %q, want %q", hm.Scheme, tc.wantScheme)
 			}
 		})
+	}
+}
+
+// rawBufferProbe sits between httpaggregator and the gRPC-Web Layer and
+// keeps a reference to the inbound message's Envelope.RawBuffer, which the
+// gRPC-Web Layer nils out on the envelope once it has released it.
+type rawBufferProbe struct {
+	layer.Channel
+	dir string
+
+	rawBuf       *bodybuf.BodyBuffer
+	bodyBuf      *bodybuf.BodyBuffer
+	filesAtEntry int
+}
+
+func (p *rawBufferProbe) Next(ctx context.Context) (*envelope.Envelope, error) {
+	env, err := p.Channel.Next(ctx)
+	if env != nil {
+		p.rawBuf = env.RawBuffer
+		if m, ok := env.Message.(*envelope.HTTPMessage); ok {
+			p.bodyBuf = m.BodyBuffer
+		}
+		p.filesAtEntry = countSpillFiles(p.dir)
+	}
+	return env, err
+}
+
+func countSpillFiles(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return -1
+	}
+	n := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), config.BodySpillPrefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestNext_ReleasesInboundH2RawBuffer (USK-1401 U1): a buffered gRPC-Web
+// request arriving over HTTP/2 carries its DATA payloads in
+// Envelope.RawBuffer, spilled to a file past body_spill_threshold. Only the
+// gRPC-Web envelopes built from it reach the session, so the gRPC-Web Layer
+// must release that capture itself, or every large message leaks a spill
+// file. Driven through a real http2 Layer (ServerRole) and httpaggregator.
+func TestNext_ReleasesInboundH2RawBuffer(t *testing.T) {
+	dir := t.TempDir()
+	cliConn, srvConn := net.Pipe()
+	t.Cleanup(func() { _ = cliConn.Close(); _ = srvConn.Close() })
+
+	// Frame-level HTTP client on the far side of the pipe.
+	fr := xhttp2.NewFramer(cliConn, cliConn)
+	var wmu sync.Mutex
+	go func() {
+		for {
+			f, err := fr.ReadFrame()
+			if err != nil {
+				return
+			}
+			if sf, ok := f.(*xhttp2.SettingsFrame); ok && !sf.IsAck() {
+				wmu.Lock()
+				_ = fr.WriteSettingsAck()
+				wmu.Unlock()
+			}
+		}
+	}()
+	go func() {
+		wmu.Lock()
+		defer wmu.Unlock()
+		_, _ = cliConn.Write([]byte(xhttp2.ClientPreface))
+		_ = fr.WriteSettings()
+	}()
+
+	l, err := http2.New(srvConn, "grpcweb-rawbuf", http2.ServerRole)
+	if err != nil {
+		t.Fatalf("http2.New: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	// A real gRPC-Web request body: one uncompressed LPM data frame whose
+	// payload is well past the 1 KiB spill threshold.
+	body := EncodeFrame(false, false, bytes.Repeat([]byte{0x0a}, 4<<10))
+	var hb bytes.Buffer
+	enc := hpack.NewEncoder(&hb)
+	for _, f := range []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "origin.test"},
+		{Name: ":path", Value: "/pkg.Svc/Method"},
+		{Name: "content-type", Value: "application/grpc-web+proto"},
+	} {
+		_ = enc.WriteField(f)
+	}
+	go func() {
+		wmu.Lock()
+		defer wmu.Unlock()
+		_ = fr.WriteHeaders(xhttp2.HeadersFrameParam{StreamID: 1, BlockFragment: hb.Bytes(), EndHeaders: true})
+		_ = fr.WriteData(1, true, body)
+	}()
+
+	var stream layer.Channel
+	select {
+	case stream = <-l.Channels():
+	case <-time.After(5 * time.Second):
+		t.Fatal("no stream accepted within 5s")
+	}
+	agg := httpaggregator.Wrap(stream, httpaggregator.RoleServer, nil,
+		httpaggregator.WrapOptions{BodySpillDir: dir, BodySpillThreshold: 1 << 10})
+	probe := &rawBufferProbe{Channel: agg, dir: dir}
+	ch := Wrap(probe, RoleServer)
+	t.Cleanup(func() { _ = ch.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	env, err := ch.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if _, ok := env.Message.(*envelope.GRPCStartMessage); !ok {
+		t.Fatalf("first envelope = %T, want *GRPCStartMessage", env.Message)
+	}
+
+	if probe.rawBuf == nil {
+		t.Fatal("inbound HTTPMessage carried no Envelope.RawBuffer; fixture did not exercise the buffered h2 capture")
+	}
+	if probe.bodyBuf == nil || probe.filesAtEntry != 2 {
+		t.Fatalf("spill files when the inbound message arrived = %d (BodyBuffer %v), want 2 (body + raw capture)",
+			probe.filesAtEntry, probe.bodyBuf)
+	}
+	if probe.rawBuf.IsFileBacked() {
+		t.Error("inbound Envelope.RawBuffer is still file-backed after the gRPC-Web Layer consumed the message")
+	}
+	// The decoded body's BodyBuffer is not this test's subject: drop it if
+	// it is still held, so the directory check below isolates the raw
+	// capture's spill file.
+	if probe.bodyBuf.IsFileBacked() {
+		_ = probe.bodyBuf.Release()
+	}
+	if n := countSpillFiles(dir); n != 0 {
+		t.Errorf("%d spill files remain after the message was consumed, want 0 (the raw capture's file removed)", n)
 	}
 }
