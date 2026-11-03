@@ -336,6 +336,7 @@ func ParseResponseWithOptions(r *bufio.Reader, opts ParseOptions) (*RawResponse,
 	}
 	resp.Headers = headers
 	resp.Anomalies = anomalies
+	resp.Close = shouldClose(resp.Headers, resp.Proto)
 
 	// Detect smuggling anomalies.
 	detectSmugglingAnomalies(resp.Headers, &resp.Anomalies)

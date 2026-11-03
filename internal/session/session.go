@@ -2922,6 +2922,24 @@ func upgradeExitOrErr(notice *UpgradeNotice, err error) error {
 	return err
 }
 
+// clientDispatchExit is clientToUpstream's exit for a dispatchClientAction
+// error. An upstream Send that failed because the upstream stopped reading
+// the request body (layer.ErrUpstreamStoppedReadingBody, USK-1415) ends the
+// request direction cleanly, like a client EOF: nil, so
+// clientToUpstreamExit does not cascade-close the upstream and the errgroup
+// is not cancelled. The response the upstream may already have sent (an
+// early 413) is then still read and delivered by upstreamToClient; when
+// none comes, that direction's read error fails the session as before.
+// Upgrade-pending keeps its precedence (upgradeExitOrErr).
+func clientDispatchExit(notice *UpgradeNotice, err error) error {
+	if errors.Is(err, layer.ErrUpstreamStoppedReadingBody) && !upgradePending(notice) {
+		slog.Debug("session: upstream stopped reading the request body; ending the request direction",
+			"error", err)
+		return nil
+	}
+	return upgradeExitOrErr(notice, err)
+}
+
 // errRPCTerminatedByProxy is returned by dispatchClientAction (and so by
 // clientToUpstream) after a Respond carrying a native-gRPC or gRPC-Web
 // GRPCEndMessage was delivered to the client (a SafetyFilter / intercept-drop terminator,
@@ -3149,8 +3167,9 @@ func clientToUpstream(
 			// errors, symmetric with the client.Next branch above. A
 			// Send that was in flight when the upgrade handoff cancelled
 			// the errgroup ctx must not be mistaken for a genuine
-			// failure — see upgradeExitOrErr.
-			return upgradeExitOrErr(notice, perr)
+			// failure — see upgradeExitOrErr. USK-1415: an upstream that
+			// stopped reading the request body ends only this direction.
+			return clientDispatchExit(notice, perr)
 		}
 		if forwarded {
 			relayed = true

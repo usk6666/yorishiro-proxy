@@ -468,6 +468,14 @@ type h1BodySource struct {
 	fwd    *bufio.Writer
 	fwdErr error
 
+	// USK-1415: a streamed request body's forwarding can be stopped from
+	// the client Channel's goroutine (stopForwarding) while the upstream
+	// Send reads it. stopMu guards stopped and fwdLayer, the upstream
+	// Layer the body is written to (set by sendRequestStreamed).
+	stopMu   sync.Mutex
+	stopped  bool
+	fwdLayer *Layer
+
 	done chan struct{}
 }
 
