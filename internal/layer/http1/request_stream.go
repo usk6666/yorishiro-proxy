@@ -367,6 +367,13 @@ func (s *h1BodySource) stopForwarding() {
 // upstream may still read the body, and early-response / CL.0 desync
 // testing needs it sent whole. A response that is not the upstream's
 // HTTP/1.x response (synthetic, HTTP/2 upstream) never stops it.
+//
+// A known race: a Content-Length body returns its last bytes without an
+// error and ends (Done) only on the next read, so a Connection: close
+// final response written in the gap between those last bytes being
+// flushed upstream and that EOF read stops a body that was in fact fully
+// read; the client connection is then ended instead of kept alive. The
+// cost is one client reconnect; recording is unaffected.
 func (c *channel) stopRequestBodyAfterResponse(msg *envelope.HTTPMessage, env *envelope.Envelope) {
 	if msg.Status < 200 {
 		return
