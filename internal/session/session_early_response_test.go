@@ -241,9 +241,11 @@ func TestRunSession_UpstreamStoppedReadingBody(t *testing.T) {
 					return tt.sendErr
 				},
 			}
+			// Every upstream Next waits until the Send happened: the
+			// response, then EOF (the end of the response direction).
 			go func() {
 				<-sent
-				upstreamCh.nextGate <- struct{}{}
+				close(upstreamCh.nextGate)
 			}()
 			dial := func(context.Context, *envelope.Envelope) (layer.Channel, error) { return upstreamCh, nil }
 
