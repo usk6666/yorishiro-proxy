@@ -488,6 +488,14 @@ func startH2MITMProxy(t *testing.T, ctx context.Context, buildCfg *connector.Bui
 		}
 		clientLOpts := httpaggregator.OptionsFromLayer(clientL)
 		upstreamLOpts := httpaggregator.OptionsFromLayer(upstreamH2)
+		// USK-1401 opt-in: a BuildConfig carrying body-mode predicates
+		// streams h2 bodies the way proxybuild wires them (requests on the
+		// client-facing aggregator, responses on the upstream-facing one).
+		// Without predicates every body is buffered, as before.
+		clientLOpts.BodyMode = buildCfg.RequestBodyMode
+		upstreamLOpts.BodyMode = buildCfg.ResponseBodyMode
+		clientLOpts.MaxRecordBodySize = opts.recordMaxBodySize
+		upstreamLOpts.MaxRecordBodySize = opts.recordMaxBodySize
 		var wg sync.WaitGroup
 		for {
 			select {

@@ -46,6 +46,19 @@ type WrapOptions struct {
 	// the corresponding ctx.transaction_state scope. nil = no-op (legacy
 	// parallel: the aggregator runs without pluginv2 wired up).
 	StateReleaser pluginv2.StateReleaser
+
+	// BodyMode decides, per message this aggregator receives (Next), whether
+	// the body is buffered or streamed (RFC-001 §3.2.1 "HTTP body
+	// streaming"): requests on a RoleServer aggregator, responses on a
+	// RoleClient one. nil buffers every body (MCP resend / fuzz, tests).
+	BodyMode layer.BodyModeFunc
+
+	// MaxRecordBodySize bounds the wire bytes (DATA payloads and trailer
+	// block) a buffered message keeps in Envelope.RawBuffer
+	// (max_record_body_size); the leading bytes are kept and the cut is
+	// marked with AnomalyRawBodyTruncated. It never bounds forwarding. Zero
+	// means config.MaxBodySize.
+	MaxRecordBodySize int64
 }
 
 // WrapOption is a functional option applied on top of WrapOptions. The

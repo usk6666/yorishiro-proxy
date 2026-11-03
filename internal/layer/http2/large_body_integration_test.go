@@ -321,8 +321,29 @@ func TestLargeBody_HTTP2_TempFileCleanupOnSessionEnd(t *testing.T) {
 // the spill; the threshold ordering above is what guarantees it. (The h2
 // smoke sibling uses threshold 0, so only this test covers the cap on the
 // spill path.)
+//
+// USK-1401: max_body_size now bounds only a body something needs whole. A
+// replace_body rule matching the response forces the buffer here (body-mode
+// predicate opted in on the harness); the assertions are the pre-USK-1401
+// ones, unchanged. The streamed counterpart is
+// TestLargeBody_HTTP2_StreamedOverMaxBodySizeReachesClient.
 
-func TestLargeBody_HTTP2_ExceedsMaxBodySizeReturnsStreamError(t *testing.T) {
+// forceBufferedResponseRule returns a Transform engine with a replace_body
+// rule that matches the response of path but never rewrites it: the
+// body-mode predicate buffers the response, the bytes are untouched.
+func forceBufferedResponseRule(t *testing.T, pathPattern string) *httprules.TransformEngine {
+	t.Helper()
+	tf := httprules.NewTransformEngine()
+	rule, err := httprules.CompileTransformRule("force-buffer", 0, httprules.DirectionResponse,
+		"", pathPattern, nil, httprules.TransformReplaceBody, "", "", "never-present-marker", "x")
+	if err != nil {
+		t.Fatalf("CompileTransformRule: %v", err)
+	}
+	tf.AddRule(*rule)
+	return tf
+}
+
+func TestLargeBody_HTTP2_BufferedExceedsMaxBodySizeReturnsStreamError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
@@ -346,9 +367,12 @@ func TestLargeBody_HTTP2_ExceedsMaxBodySizeReturnsStreamError(t *testing.T) {
 		}))
 	defer upShutdown()
 
+	tf := forceBufferedResponseRule(t, "^/toobig$")
 	spillDir := t.TempDir()
 	bcfg := makeBuildCfgWithBody(t, nil, spillDir, spillThreshold, maxBodySize)
-	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
+	bcfg.ResponseBodyMode = smokeH2BodyMode(tf)
+	bcfg.RequestBodyMode = smokeH2BodyMode(tf)
+	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{transformEngine: tf})
 
 	cli := newMITMH2Client(proxyAddr, upAddr)
 	req, _ := nethttp.NewRequestWithContext(ctx, nethttp.MethodGet, "https://"+upAddr+"/toobig", nil)
@@ -396,6 +420,65 @@ func TestLargeBody_HTTP2_ExceedsMaxBodySizeReturnsStreamError(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if sf := countH2SpillFiles(t, spillDir); sf != 0 {
 		t.Errorf("BodySpillDir has %d leftover files after MaxBodySize error, want 0", sf)
+	}
+}
+
+// TestLargeBody_HTTP2_StreamedOverMaxBodySizeReachesClient is Scenario 5
+// without a rule that needs the body (USK-1401): threshold < cap < body, the
+// response is streamed, so neither the cap nor the spill applies — the
+// client gets the whole body, the Stream completes, and no spill file is
+// ever created.
+func TestLargeBody_HTTP2_StreamedOverMaxBodySizeReachesClient(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	respBody := makeH2LargeBody(h2LargeBodySize)
+	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "maxbody-streamed",
+		nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+			w.Header().Set("Content-Length", strconv.Itoa(len(respBody)))
+			_, _ = w.Write(respBody)
+		}))
+	defer upShutdown()
+
+	spillDir := t.TempDir()
+	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, h2MaxBodyTestCap)
+	bcfg.ResponseBodyMode = smokeH2BodyMode(nil)
+	bcfg.RequestBodyMode = smokeH2BodyMode(nil)
+	inspector := &h2BufferInspector{spillDir: spillDir}
+	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{prependCustomSteps: []pipeline.Step{inspector}})
+
+	cli := newMITMH2Client(proxyAddr, upAddr)
+	req, _ := nethttp.NewRequestWithContext(ctx, nethttp.MethodGet, "https://"+upAddr+"/toobig", nil)
+	resp, err := cli.Do(req)
+	if err != nil {
+		t.Fatalf("client request: %v", err)
+	}
+	got, rerr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if rerr != nil {
+		t.Fatalf("read body after %d bytes: %v", len(got), rerr)
+	}
+	if sha256.Sum256(got) != sha256.Sum256(respBody) {
+		t.Fatalf("client body (%d bytes) differs from the %d-byte upstream body", len(got), len(respBody))
+	}
+	if n := inspector.fileBackedCount.Load(); n != 0 {
+		t.Errorf("the Pipeline saw %d file-backed bodies, want 0 (a streamed body never spills)", n)
+	}
+
+	var streamID string
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && streamID == "" {
+		for _, st := range store.getStreams() {
+			streamID = st.ID
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if streamID == "" {
+		t.Fatal("no stream recorded")
+	}
+	waitStreamReachesState(t, store, streamID, "complete", 10*time.Second)
+	if sf := countH2SpillFiles(t, spillDir); sf != 0 {
+		t.Errorf("BodySpillDir has %d leftover files, want 0", sf)
 	}
 }
 
