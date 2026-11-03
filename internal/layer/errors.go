@@ -1,6 +1,9 @@
 package layer
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrorCode categorizes stream-level errors. Values correspond to
 // HTTP/2 error codes (RFC 7540 section 7) but are used generically
@@ -84,3 +87,19 @@ func (e *StreamError) Is(target error) bool {
 	}
 	return false
 }
+
+// ErrUpstreamStoppedReadingBody reports that the upstream peer stopped
+// reading a request body the proxy was still writing: a write of body bytes,
+// after the request head was written, failed because the peer closed or
+// reset the connection (EPIPE / ECONNRESET). The upstream may already have
+// answered — an early final response such as 413 — and that response is
+// still read and delivered: a Channel whose Send returns an error matching
+// this sentinel ends only the request direction. The session treats it like
+// a clean client end (no cascade close of the upstream Channel), so the
+// response keeps flowing and the Stream ends complete when one arrives, or
+// in error when the upstream closed without answering.
+//
+// The HTTP/1.x Layer composes it with its *StaleUpstreamError (stage
+// "body"), so errors.Is(err, ErrUpstreamStoppedReadingBody) and errors.As
+// to the stale error both hold.
+var ErrUpstreamStoppedReadingBody = errors.New("upstream stopped reading the request body")
