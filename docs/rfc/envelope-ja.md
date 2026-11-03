@@ -185,11 +185,14 @@ type HTTPMessage struct {
     Headers    []KeyValue  // 順序保持・ケース保持
     Trailers   []KeyValue
     Body       []byte
-    BodyStream io.Reader   // passthrough モード時 non-nil (Body == nil)
+    BodyBuffer *bodybuf.BodyBuffer // ディスク spill された body (Body == nil)
+    BodyStream *BodyStream         // 読みながら転送される body (Body == nil, BodyBuffer == nil)
 }
 ```
 
 **注:** HTTP/2 と HTTP/1.x がこの型を共有する。wire 固有の表現との変換は下位の layer の責務。`HTTPMessage` は両者にとって *自然な* 形。
+
+**HTTP body streaming (USK-1409 / USK-1414 / USK-1401):** body は **buffered** (`Body` / `BodyBuffer`: 全体を読んでから Envelope を出す) か **streamed** (`BodyStream`: ヘッダ部の直後に Envelope を出し、消費側が転送しながら body を読む) のいずれか。`BodyStream` は `io.Reader` の素通しフィールドではなく、`internal/envelope/bodystream.go` の具象の one-shot 型 (`Observe` / `OnComplete` / `BodyResult` / 冪等な `Close`) である。HTTP/1.x と HTTP/2 はリクエスト・レスポンスの両方向で、何かが body 全体を必要とする場合 (Intercept 一致、`replace_body` 一致、リクエストの Safety body-target ルール、plugin の http hook は `BufferUpTo`) を除いて stream する。HTTP/2 では受信した DATA フレーム 1 つを DATA 1 つとして転送し (再チャンクしない)、上流の RST_STREAM はそれまでの DATA を届けた後に同じコードでクライアントへ伝わる。詳細・状態遷移・記録は英語版 [RFC-001 §3.2.1 "HTTP body streaming"](envelope.md) を正とする。
 
 #### 3.2.2 WSMessage
 

@@ -126,10 +126,15 @@ type wrapState struct {
 //     exchange. If the caller's recording path needs to perform IO that
 //     may block (DB write under contention, network call), it must
 //     dispatch its own goroutine inside cb.
-//   - Single-goroutine fire: invoked from absorbData under the
-//     aggregator's mutex, so the callback MUST NOT call back into the
-//     aggregator. The mutex hold is brief — the callback fires inline
-//     before the DATA payload is appended to the body buffer.
+//   - Single-goroutine fire per body: for a buffered body it is invoked
+//     from absorbData under the aggregator's mutex, so the callback MUST
+//     NOT call back into the aggregator. The mutex hold is brief — the
+//     callback fires inline before the DATA payload is appended to the
+//     body buffer. For a streamed body (USK-1401) it is invoked by the
+//     body's source on the goroutine reading the body (the consumer's
+//     Send), without the mutex, before the DATA is forwarded; the two
+//     directions of a stream pair may therefore fire concurrently, so the
+//     callback must be safe for that (the session's closure is).
 //   - nil = no-op (no wire-record envelope is produced; aggregator behaves
 //     identically to the pre-USK-897 contract).
 //
@@ -158,6 +163,20 @@ func OptionsFromLayer(l *http2.Layer) WrapOptions {
 		BodySpillThreshold: o.SpillThreshold,
 		MaxBodySize:        o.MaxBody,
 	}
+}
+
+// WithLayer returns o with the body-buffer fields (spill directory,
+// threshold, max body size) taken from l's BodyOpts and every other field —
+// StateReleaser, BodyMode, MaxRecordBodySize — kept. A stream opened on a
+// redialed upstream Layer is wrapped with it, so its wrap differs from the
+// original only in what the Layer itself configures (USK-1401 R1: a
+// rebuild from OptionsFromLayer alone silently dropped BodyMode).
+func (o WrapOptions) WithLayer(l *http2.Layer) WrapOptions {
+	lo := OptionsFromLayer(l)
+	o.BodySpillDir = lo.BodySpillDir
+	o.BodySpillThreshold = lo.BodySpillThreshold
+	o.MaxBodySize = lo.MaxBodySize
+	return o
 }
 
 // Wrap consumes a single event-granular HTTP/2 stream Channel and returns

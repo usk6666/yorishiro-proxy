@@ -40,6 +40,10 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 		return nil, fmt.Errorf("httpaggregator: EncodeWireBytes: requires *HTTPMessage, got %T", env.Message)
 	}
 
+	if msg.BodyStream != nil {
+		return encodeStreamedHead(env, msg)
+	}
+
 	bodyBytes, err := resolveBodyForEncode(msg)
 	if err != nil {
 		return nil, err
@@ -85,6 +89,24 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// encodeStreamedHead encodes the head of a message whose body is a
+// BodyStream (USK-1401 R22): the body is forwarded while it is read and is
+// not available here, so the result is the HEADERS frame(s) without
+// END_STREAM — the body follows on the wire — with
+// envelope.ErrPartialWireBytes. RecordStep appends the observed DATA
+// payloads and trailer block (RFC-001 §3.2.1).
+func encodeStreamedHead(env *envelope.Envelope, msg *envelope.HTTPMessage) ([]byte, error) {
+	enc := hpack.NewEncoder(defaultEncoderTableSize, true)
+	headerBlock := enc.Encode(buildHeaderFieldsFromMessage(env, msg))
+	var buf bytes.Buffer
+	wr := frame.NewWriter(&buf)
+	const encodeStreamID uint32 = 1
+	if err := writeHeaderBlockEncoded(wr, encodeStreamID, headerBlock, false, wr.MaxFrameSize()); err != nil {
+		return nil, fmt.Errorf("httpaggregator: EncodeWireBytes: write header block: %w", err)
+	}
+	return buf.Bytes(), envelope.ErrPartialWireBytes
 }
 
 // resolveBodyForEncode flattens msg.Body or msg.BodyBuffer into an

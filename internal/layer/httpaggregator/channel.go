@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 
@@ -30,6 +31,10 @@ const (
 	// phaseTerminated is the terminal state (body size exceeded, stream
 	// error, etc.) — Next returns the stored terminal error.
 	phaseTerminated
+	// phaseStreamingBody: the head was emitted with a BodyStream (USK-1401);
+	// the consumer reads the body from the stream until it ended. Next
+	// settles the body before it reads any further event (settleStream).
+	phaseStreamingBody
 )
 
 // aggregatorChannel implements layer.Channel by wrapping an event-granular
@@ -102,6 +107,30 @@ type aggregatorChannel struct {
 	// payload is appended to the body buffer. See
 	// WithH2FrameRecordCallback for the contract.
 	h2FrameCB func(*envelope.Envelope)
+
+	// USK-1401 body streaming. stream is the body of the head emitted in
+	// phaseStreamingBody (nil once Next settled it). probing / probeLimit /
+	// probeLens: a BufferUpTo probe in phaseCollectingBody — the limit and
+	// the length of every DATA event absorbed so far, so a body that
+	// outgrows the limit is replayed at its original DATA boundaries.
+	stream     *h2BodySource
+	probing    bool
+	probeLimit int64
+	probeLens  []int
+	// reqBodyAbandoned: a streamed request body was closed before its end
+	// without being read (a Pipeline Respond / Drop). responseEnded: Send
+	// put END_STREAM on a final response. Together they make Close reset
+	// the request half with NO_ERROR (U2, RFC 9113 §8.1).
+	reqBodyAbandoned bool
+	responseEnded    atomic.Bool
+
+	// U1: a buffered message's body wire bytes (DATA payloads + trailer
+	// block) go to rawBuf — memory up to body_spill_threshold, then a file
+	// — capped at max_record_body_size (rawCut marks the cut) and become
+	// Envelope.RawBuffer; Envelope.Raw stays the HEADERS block.
+	rawBuf *bodybuf.BodyBuffer
+	rawLen int64
+	rawCut bool
 }
 
 // StreamID delegates to the underlying Channel.
@@ -165,8 +194,41 @@ func (a *aggregatorChannel) Err() error {
 // closed so a USK-671 dispatch path watching the inner Closed() signal
 // has already run any terminal-event hook before the dict is cleared.
 func (a *aggregatorChannel) Close() error {
-	a.closeWith(a.inner.Close)
+	a.closeWith(func() error {
+		if a.noErrorResetApplies() {
+			if cc, ok := a.inner.(interface{ CloseWithCode(uint32) error }); ok {
+				return cc.CloseWithCode(http2.ErrCodeNo)
+			}
+		}
+		return a.inner.Close()
+	})
 	return nil
+}
+
+// noErrorResetApplies reports whether Close should reset the stream with
+// NO_ERROR instead of CANCEL (U2): a server-side aggregator that sent a
+// complete response (END_STREAM) while the client's streamed request body
+// was abandoned unread. RFC 9113 §8.1: a server that responds before the
+// request is complete asks the client to stop sending with
+// RST_STREAM(NO_ERROR); the response stays valid. Scoped to exactly that
+// case — every other abnormal close keeps CANCEL.
+func (a *aggregatorChannel) noErrorResetApplies() bool {
+	if a.role != RoleServer || !a.responseEnded.Load() {
+		return false
+	}
+	a.mu.Lock()
+	abandoned := a.reqBodyAbandoned
+	src := a.stream
+	a.mu.Unlock()
+	if !abandoned && src != nil {
+		if res, done := src.bs.Result(); done && errors.Is(res.Err, envelope.ErrBodyStreamClosed) {
+			abandoned = true
+		} else if !done && !src.started.Load() {
+			// Never read and not ended yet: closing it now abandons it.
+			abandoned = true
+		}
+	}
+	return abandoned
 }
 
 // CloseWithCode is Close with the RST_STREAM error code the session wants
@@ -198,12 +260,20 @@ func (a *aggregatorChannel) closeWith(closeInner func() error) {
 			_ = a.bodyBuf.Release()
 			a.bodyBuf = nil
 		}
+		a.releaseRawLocked()
+		src := a.stream
 		flows := a.emittedFlowIDs
 		connID := a.connID
 		a.emittedFlowIDs = nil
 		a.mu.Unlock()
 		close(a.recvDone)
 		_ = closeInner()
+		// A streamed body still open ends here (the inner Channel is
+		// closed, so a Read in flight returns): its producer's resources
+		// are released and its completion callbacks (RecordStep) run.
+		if src != nil {
+			_ = src.bs.Close()
+		}
 		a.releaseTransactionStates(connID, flows)
 	})
 }
@@ -255,6 +325,14 @@ func (a *aggregatorChannel) recordEmittedLocked(env *envelope.Envelope) {
 // runUpgradeWSOverH2.
 func (a *aggregatorChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	a.mu.Lock()
+	if a.phase == phaseStreamingBody {
+		src := a.stream
+		a.mu.Unlock()
+		if stop, err := a.settleStream(ctx, src); stop {
+			return nil, err
+		}
+		a.mu.Lock()
+	}
 	if a.phase == phaseTerminated {
 		err := a.termErr
 		a.mu.Unlock()
@@ -292,13 +370,64 @@ func (a *aggregatorChannel) Next(ctx context.Context) (*envelope.Envelope, error
 		if err != nil {
 			return nil, err
 		}
-		out, done, aggErr := a.absorb(ev)
+		out, done, aggErr := a.absorb(ctx, ev)
 		if aggErr != nil {
 			return nil, aggErr
 		}
 		if done {
 			return out, nil
 		}
+	}
+}
+
+// settleStream ends the streamed body of the last emitted head before Next
+// reads anything else (USK-1401 R6); the aggregator never reads the stream
+// while the body's source may. stop reports that Next returns err:
+//
+//   - the body ended cleanly: stop=false — Next continues with the stream
+//     (whose next event is io.EOF after END_STREAM);
+//   - nobody read the body (the Pipeline answered or dropped the message):
+//     it is closed as abandoned and Next returns io.EOF;
+//   - a consumer is reading it (defensive; the session reads and calls Next
+//     on one goroutine): wait for its end, ctx or Close;
+//   - the body ended with an error (a reset, a cut): Next returns it, so
+//     the session sees the peer's wire code.
+func (a *aggregatorChannel) settleStream(ctx context.Context, src *h2BodySource) (stop bool, err error) {
+	bs := src.bs
+	select {
+	case <-bs.Done():
+	default:
+		if src.started.Load() {
+			select {
+			case <-bs.Done():
+			case <-ctx.Done():
+				return true, ctx.Err()
+			case <-a.recvDone:
+				return true, io.EOF
+			}
+		} else {
+			_ = bs.Close()
+		}
+	}
+	res, _ := bs.Result()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stream == src {
+		a.stream = nil
+	}
+	switch {
+	case res.Err == nil:
+		a.phase = phaseIdle
+		return false, nil
+	case errors.Is(res.Err, envelope.ErrBodyStreamClosed):
+		a.reqBodyAbandoned = a.role == RoleServer
+		a.phase = phaseTerminated
+		a.termErr = nil
+		return true, io.EOF
+	default:
+		a.phase = phaseTerminated
+		a.termErr = res.Err
+		return true, res.Err
 	}
 }
 
@@ -321,15 +450,15 @@ func (a *aggregatorChannel) nextEvent(ctx context.Context) (*envelope.Envelope, 
 // (out, done, err): out is non-nil and done is true when a complete
 // HTTPMessage has been aggregated; err is non-nil on terminal error (body
 // size exceeded, protocol violation).
-func (a *aggregatorChannel) absorb(ev *envelope.Envelope) (*envelope.Envelope, bool, error) {
+func (a *aggregatorChannel) absorb(ctx context.Context, ev *envelope.Envelope) (*envelope.Envelope, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	switch m := ev.Message.(type) {
 	case *http2.H2HeadersEvent:
-		return a.absorbHeaders(ev, m)
+		return a.absorbHeaders(ctx, ev, m)
 	case *http2.H2DataEvent:
-		return a.absorbData(ev, m)
+		return a.absorbData(ctx, ev, m)
 	case *http2.H2TrailersEvent:
 		return a.absorbTrailers(ev, m)
 	default:
@@ -353,7 +482,7 @@ func (a *aggregatorChannel) absorb(ev *envelope.Envelope) (*envelope.Envelope, b
 // bodyless complete messages and the aggregator stays in phaseIdle so the
 // subsequent HEADERS (which may be another 1xx, or the final response) is
 // absorbed as a new initial HEADERS.
-func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2HeadersEvent) (*envelope.Envelope, bool, error) {
+func (a *aggregatorChannel) absorbHeaders(ctx context.Context, env *envelope.Envelope, evt *http2.H2HeadersEvent) (*envelope.Envelope, bool, error) {
 	if a.phase == phaseCollectingBody {
 		// Trailers path should not come through H2HeadersEvent — the Layer
 		// emits H2TrailersEvent for HEADERS-after-DATA. Treat as protocol
@@ -491,12 +620,98 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 		return outEnv, true, nil
 	}
 
-	// Transition to collecting body. rawAcc accumulates the HEADERS block
-	// bytes so the final envelope's Raw reflects headers + DATA bytes.
+	// USK-1401: the body-mode predicate decides here — and only here, where
+	// a body would be collected (1xx, extended CONNECT, SSE 2xx and
+	// END_STREAM HEADERS returned above keep their own handling).
+	return a.openBodyLocked(ctx, outEnv, msg)
+}
+
+// openBodyLocked handles a head whose body follows: the body is buffered
+// (phaseCollectingBody), streamed, or probed up to a limit, as the body-mode
+// predicate decides. The predicate sees exactly the Envelope and head-only
+// Message emitted. Must hold a.mu.
+func (a *aggregatorChannel) openBodyLocked(ctx context.Context, outEnv *envelope.Envelope, msg *envelope.HTTPMessage) (*envelope.Envelope, bool, error) {
+	mode := a.bodyModeLocked(outEnv, msg)
+	switch mode.Kind {
+	case layer.BodyStream:
+		return a.startStreamLocked(ctx, outEnv, msg), true, nil
+	case layer.BodyBufferUpTo:
+		// The probe buffers at most limit+1 bytes into the body buffer,
+		// which max_body_size bounds: clamp so a body over the plugin
+		// limit is streamed, never refused (mirrors HTTP/1.x).
+		limit := min(mode.Limit, a.effectiveMaxBody()-1)
+		if limit < 0 {
+			limit = 0
+		}
+		if n, ok := declaredContentLength(msg.Headers); ok && n > limit {
+			return a.startStreamLocked(ctx, outEnv, msg), true, nil
+		}
+		a.probing = true
+		a.probeLimit = limit
+		a.probeLens = nil
+	}
+
+	// Transition to collecting body. Envelope.Raw stays the HEADERS block;
+	// the body's wire bytes go to rawBuf (U1).
 	a.inflight = outEnv
 	a.inflightMsg = msg
 	a.phase = phaseCollectingBody
 	return nil, false, nil
+}
+
+// bodyModeLocked consults the body-mode predicate for a head that opens a
+// body. A classic (non-extended) CONNECT request carries tunnel bytes as
+// its body and is always buffered, as before (R4).
+func (a *aggregatorChannel) bodyModeLocked(env *envelope.Envelope, msg *envelope.HTTPMessage) layer.BodyMode {
+	if a.opts.BodyMode == nil {
+		return layer.Buffer()
+	}
+	if env.Direction == envelope.Send && msg.Method == "CONNECT" {
+		return layer.Buffer()
+	}
+	return a.opts.BodyMode(env, msg)
+}
+
+// startStreamLocked emits outEnv with a BodyStream reading the rest of the
+// stream (USK-1401). The source's read context derives from the Next that
+// emitted the head; its Finish cancels it. Must hold a.mu.
+func (a *aggregatorChannel) startStreamLocked(ctx context.Context, outEnv *envelope.Envelope, msg *envelope.HTTPMessage) *envelope.Envelope {
+	sctx, cancel := context.WithCancel(ctx)
+	src := &h2BodySource{
+		inner:   a.inner,
+		ctx:     sctx,
+		cancel:  cancel,
+		cb:      a.h2FrameCB,
+		headCtx: outEnv.Context,
+	}
+	src.bs = envelope.NewBodyStream(src)
+	msg.BodyStream = src.bs
+	msg.Body = nil
+	msg.BodyBuffer = nil
+	a.stream = src
+	a.phase = phaseStreamingBody
+	a.recordEmittedLocked(outEnv)
+	return outEnv
+}
+
+// streamFromProbeLocked turns a BufferUpTo probe that outgrew its limit
+// into a streamed body: the head is emitted now, the probed DATA payloads
+// are replayed at their recorded lengths, then pending (the event that took
+// the probe over the limit), then the live stream. The probe's body buffer
+// moves to the source; its raw capture is dropped (the replay reports the
+// same bytes). Must hold a.mu.
+func (a *aggregatorChannel) streamFromProbeLocked(ctx context.Context, pending *envelope.Envelope) *envelope.Envelope {
+	out, msg := a.inflight, a.inflightMsg
+	prefix, lens := a.bodyBuf, a.probeLens
+	a.bodyBuf, a.bodyLen = nil, 0
+	a.probing, a.probeLens = false, nil
+	a.releaseRawLocked()
+	a.inflight, a.inflightMsg = nil, nil
+	a.startStreamLocked(ctx, out, msg)
+	a.stream.prefixBuf = prefix
+	a.stream.prefixLens = lens
+	a.stream.pendingEv = pending
+	return out
 }
 
 // isInformationalStatus reports whether code is a 1xx informational status
@@ -581,7 +796,7 @@ func isSSEResponseHeaders(env *envelope.Envelope, evt *http2.H2HeadersEvent) boo
 // H2DataEvent (including empty END_STREAM frames) regardless of whether
 // the payload length triggers the MaxBodySize gate; the wire envelope is
 // always recorded.
-func (a *aggregatorChannel) absorbData(env *envelope.Envelope, evt *http2.H2DataEvent) (*envelope.Envelope, bool, error) {
+func (a *aggregatorChannel) absorbData(ctx context.Context, env *envelope.Envelope, evt *http2.H2DataEvent) (*envelope.Envelope, bool, error) {
 	if a.phase != phaseCollectingBody || a.inflight == nil {
 		if len(evt.Payload) == 0 && evt.EndStream {
 			// Defensive: an empty END_STREAM DATA with no prior HEADERS is
@@ -590,6 +805,13 @@ func (a *aggregatorChannel) absorbData(env *envelope.Envelope, evt *http2.H2Data
 			return nil, false, fmt.Errorf("httpaggregator: DATA without HEADERS (stream %s)", env.StreamID)
 		}
 		return nil, false, fmt.Errorf("httpaggregator: DATA in phase %d (stream %s)", a.phase, env.StreamID)
+	}
+
+	// USK-1401 R21: a BufferUpTo probe that this event would take over its
+	// limit becomes a streamed body; the event is delivered by the source
+	// (which fires its overlay row), so it is not absorbed here.
+	if a.probing && a.bodyLen+int64(len(evt.Payload)) > a.probeLimit {
+		return a.streamFromProbeLocked(ctx, env), true, nil
 	}
 
 	// USK-897: fire the per-H2DataEvent wire-record callback BEFORE any
@@ -625,14 +847,16 @@ func (a *aggregatorChannel) absorbData(env *envelope.Envelope, evt *http2.H2Data
 		}
 		a.bodyLen = newLen
 	}
+	if a.probing {
+		a.probeLens = append(a.probeLens, len(evt.Payload))
+	}
 
-	// Accumulate raw bytes so the final Envelope.Raw reflects the wire
-	// shape (HEADERS block + concatenated DATA payloads + trailer HEADERS
-	// block). Required for RFC-001 MITM wire-fidelity (raw bytes recording
-	// must include DATA payloads for analysts reconstructing the wire).
-	// For 25+ MiB bodies this doubles memory briefly; Pipeline's variant
-	// snapshot + RecordStep consume the Raw then release it.
-	a.inflight.Raw = append(a.inflight.Raw, env.Raw...)
+	// Raw bytes recording (RFC-001 MITM wire fidelity: DATA payloads must be
+	// recorded for analysts reconstructing the wire). U1: they go to the
+	// raw capture buffer — spilled past body_spill_threshold and capped at
+	// max_record_body_size — not to Envelope.Raw, so a large body is not
+	// held twice in RAM.
+	a.appendRawLocked(evt.Payload)
 
 	if evt.EndStream {
 		// Finalize body onto HTTPMessage: memory mode → msg.Body,
@@ -661,7 +885,7 @@ func (a *aggregatorChannel) absorbTrailers(env *envelope.Envelope, evt *http2.H2
 	if len(evt.Anomalies) > 0 {
 		a.inflightMsg.Anomalies = append(a.inflightMsg.Anomalies, cloneAnomalies(evt.Anomalies)...)
 	}
-	a.inflight.Raw = append(a.inflight.Raw, env.Raw...)
+	a.appendRawLocked(env.Raw)
 	a.finalizeBodyLocked()
 	out := a.inflight
 	a.recordEmittedLocked(out)
@@ -719,6 +943,7 @@ func (a *aggregatorChannel) appendBodyLocked(payload []byte) error {
 // inflight HTTPMessage per the standard contract (empty → nil, memory →
 // Body, file → BodyBuffer). Must hold a.mu.
 func (a *aggregatorChannel) finalizeBodyLocked() {
+	a.finalizeRawLocked()
 	msg := a.inflightMsg
 	if a.bodyBuf == nil {
 		msg.Body = nil
@@ -761,6 +986,84 @@ func (a *aggregatorChannel) resetLocked() {
 	a.inflightMsg = nil
 	a.bodyBuf = nil
 	a.bodyLen = 0
+	a.probing = false
+	a.probeLens = nil
+	a.releaseRawLocked()
+}
+
+// rawCap is the raw capture bound (max_record_body_size).
+func (a *aggregatorChannel) rawCap() int64 {
+	if a.opts.MaxRecordBodySize > 0 {
+		return a.opts.MaxRecordBodySize
+	}
+	return config.MaxBodySize
+}
+
+// appendRawLocked adds wire bytes of the in-flight body to the raw capture
+// (U1): memory up to body_spill_threshold, then a spill file; at most rawCap
+// bytes are kept (the leading ones) and a cut is remembered for
+// AnomalyRawBodyTruncated. Forwarding never depends on it. Must hold a.mu.
+func (a *aggregatorChannel) appendRawLocked(p []byte) {
+	if a.rawCut || len(p) == 0 {
+		return
+	}
+	room := a.rawCap() - a.rawLen
+	if int64(len(p)) > room {
+		if room < 0 {
+			room = 0
+		}
+		p = p[:room]
+		a.rawCut = true
+	}
+	if len(p) == 0 {
+		return
+	}
+	if a.rawBuf == nil {
+		a.rawBuf = bodybuf.NewMemory(nil)
+	}
+	if _, err := a.rawBuf.Write(p); err != nil {
+		slog.Warn("httpaggregator: raw body capture write failed; recording is cut here",
+			"stream_id", a.inner.StreamID(), "err", err)
+		a.rawCut = true
+		return
+	}
+	a.rawLen += int64(len(p))
+	if !a.rawBuf.IsFileBacked() && a.rawBuf.Len() > a.effectiveSpillThreshold() {
+		if err := a.rawBuf.PromoteToFile(a.opts.BodySpillDir, config.BodySpillPrefix, 0); err != nil {
+			slog.Warn("httpaggregator: promote raw body capture to file failed; staying in memory",
+				"stream_id", a.inner.StreamID(), "err", err)
+		}
+	}
+}
+
+// finalizeRawLocked moves the raw capture onto the in-flight envelope as
+// Envelope.RawBuffer (the Layer-owned reference the session backstop
+// releases) and marks a capture cut. Must hold a.mu.
+func (a *aggregatorChannel) finalizeRawLocked() {
+	if a.rawBuf != nil {
+		if a.rawBuf.Len() > 0 && a.inflight != nil {
+			a.inflight.RawBuffer = a.rawBuf
+		} else {
+			_ = a.rawBuf.Release()
+		}
+		a.rawBuf = nil
+	}
+	if a.rawCut && a.inflightMsg != nil {
+		a.inflightMsg.Anomalies = append(a.inflightMsg.Anomalies, envelope.Anomaly{
+			Type:   envelope.AnomalyRawBodyTruncated,
+			Detail: fmt.Sprintf("RawBody capped at %d bytes", a.rawCap()),
+		})
+	}
+	a.rawLen, a.rawCut = 0, false
+}
+
+// releaseRawLocked drops an unfinished raw capture. Must hold a.mu.
+func (a *aggregatorChannel) releaseRawLocked() {
+	if a.rawBuf != nil {
+		_ = a.rawBuf.Release()
+		a.rawBuf = nil
+	}
+	a.rawLen, a.rawCut = 0, false
 }
 
 // terminateLocked transitions to phaseTerminated with err as the terminal
@@ -772,6 +1075,8 @@ func (a *aggregatorChannel) terminateLocked(err error) {
 		_ = a.bodyBuf.Release()
 		a.bodyBuf = nil
 	}
+	a.releaseRawLocked()
+	a.probing, a.probeLens = false, nil
 	a.inflight = nil
 	a.inflightMsg = nil
 }

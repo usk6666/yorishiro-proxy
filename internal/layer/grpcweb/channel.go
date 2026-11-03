@@ -307,7 +307,16 @@ func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 			return nil, se
 		}
 
-		if err := c.refillFromHTTPMessage(ctx, env, httpMsg); err != nil {
+		err = c.refillFromHTTPMessage(ctx, env, httpMsg)
+		// The inbound message's body wire capture (Envelope.RawBuffer: the
+		// HTTP/2 aggregator's raw capture, USK-1401 U1, or an HTTP/1.x
+		// parser spill) never reaches the session, which only sees the
+		// gRPC-Web envelopes built from it; release it here.
+		if env.RawBuffer != nil {
+			_ = env.RawBuffer.Release()
+			env.RawBuffer = nil
+		}
+		if err != nil {
 			c.terminate(err)
 			return nil, err
 		}

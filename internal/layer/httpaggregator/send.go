@@ -2,6 +2,7 @@ package httpaggregator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -64,6 +65,12 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 	if !ok {
 		return fmt.Errorf("httpaggregator: Send requires *HTTPMessage, got %T", env.Message)
 	}
+	if msg.BodyStream != nil {
+		// USK-1401: Send owns a streamed body from here and closes it on
+		// every exit (a no-op once it ended), so its producer is released
+		// even when the HEADERS write fails.
+		defer msg.BodyStream.Close()
+	}
 	warnRawWinsIgnored(ctx, env)
 
 	// USK-833: capture the paired request line on the upstream-side
@@ -75,16 +82,12 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 	// path/method checks on the response side via the knowable=false path
 	// in effectivePathAndMethod.
 	if env.Direction == envelope.Send {
-		a.mu.Lock()
-		a.pairedRequestPath = msg.Path
-		a.pairedRequestMethod = msg.Method
-		a.pairedRequestRawQuery = msg.RawQuery
-		a.pairedRequestAuthority = msg.Authority
-		a.mu.Unlock()
+		a.capturePairedRequest(msg)
 	}
 
 	hasBody := len(msg.Body) > 0 || msg.BodyBuffer != nil || msg.BodyStream != nil
-	hasTrailers := len(msg.Trailers) > 0
+	// A streamed body's trailers come from the stream itself.
+	hasTrailers := len(msg.Trailers) > 0 && msg.BodyStream == nil
 	isInformational := isInformationalStatus(msg.Status)
 
 	endStream := !isInformational && !hasBody && !hasTrailers
@@ -133,7 +136,39 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 	if err := a.inner.Send(ctx, hdrEnv); err != nil {
 		return err
 	}
+	if endStream {
+		a.noteSentEnd(env, msg)
+	}
 
+	// 2'. A streamed body (USK-1401): forwarded event by event; its end
+	// (END_STREAM or trailers) comes from the stream.
+	if msg.BodyStream != nil {
+		ended, err := a.sendStreamedBody(ctx, env, msg.BodyStream)
+		if err != nil {
+			return err
+		}
+		if ended {
+			a.noteSentEnd(env, msg)
+		}
+		return nil
+	}
+	return a.sendBodyAndTrailers(ctx, env, msg, hasBody, hasTrailers)
+}
+
+// capturePairedRequest records the request line a RoleClient aggregator
+// sends so the matching response carries it (USK-833 / USK-1199).
+func (a *aggregatorChannel) capturePairedRequest(msg *envelope.HTTPMessage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.pairedRequestPath = msg.Path
+	a.pairedRequestMethod = msg.Method
+	a.pairedRequestRawQuery = msg.RawQuery
+	a.pairedRequestAuthority = msg.Authority
+}
+
+// sendBodyAndTrailers sends a buffered body as DATA event(s) (2.) and the
+// trailers (3.) after the HEADERS.
+func (a *aggregatorChannel) sendBodyAndTrailers(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage, hasBody, hasTrailers bool) error {
 	// 2. DATA event(s).
 	if hasBody {
 		if err := a.sendBody(ctx, env, msg, !hasTrailers); err != nil {
@@ -146,21 +181,108 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 		tEvt := &http2.H2TrailersEvent{
 			Trailers: cloneKVs(msg.Trailers),
 		}
-		tEnv := &envelope.Envelope{
-			StreamID:  env.StreamID,
-			FlowID:    env.FlowID,
-			Sequence:  env.Sequence,
-			Direction: env.Direction,
-			Protocol:  envelope.ProtocolHTTP,
-			Message:   tEvt,
-			Context:   env.Context,
-		}
-		if err := a.inner.Send(ctx, tEnv); err != nil {
+		if err := a.inner.Send(ctx, eventEnvelope(env, tEvt)); err != nil {
 			return err
 		}
 	}
-
+	if hasBody || hasTrailers {
+		a.noteSentEnd(env, msg)
+	}
 	return nil
+}
+
+// noteSentEnd records that Send put END_STREAM on a final response, which
+// ends the exchange from the client's view (U2: see noErrorResetApplies).
+func (a *aggregatorChannel) noteSentEnd(env *envelope.Envelope, msg *envelope.HTTPMessage) {
+	if env.Direction == envelope.Receive && !isInformationalStatus(msg.Status) {
+		a.responseEnded.Store(true)
+	}
+}
+
+// eventEnvelope wraps an h2 event with env's identity for the inner Send.
+func eventEnvelope(env *envelope.Envelope, m envelope.Message) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  env.StreamID,
+		FlowID:    env.FlowID,
+		Sequence:  env.Sequence,
+		Direction: env.Direction,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   m,
+		Context:   env.Context,
+	}
+}
+
+// sendStreamedBody forwards a streamed body after its HEADERS (USK-1401
+// R8). For a body another aggregator produced, every event its source pulls
+// from the producing stream is forwarded as it is read: one DATA event per
+// DATA frame received (the writer splits only at the peer's
+// MAX_FRAME_SIZE / window, never coalesces), END_STREAM as received, and
+// trailers after the last DATA. ended reports that the body ended with
+// END_STREAM sent.
+//
+// A producer-side end before END_STREAM (the producing peer reset the
+// stream or its connection dropped) ends the body, not the Send: the DATA
+// received was forwarded, no END_STREAM is sent, and Send returns nil. The
+// producing aggregator's next Next reports the error, so the session resets
+// this stream with the producer's code (R13 / R14). A forward error or a
+// cancellation is returned.
+func (a *aggregatorChannel) sendStreamedBody(ctx context.Context, env *envelope.Envelope, bs *envelope.BodyStream) (ended bool, err error) {
+	src, ok := bs.Source().(*h2BodySource)
+	if !ok {
+		return a.sendForeignStream(ctx, env, bs)
+	}
+	src.forwardTo(func(m envelope.Message) error {
+		return a.inner.Send(ctx, eventEnvelope(env, m))
+	})
+	buf := make([]byte, streamReadBufSize)
+	for {
+		_, rerr := bs.Read(buf)
+		if ferr := src.forwardErr(); ferr != nil {
+			return false, fmt.Errorf("httpaggregator: forward streamed body: %w", ferr)
+		}
+		if rerr == nil {
+			continue
+		}
+		if errors.Is(rerr, io.EOF) {
+			return true, nil
+		}
+		if res, _ := bs.Result(); res.Truncated {
+			return false, nil
+		}
+		return false, fmt.Errorf("httpaggregator: read streamed body: %w", rerr)
+	}
+}
+
+// sendForeignStream sends a BodyStream another protocol produced (R23; no
+// live path pairs one with HTTP/2 today). Its wire bytes are not HTTP/2, so
+// it is re-framed semantically: one DATA event per Read (never collected
+// into larger chunks), Envelope.Raw never written, the BodyResult's
+// trailers after the last DATA, else an empty END_STREAM DATA.
+func (a *aggregatorChannel) sendForeignStream(ctx context.Context, env *envelope.Envelope, bs *envelope.BodyStream) (bool, error) {
+	buf := make([]byte, streamReadBufSize)
+	for {
+		n, rerr := bs.Read(buf)
+		if n > 0 {
+			payload := append([]byte(nil), buf[:n]...)
+			if err := a.inner.Send(ctx, eventEnvelope(env, &http2.H2DataEvent{Payload: payload})); err != nil {
+				return false, err
+			}
+		}
+		if rerr == nil {
+			continue
+		}
+		if !errors.Is(rerr, io.EOF) {
+			if res, _ := bs.Result(); res.Truncated {
+				return false, nil
+			}
+			return false, fmt.Errorf("httpaggregator: read streamed body: %w", rerr)
+		}
+		res, _ := bs.Result()
+		if len(res.Trailers) > 0 {
+			return true, a.inner.Send(ctx, eventEnvelope(env, &http2.H2TrailersEvent{Trailers: cloneKVs(res.Trailers)}))
+		}
+		return true, a.inner.Send(ctx, eventEnvelope(env, &http2.H2DataEvent{EndStream: true}))
+	}
 }
 
 // sendBody emits the body as one or more H2DataEvent envelopes. The final
@@ -180,11 +302,6 @@ func (a *aggregatorChannel) sendBody(ctx context.Context, env *envelope.Envelope
 		}
 		defer r.Close()
 		return a.streamBodyFromReader(ctx, env, r, endStreamOnFinal)
-	}
-
-	// Explicit BodyStream (future streaming path).
-	if msg.BodyStream != nil {
-		return a.streamBodyFromReader(ctx, env, msg.BodyStream, endStreamOnFinal)
 	}
 
 	return nil

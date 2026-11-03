@@ -327,10 +327,8 @@ func runTCPForwardH2Loop(
 	sessOpts := tcpForwardH2SessionOpts(parentStack, ctx, logger)
 	grpcOpts := connector.GRPCOptionsFromBuildConfig(parentStack.BuildConfig)
 	grpcwebOpts := connector.GRPCWebOptionsFromBuildConfig(parentStack.BuildConfig)
-	clientLOpts := httpaggregator.OptionsFromLayer(clientL)
-	clientLOpts.StateReleaser = parentStack.PluginV2Engine
-	upstreamLOpts := httpaggregator.OptionsFromLayer(upstreamH2)
-	upstreamLOpts.StateReleaser = parentStack.PluginV2Engine
+	clientLOpts, upstreamLOpts := h2AggregatorOptions(clientL, upstreamH2, parentStack.PluginV2Engine,
+		parentStack.BuildConfig, 0)
 
 	// USK-1165: redial machinery shared with the CONNECT path. rctx bounds
 	// the pre-warm worker (and any pre-warm dial in flight) to this loop;
@@ -449,8 +447,7 @@ func dispatchForwardH2Stream(
 		// per-stream wrap (mirrors buildOnHTTP2Stack).
 		lopts := upstreamLOpts
 		if upL != upstream.chain0 {
-			lopts = httpaggregator.OptionsFromLayer(upL)
-			lopts.StateReleaser = parentStack.PluginV2Engine
+			lopts = upstreamLOpts.WithLayer(upL)
 		}
 		var reqProto envelope.Protocol
 		if env != nil {
