@@ -232,6 +232,13 @@ func (l *Layer) halfCloseAndLinger() {
 // received were written, the upstream's write side is half-closed so it
 // sees the same end of the request, and the response keeps flowing. The
 // upstream connection carries no further exchange.
+//
+// An early final response (USK-1415): an upstream that answered and then
+// closed or reset the connection fails the body write with an error
+// matching layer.ErrUpstreamStoppedReadingBody (wrapSendBodyStaleErr), which
+// ends only the request direction; a non-reusable final response written to
+// the client mid-body stops the forwarding (stopRequestBodyAfterResponse)
+// and Send returns nil.
 func (c *channel) sendRequestStreamed(ctx context.Context, msg *envelope.HTTPMessage, env *envelope.Envelope, opaque *opaqueHTTP1) error {
 	bs := msg.BodyStream
 	src, ok := bs.Source().(*h1BodySource)
@@ -257,6 +264,7 @@ func (c *channel) sendRequestStreamed(ctx context.Context, msg *envelope.HTTPMes
 	stop := context.AfterFunc(ctx, func() { _ = bs.Close() })
 	defer stop()
 	src.forwardTo(bw)
+	src.setForwardLayer(c.layer)
 	err = c.forwardRequestBody(bs, src, msg, opaque)
 	if err != nil {
 		// Part of the body may be on the upstream wire: the connection is
@@ -274,6 +282,9 @@ func (c *channel) forwardRequestBody(bs *envelope.BodyStream, src *h1BodySource,
 	for {
 		_, rerr := bs.Read(buf)
 		if ferr := src.flushForward(); ferr != nil {
+			if src.forwardingStopped() {
+				return c.endStoppedForwarding()
+			}
 			return wrapSendBodyStaleErr(fmt.Errorf("http1: send request body: %w", ferr), msg, opaque)
 		}
 		if rerr == nil {
@@ -281,6 +292,9 @@ func (c *channel) forwardRequestBody(bs *envelope.BodyStream, src *h1BodySource,
 		}
 		if errors.Is(rerr, io.EOF) {
 			return nil
+		}
+		if src.forwardingStopped() {
+			return c.endStoppedForwarding()
 		}
 		if res, _ := bs.Result(); res.Truncated {
 			c.layer.markDead("client closed mid-body; upstream write side closed", res.Err)
@@ -291,4 +305,97 @@ func (c *channel) forwardRequestBody(bs *envelope.BodyStream, src *h1BodySource,
 		}
 		return fmt.Errorf("http1: send request body: %w", rerr)
 	}
+}
+
+// endStoppedForwarding ends a streamed request Send whose forwarding was
+// stopped by stopForwarding (USK-1415 U-1): the upstream connection,
+// declared non-reusable by the final response the client already got, is
+// mid-request and carries no further exchange. The request direction ends
+// cleanly (nil), like a client cut: the response was delivered.
+func (c *channel) endStoppedForwarding() error {
+	c.layer.markDead("request body forwarding stopped after a non-reusable final response", nil)
+	return nil
+}
+
+// setForwardLayer records l as the upstream Layer the request body is
+// written to. A stop that came first (the client got the response while
+// the head was being written) arms the write deadline now.
+func (s *h1BodySource) setForwardLayer(l *Layer) {
+	s.stopMu.Lock()
+	defer s.stopMu.Unlock()
+	s.fwdLayer = l
+	if s.stopped {
+		_ = l.conn.SetWriteDeadline(time.Now())
+	}
+}
+
+// forwardingStopped reports whether stopForwarding ran.
+func (s *h1BodySource) forwardingStopped() bool {
+	s.stopMu.Lock()
+	defer s.stopMu.Unlock()
+	return s.stopped
+}
+
+// stopForwarding stops forwarding a streamed request body (USK-1415 U-1).
+// It runs on the client Channel's goroutine, concurrently with the
+// upstream Send reading the body: the upstream Layer is marked dead, a
+// write blocked on its conn is unblocked by an immediate write deadline
+// (the connection is being retired anyway), and the body is closed
+// unread, which unblocks a read waiting on the client and, through
+// finishRequest, ends the client connection after this exchange. The
+// Send then returns nil (endStoppedForwarding).
+func (s *h1BodySource) stopForwarding() {
+	s.stopMu.Lock()
+	s.stopped = true
+	l := s.fwdLayer
+	s.stopMu.Unlock()
+	if l != nil {
+		l.markDead("request body forwarding stopped after a non-reusable final response", nil)
+		_ = l.conn.SetWriteDeadline(time.Now())
+	}
+	_ = s.bs.Close()
+}
+
+// stopRequestBodyAfterResponse runs on a client-facing Channel after it
+// wrote the response msg / env to the client (USK-1415 U-1). While this
+// exchange's streamed request body is still being forwarded, a final
+// response that makes the upstream connection non-reusable — the
+// upstream's own HTTP/1.x response with Connection: close, or HTTP/1.0
+// without keep-alive (parser.RawResponse.Close, the parser's rule) — stops
+// the forwarding: the upstream has declared it is done with the
+// connection. A reusable early response keeps the forwarding going: the
+// upstream may still read the body, and early-response / CL.0 desync
+// testing needs it sent whole. A response that is not the upstream's
+// HTTP/1.x response (synthetic, HTTP/2 upstream) never stops it.
+//
+// A known race: a Content-Length body returns its last bytes without an
+// error and ends (Done) only on the next read, so a Connection: close
+// final response written in the gap between those last bytes being
+// flushed upstream and that EOF read stops a body that was in fact fully
+// read; the client connection is then ended instead of kept alive. The
+// cost is one client reconnect; recording is unaffected.
+func (c *channel) stopRequestBodyAfterResponse(msg *envelope.HTTPMessage, env *envelope.Envelope) {
+	if msg.Status < 200 {
+		return
+	}
+	opaque, _ := env.Opaque.(*opaqueHTTP1)
+	if opaque == nil || opaque.rawResp == nil || !opaque.rawResp.Close {
+		return
+	}
+	bs := c.bodyStream.Load()
+	if bs == nil {
+		return
+	}
+	select {
+	case <-bs.Done():
+		return
+	default:
+	}
+	src, ok := bs.Source().(*h1BodySource)
+	if !ok {
+		return
+	}
+	slog.Debug("http1: non-reusable final response written mid request body; stopping the forwarding",
+		"stream_id", c.layer.streamID, "status", msg.Status)
+	src.stopForwarding()
 }

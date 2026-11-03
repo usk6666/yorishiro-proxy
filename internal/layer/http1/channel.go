@@ -134,7 +134,9 @@ var replaySafeMethods = map[string]struct{}{
 // is wire-byte equivalent. A streamed body (HTTPMessage.BodyStream,
 // USK-1414) is one-shot, but stage "header" means no byte of it was read:
 // the failed Send left it untouched, so the replay sends it whole. Once a
-// body byte was read the stage is "body" and the answer is false.
+// body byte was read the stage is "body" and the answer is false — also
+// when the upstream stopped reading the body after answering early
+// (USK-1415): its response is delivered instead of replaying the request.
 func isReplaySafe(msg *envelope.HTTPMessage, opaque *opaqueHTTP1, stage string) bool {
 	if stage == "body" {
 		return false
@@ -173,11 +175,22 @@ func wrapStaleErr(err error, msg *envelope.HTTPMessage, opaque *opaqueHTTP1, sta
 }
 
 // wrapSendBodyStaleErr applies stale-conn classification to an error
-// returned by writeOpaqueBody / writeBody on the request-Send path. The
-// inner write helpers already wrap with fmt.Errorf("http1: …: %w", err),
-// so isStaleConnErr unwraps through that wrap to reach the syscall
+// returned by a body write on the request-Send path (writeOpaqueBody /
+// writeBody, and the streamed path's forward flush). The inner write
+// helpers already wrap with fmt.Errorf("http1: …: %w", err), so
+// isStaleConnErr unwraps through that wrap to reach the syscall
 // sentinels. ReplaySafe is forced false (stage="body") — any body byte
 // already on the wire desynchronises persistent connections.
+//
+// USK-1415: a failure the peer caused — EPIPE or ECONNRESET: the upstream
+// closed or reset the connection after reading the head, typically after
+// answering early (413) — is additionally marked
+// layer.ErrUpstreamStoppedReadingBody, composed here and only here, so
+// errors.Is(err, layer.ErrUpstreamStoppedReadingBody) and errors.As to the
+// *StaleUpstreamError both hold. The session then ends only the request
+// direction and the response the upstream sent is still delivered.
+// net.ErrClosed (the proxy's own teardown) and io.EOF stay plain stale
+// errors.
 //
 // When the original error is not a stale sentinel, the wrapped error is
 // returned verbatim so the regular session error path is unchanged.
@@ -188,11 +201,15 @@ func wrapSendBodyStaleErr(err error, msg *envelope.HTTPMessage, opaque *opaqueHT
 	if !isStaleConnErr(err) {
 		return err
 	}
-	return &StaleUpstreamError{
+	stale := &StaleUpstreamError{
 		Underlying: err,
 		ReplaySafe: isReplaySafe(msg, opaque, "body"),
 		Stage:      "body",
 	}
+	if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
+		return fmt.Errorf("%w: %w", layer.ErrUpstreamStoppedReadingBody, stale)
+	}
+	return stale
 }
 
 // opaqueHTTP1 holds Layer-specific data stored in Envelope.Opaque.
@@ -937,7 +954,11 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 	switch c.direction {
 	case envelope.Send:
 		// Server-facing layer: Next parsed a request, Send writes the response.
-		return c.sendResponse(msg, env)
+		if err := c.sendResponse(msg, env); err != nil {
+			return err
+		}
+		c.stopRequestBodyAfterResponse(msg, env)
+		return nil
 	case envelope.Receive:
 		// Upstream-facing layer: Next parses responses, Send writes the request.
 		return c.sendRequest(ctx, msg, env)
@@ -1950,6 +1971,7 @@ func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTT
 		return fmt.Errorf("http1: %s: %w", what, wrapStaleErr(err, msg, opaque, "header"))
 	}
 	if err := c.writeOpaqueBody(msg, rawReq.RawBody, rawReq.RawBodyBuffer, d.useRawBody, "request"); err != nil {
+		c.layer.markDead("request body write failed mid-send", err)
 		return wrapSendBodyStaleErr(err, msg, opaque)
 	}
 	return nil
@@ -2031,6 +2053,7 @@ func (c *channel) sendRequestSynthetic(msg *envelope.HTTPMessage) error {
 	}
 
 	if err := c.writeBody(msg); err != nil {
+		c.layer.markDead("request body write failed mid-send", err)
 		return wrapSendBodyStaleErr(err, msg, nil)
 	}
 	return nil

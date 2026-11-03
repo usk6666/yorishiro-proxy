@@ -3,6 +3,7 @@ package proxybuild
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -291,6 +292,42 @@ func TestH1Retry_Metrics_WriteEpipe_NonReplaySafe_Body(t *testing.T) {
 	if snap.ReplayFailNonidempotent != 0 {
 		t.Errorf("replay_fail_nonidempotent = %d, want 0 (Stage=body should NOT count as header)",
 			snap.ReplayFailNonidempotent)
+	}
+}
+
+// TestH1Retry_Metrics_UpstreamStoppedReadingBody (USK-1415 T7): the
+// body-stage error an upstream that stopped reading the request body
+// produces — layer.ErrUpstreamStoppedReadingBody composed with the
+// body-stage StaleUpstreamError — is counted like any body-stage stale
+// write, never replayed, and surfaced with the sentinel intact so the
+// session can end only the request direction.
+func TestH1Retry_Metrics_UpstreamStoppedReadingBody(t *testing.T) {
+	t.Parallel()
+	m := NewH1UpstreamMetrics()
+	chain := &h1Chain{metrics: m}
+	stale := &http1.StaleUpstreamError{
+		Underlying: syscall.ECONNRESET,
+		ReplaySafe: false,
+		Stage:      "body",
+	}
+	stub := &h1MetricsStub{sendErr: fmt.Errorf("%w: %w", layer.ErrUpstreamStoppedReadingBody, stale)}
+	wrapper := newRetryingUpstreamChannel(stub, chain, func(c layer.Channel) layer.Channel { return c },
+		discardLogger(), "127.0.0.1:0", m)
+
+	err := wrapper.Send(context.Background(), newSendEnv())
+	if !errors.Is(err, layer.ErrUpstreamStoppedReadingBody) {
+		t.Fatalf("Send = %v, want an error matching layer.ErrUpstreamStoppedReadingBody", err)
+	}
+	var got *http1.StaleUpstreamError
+	if !errors.As(err, &got) || got.Stage != "body" {
+		t.Errorf("Send = %v, want the body-stage StaleUpstreamError reachable", err)
+	}
+	snap := m.Snapshot()
+	if snap.WriteEpipe != 1 || snap.ReplayFailBodyConsumed != 1 {
+		t.Errorf("write_epipe = %d, replay_fail_body_consumed = %d, want 1 and 1", snap.WriteEpipe, snap.ReplayFailBodyConsumed)
+	}
+	if snap.RedialWriteEpipe != 0 || wrapper.retried.Load() {
+		t.Errorf("redial_write_epipe = %d, retried = %v; want no redial", snap.RedialWriteEpipe, wrapper.retried.Load())
 	}
 }
 
